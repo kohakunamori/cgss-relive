@@ -18,6 +18,7 @@ from .bootstrap_core import (
     process_load_title_request,
 )
 from .load_check import FINAL_RESOURCE_VERSION
+from .minimal_profile import build_minimal_load_index_data
 
 MAX_REQUEST_BODY = 8 * 1024 * 1024
 
@@ -129,12 +130,25 @@ def main() -> int:
         type=Path,
         help="local JSON object used as /load/index data; proprietary profiles must stay uncommitted",
     )
+    parser.add_argument(
+        "--experimental-minimal-load-index",
+        action="store_true",
+        help="use the synthetic statically-derived 11.6.3 minimal /load/index profile",
+    )
+    parser.add_argument("--viewer-id", type=int, default=1, help="viewer id for the experimental synthetic profile")
+    parser.add_argument(
+        "--producer-name",
+        default="Relive Producer",
+        help="producer name for the experimental synthetic profile",
+    )
     parser.add_argument("--cert", help="PEM certificate chain for HTTPS")
     parser.add_argument("--key", help="PEM private key for HTTPS")
     args = parser.parse_args()
 
     if bool(args.cert) != bool(args.key):
         parser.error("--cert and --key must be supplied together")
+    if args.load_index_profile and args.experimental_minimal_load_index:
+        parser.error("--load-index-profile and --experimental-minimal-load-index are mutually exclusive")
 
     load_index_data = None
     if args.load_index_profile:
@@ -142,6 +156,11 @@ def main() -> int:
             load_index_data = _load_profile(args.load_index_profile)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             parser.error(f"failed to load --load-index-profile: {exc}")
+    elif args.experimental_minimal_load_index:
+        load_index_data = build_minimal_load_index_data(
+            viewer_id=args.viewer_id,
+            producer_name=args.producer_name,
+        )
 
     httpd = create_server(
         args.host,
