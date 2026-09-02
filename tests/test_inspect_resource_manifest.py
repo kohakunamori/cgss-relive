@@ -20,16 +20,16 @@ class ResourceManifestTests(unittest.TestCase):
         path = root / "manifest_10133800.db"
         conn = sqlite3.connect(path)
         try:
-            conn.execute("CREATE TABLE manifests (name TEXT, hash TEXT)")
+            conn.execute("CREATE TABLE manifests (name TEXT, hash TEXT, category TEXT)")
             rows = [
-                ("card_1.unity3d", "0" * 32),
-                ("v/card_1.acb", "1" * 32),
-                ("movie001.usm", "2" * 32),
-                ("musicscores_m001.bdb", "3" * 32),
-                ("master.mdb", "4" * 32),
-                ("future.unknown", "5" * 32),
+                ("card_1.unity3d", "0" * 32, "asset"),
+                ("v/card_1.acb", "1" * 32, "sound"),
+                ("movie001.usm", "2" * 32, "movie"),
+                ("musicscores_m001.bdb", "3" * 32, "generic"),
+                ("master.mdb", "4" * 32, "generic"),
+                ("future.unknown", "5" * 32, "future"),
             ]
-            conn.executemany("INSERT INTO manifests(name, hash) VALUES (?, ?)", rows)
+            conn.executemany("INSERT INTO manifests(name, hash, category) VALUES (?, ?, ?)", rows)
             conn.commit()
         finally:
             conn.close()
@@ -56,8 +56,15 @@ class ResourceManifestTests(unittest.TestCase):
             self.assertEqual(report["category_counts"]["AssetBundles"], 1)
             self.assertEqual(report["category_counts"]["Generic"], 2)
             self.assertEqual(report["category_counts"]["<unknown>"], 1)
+            self.assertTrue(report["has_declared_category"])
+            self.assertEqual(report["declared_category_counts"]["generic"], 2)
+            self.assertEqual(
+                report["suffix_declared_category_counts"][".acb"],
+                {"sound": 1},
+            )
             self.assertEqual(report["master_mdb"]["hash"], "4" * 32)
             self.assertEqual(report["unknown_category_examples"][0]["name"], "future.unknown")
+            self.assertEqual(report["unknown_category_examples"][0]["declared_category"], "future")
 
     def test_catalog_is_normalized_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -68,7 +75,18 @@ class ResourceManifestTests(unittest.TestCase):
             rows = [json.loads(line) for line in catalog.read_text(encoding="utf-8").splitlines()]
             by_name = {row["name"]: row for row in rows}
             self.assertEqual(by_name["movie001.usm"]["category"], "Movie")
+            self.assertEqual(by_name["movie001.usm"]["declared_category"], "movie")
             self.assertIsNone(by_name["future.unknown"]["resource_path"])
+
+    def test_legacy_manifest_without_category_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "legacy.db"
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE manifests (name TEXT, hash TEXT)")
+                db.execute("INSERT INTO manifests VALUES (?, ?)", ("master.mdb", "a" * 32))
+            report = MODULE.inspect_manifest(path)
+            self.assertFalse(report["has_declared_category"])
+            self.assertEqual(report["declared_category_counts"], {})
 
 
 if __name__ == "__main__":
