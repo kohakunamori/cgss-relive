@@ -1,10 +1,10 @@
-"""Candidate minimal ``/load/index`` archival profile for CGSS Android 11.6.3.
+"""Synthetic ``/load/index`` archival profiles for CGSS Android 11.6.3.
 
-This profile is intentionally synthetic and contains no captured account data.
-The field set is derived from direct final-client IL2CPP reads in
-``Stage.LoadTask.Parse``.  It is *not* claimed to be runtime-validated yet: the
-real client may reveal additional state-dependent requirements during the first
-integration run.
+The strict minimal profile contains only fields that the final client is known
+to read on the selected bootstrap path.  The separate home-candidate profile
+adds parser-safe empty containers for several Home-facing managers.  Neither
+profile contains captured account data, and neither is claimed to be runtime-
+accepted until exercised by the original 11.6.3 client.
 """
 from __future__ import annotations
 
@@ -49,6 +49,23 @@ REQUIRED_USER_INFO_FIELDS = (
     "stamina_heal_time",
 )
 
+# These top-level sections are all individually ContainsKey-guarded by the final
+# ``Stage.LoadTask.Parse`` and then treated as list-like containers. Supplying an
+# empty list therefore enters the manager-reset/initialization path without
+# fabricating card, unit, item or live records whose master-data validity would
+# otherwise have to be proven first.
+HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
+    "user_card_list",
+    "user_unit_list",
+    "user_chara_list",
+    "album_list",
+    "user_mv_unit_list",
+    "user_grand_mv_unit_list",
+    "item_list",
+    "user_live_list",
+    "master_plus_live_list",
+)
+
 
 def build_minimal_load_index_data(
     *,
@@ -56,7 +73,7 @@ def build_minimal_load_index_data(
     producer_name: str = "Relive Producer",
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Return the current smallest statically justified archival profile.
+    """Return the smallest statically justified archival profile.
 
     Values are deliberately conservative non-production defaults. The goal is
     parser compatibility, not faithful emulation of an existing account.
@@ -73,9 +90,9 @@ def build_minimal_load_index_data(
             "room_lvup_jewel": 1,
         },
         "user_info": {
-            # Final-client setupTutorial maps the server value 100 to the local
-            # completed-tutorial step 1000, which is the lightest preservation
-            # bootstrap branch identified so far.
+            # In the final native bootstrap path, local tutorial step 1000 is
+            # normalized to server-side step 100. This is the lightest completed
+            # tutorial branch identified so far.
             "tutorial_flag": 100,
             "viewer_id": int(viewer_id),
             "name": str(producer_name),
@@ -97,6 +114,33 @@ def build_minimal_load_index_data(
             "stamina_heal_time": timestamp,
         },
     }
+
+
+def build_home_candidate_load_index_data(
+    *,
+    viewer_id: int = 1,
+    producer_name: str = "Relive Producer",
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Return a parser-safe candidate intended for the first Home transition.
+
+    This deliberately does *not* invent starter cards or units. Instead it adds
+    empty containers whose final-client parsers are guarded at the section level,
+    allowing their corresponding managers to observe an explicit empty state.
+
+    ``music_list`` is special: once that optional top-level map is present, the
+    final parser directly reads its ``normal`` list. ``sp`` is separately guarded,
+    so the smallest safe shape is ``{"normal": []}``.
+    """
+    data = build_minimal_load_index_data(
+        viewer_id=viewer_id,
+        producer_name=producer_name,
+        now=now,
+    )
+    for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
+        data[section] = []
+    data["music_list"] = {"normal": []}
+    return data
 
 
 def validate_minimal_profile(data: dict[str, Any]) -> list[str]:
@@ -122,3 +166,18 @@ def validate_minimal_profile(data: dict[str, Any]) -> list[str]:
             if name not in user
         )
     return missing
+
+
+def validate_home_candidate_profile(data: dict[str, Any]) -> list[str]:
+    """Validate the additional statically-proven Home-candidate container shapes."""
+    errors = validate_minimal_profile(data)
+    for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
+        value = data.get(section)
+        if not isinstance(value, list):
+            errors.append(section)
+    music = data.get("music_list")
+    if not isinstance(music, dict):
+        errors.append("music_list")
+    elif not isinstance(music.get("normal"), list):
+        errors.append("music_list.normal")
+    return errors
