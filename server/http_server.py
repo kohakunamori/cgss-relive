@@ -15,6 +15,7 @@ from typing import Any, Mapping, Type
 from .api_registry import (
     ApiEndpoint,
     BOOTSTRAP_HTTP_ROUTES,
+    EMPTY_SUCCESS_HTTP_ROUTES,
     LOAD_INDEX,
     TITLE,
     VERSION_CHECK,
@@ -23,6 +24,7 @@ from .api_registry import (
     route as api_route,
 )
 from .bootstrap_core import (
+    process_empty_success_request,
     process_load_check_request,
     process_load_index_request,
     process_load_title_request,
@@ -142,10 +144,12 @@ def make_handler(
                     )
                 elif route == ROUTE_TITLE:
                     exchange = process_load_title_request(headers, body)
-                else:
-                    assert route == ROUTE_LOAD_INDEX
+                elif route == ROUTE_LOAD_INDEX:
                     assert load_index_data is not None
                     exchange = process_load_index_request(headers, body, data=load_index_data)
+                else:
+                    assert route in EMPTY_SUCCESS_HTTP_ROUTES
+                    exchange = process_empty_success_request(headers, body, route=route)
             except (ValueError, UnicodeError) as exc:
                 self._record(route, 400, headers=headers, error=type(exc).__name__)
                 message = f"invalid CGSS {route.lstrip('/')} request: {type(exc).__name__}\n".encode("ascii")
@@ -185,7 +189,6 @@ def _load_profile(path: Path) -> Mapping[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("load/index profile JSON must contain an object at its root")
-    # Accept either the data map itself or a complete captured/synthetic response.
     if "data_headers" in value and "data" in value:
         data = value["data"]
         if not isinstance(data, dict):
