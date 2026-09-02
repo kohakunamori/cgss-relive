@@ -1,9 +1,7 @@
 """Minimal HTTP/TLS front end for the CGSS preservation bootstrap.
 
-Only ``POST /load/check`` is implemented at this stage.  The protocol logic is
-kept in :mod:`server.bootstrap_core`; this module is deliberately a thin
-transport adapter so it can later be replaced by another HTTP stack without
-changing the reconstructed CGSS contract.
+Early bootstrap routes are deliberately thin adapters over :mod:`bootstrap_core`
+so socket/TLS choices remain independent from reconstructed CGSS contracts.
 """
 from __future__ import annotations
 
@@ -12,7 +10,7 @@ import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Type
 
-from .bootstrap_core import process_load_check_request
+from .bootstrap_core import process_load_check_request, process_load_title_request
 from .load_check import FINAL_RESOURCE_VERSION
 
 MAX_REQUEST_BODY = 8 * 1024 * 1024
@@ -24,7 +22,6 @@ def make_handler(final_res_ver: str = FINAL_RESOURCE_VERSION) -> Type[BaseHTTPRe
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
-            # Keep the standard concise access log while avoiding body/header dumps.
             super().log_message(fmt, *args)
 
         def _send_bytes(self, status: int, body: bytes, content_type: str = "application/octet-stream") -> None:
@@ -36,14 +33,15 @@ def make_handler(final_res_ver: str = FINAL_RESOURCE_VERSION) -> Type[BaseHTTPRe
             self.wfile.write(body)
             self.close_connection = True
 
-        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        def do_GET(self) -> None:  # noqa: N802
             if self.path == "/healthz":
                 self._send_bytes(200, b"ok\n", "text/plain; charset=utf-8")
                 return
             self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
 
-        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            if self.path.split("?", 1)[0] != "/load/check":
+        def do_POST(self) -> None:  # noqa: N802
+            route = self.path.split("?", 1)[0]
+            if route not in {"/load/check", "/load/title"}:
                 self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
                 return
 
@@ -63,14 +61,16 @@ def make_handler(final_res_ver: str = FINAL_RESOURCE_VERSION) -> Type[BaseHTTPRe
             body = self.rfile.read(length)
             headers = {key: value for key, value in self.headers.items()}
             try:
-                exchange = process_load_check_request(
-                    headers,
-                    body,
-                    final_res_ver=final_res_ver,
-                )
+                if route == "/load/check":
+                    exchange = process_load_check_request(
+                        headers,
+                        body,
+                        final_res_ver=final_res_ver,
+                    )
+                else:
+                    exchange = process_load_title_request(headers, body)
             except (ValueError, UnicodeError) as exc:
-                # Never echo request headers/body because they can contain identifiers.
-                message = f"invalid CGSS load/check request: {type(exc).__name__}\n".encode("ascii")
+                message = f"invalid CGSS {route.lstrip('/')} request: {type(exc).__name__}\n".encode("ascii")
                 self._send_bytes(400, message, "text/plain; charset=utf-8")
                 return
 
@@ -86,7 +86,7 @@ def create_server(host: str, port: int, *, final_res_ver: str = FINAL_RESOURCE_V
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the cgss-relive load/check bootstrap endpoint")
+    parser = argparse.ArgumentParser(description="Run the cgss-relive bootstrap endpoints")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--final-res-ver", default=FINAL_RESOURCE_VERSION)
