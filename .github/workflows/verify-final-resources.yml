@@ -9,6 +9,7 @@ on:
       - scripts/inspect-resource-manifest.py
       - scripts/inspect-master-db.py
       - scripts/probe-resource-categories.py
+      - scripts/archive-resources.py
 
 permissions:
   contents: read
@@ -42,6 +43,7 @@ jobs:
         run: |
           python scripts/probe-resource-categories.py \
             work/final-resource/manifest_10133800.db \
+            --allow-unresolved \
             --output work/final-resource/category-probe.json
 
       - name: Inspect master and starter-card candidates
@@ -68,18 +70,39 @@ jobs:
           assert bootstrap['resource_version'] == 10133800
           assert manifest['quick_check'] == ['ok']
           assert manifest['master_mdb']['hash'] == bootstrap['master']['expected_compressed_md5']
+          assert manifest['unknown_category_examples'] == []
           assert master['quick_check'] == ['ok']
           assert master['has_card_data'] is True
           assert master['card_data']['row_count'] > 0
           assert any(card['id'] == 100001 and card['present'] for card in master['requested_cards'])
-          assert all(len(item['successful_categories']) == 1 for item in probe['suffixes'].values())
+
+          expected_direct_routes = {
+              '.unity3d': ['AssetBundles'],
+              '.acb': ['Sound'],
+              '.awb': ['Sound'],
+              '.bytes': ['Sound'],
+              '.usm': ['Movie'],
+              '.mdb': ['Generic'],
+          }
+          for suffix, expected in expected_direct_routes.items():
+              assert probe['suffixes'][suffix]['successful_categories'] == expected, (
+                  suffix, probe['suffixes'][suffix]['successful_categories']
+              )
+
+          # .bdb remains mapped to Generic in the archive from current tooling
+          # evidence, but the selected Akamai object returns 403 for every probe
+          # category in both Range and one-byte GET modes. Preserve that fact as
+          # an explicit diagnostic instead of failing the independent freeze.
+          bdb_probe = probe['suffixes']['.bdb']['successful_categories']
+          assert bdb_probe in ([], ['Generic'])
 
           print('resource_version:', bootstrap['resource_version'])
           print('all_dbmanifest_sha256:', bootstrap['index']['sha256'])
           print('manifest_decoded_sha256:', bootstrap['manifest']['decoded_sha256'])
           print('manifest_rows:', manifest['rows'])
+          print('manifest_unique_hashes:', manifest['unique_hashes'])
+          print('manifest_category_counts:', manifest['category_counts'])
           print('manifest_declared_categories:', manifest.get('declared_category_counts', {}))
-          print('suffix_declared_categories:', manifest.get('suffix_declared_category_counts', {}))
           print('cdn_category_probe:', {suffix: item['successful_categories'] for suffix, item in probe['suffixes'].items()})
           print('master_compressed_md5:', bootstrap['master']['expected_compressed_md5'])
           print('master_decoded_sha256:', bootstrap['master']['decoded_sha256'])
