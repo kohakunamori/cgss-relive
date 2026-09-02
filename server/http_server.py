@@ -19,6 +19,7 @@ from .bootstrap_core import (
 )
 from .load_check import FINAL_RESOURCE_VERSION
 from .minimal_profile import build_minimal_load_index_data
+from .safe_events import SafeEventLog, build_event
 
 MAX_REQUEST_BODY = 8 * 1024 * 1024
 
@@ -26,13 +27,42 @@ MAX_REQUEST_BODY = 8 * 1024 * 1024
 def make_handler(
     final_res_ver: str = FINAL_RESOURCE_VERSION,
     load_index_data: Mapping[str, Any] | None = None,
+    event_log: Path | None = None,
 ) -> Type[BaseHTTPRequestHandler]:
+    events = SafeEventLog(event_log) if event_log is not None else None
+
     class CGSSBootstrapHandler(BaseHTTPRequestHandler):
         server_version = "cgss-relive/0.1"
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
             super().log_message(fmt, *args)
+
+        def _safe_headers(self) -> dict[str, str]:
+            return {key: value for key, value in self.headers.items()}
+
+        def _record(
+            self,
+            route: str,
+            status: int,
+            *,
+            headers: Mapping[str, str] | None = None,
+            request: Any = None,
+            response: Any = None,
+            error: str | None = None,
+        ) -> None:
+            if events is None:
+                return
+            events.append(
+                build_event(
+                    route=route,
+                    status=status,
+                    headers=headers,
+                    request=request,
+                    response=response,
+                    error=error,
+                )
+            )
 
         def _send_bytes(self, status: int, body: bytes, content_type: str = "application/octet-stream") -> None:
             self.send_response(status)
@@ -51,28 +81,33 @@ def make_handler(
 
         def do_POST(self) -> None:  # noqa: N802
             route = self.path.split("?", 1)[0]
+            headers = self._safe_headers()
             if route not in {"/load/check", "/load/index", "/load/title"}:
+                self._record(route, 404, headers=headers)
                 self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
                 return
             if route == "/load/index" and load_index_data is None:
+                self._record(route, 503, headers=headers, error="load_index_profile_not_configured")
                 self._send_bytes(503, b"load/index profile is not configured\n", "text/plain; charset=utf-8")
                 return
 
             raw_length = self.headers.get("Content-Length")
             if raw_length is None:
+                self._record(route, 411, headers=headers, error="content_length_required")
                 self._send_bytes(411, b"content-length required\n", "text/plain; charset=utf-8")
                 return
             try:
                 length = int(raw_length)
             except ValueError:
+                self._record(route, 400, headers=headers, error="invalid_content_length")
                 self._send_bytes(400, b"invalid content-length\n", "text/plain; charset=utf-8")
                 return
             if length < 0 or length > MAX_REQUEST_BODY:
+                self._record(route, 413, headers=headers, error="request_body_too_large")
                 self._send_bytes(413, b"request body too large\n", "text/plain; charset=utf-8")
                 return
 
             body = self.rfile.read(length)
-            headers = {key: value for key, value in self.headers.items()}
             try:
                 if route == "/load/check":
                     exchange = process_load_check_request(
@@ -86,10 +121,18 @@ def make_handler(
                     assert load_index_data is not None
                     exchange = process_load_index_request(headers, body, data=load_index_data)
             except (ValueError, UnicodeError) as exc:
+                self._record(route, 400, headers=headers, error=type(exc).__name__)
                 message = f"invalid CGSS {route.lstrip('/')} request: {type(exc).__name__}\n".encode("ascii")
                 self._send_bytes(400, message, "text/plain; charset=utf-8")
                 return
 
+            self._record(
+                route,
+                200,
+                headers=headers,
+                request=exchange.request,
+                response=exchange.response,
+            )
             self._send_bytes(200, exchange.response_body)
 
     return CGSSBootstrapHandler
@@ -101,8 +144,9 @@ def create_server(
     *,
     final_res_ver: str = FINAL_RESOURCE_VERSION,
     load_index_data: Mapping[str, Any] | None = None,
+    event_log: Path | None = None,
 ) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(final_res_ver, load_index_data))
+    server = ThreadingHTTPServer((host, port), make_handler(final_res_ver, load_index_data, event_log))
     server.daemon_threads = True
     return server
 
@@ -141,6 +185,11 @@ def main() -> int:
         default="Relive Producer",
         help="producer name for the experimental synthetic profile",
     )
+    parser.add_argument(
+        "--event-log",
+        type=Path,
+        help="append sanitized route/key-shape events as JSONL; raw identifiers and body values are excluded",
+    )
     parser.add_argument("--cert", help="PEM certificate chain for HTTPS")
     parser.add_argument("--key", help="PEM private key for HTTPS")
     args = parser.parse_args()
@@ -167,6 +216,7 @@ def main() -> int:
         args.port,
         final_res_ver=args.final_res_ver,
         load_index_data=load_index_data,
+        event_log=args.event_log,
     )
     scheme = "http"
     if args.cert and args.key:
@@ -177,6 +227,8 @@ def main() -> int:
 
     bound_host, bound_port = httpd.server_address[:2]
     print(f"cgss-relive bootstrap listening on {scheme}://{bound_host}:{bound_port}")
+    if args.event_log:
+        print(f"sanitized event log: {args.event_log}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
