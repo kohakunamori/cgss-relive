@@ -36,14 +36,22 @@ function Invoke-PythonScript {
     }
 }
 
+function Resolve-RootPath {
+    param([string]$PathValue)
+    if ([System.IO.Path]::IsPathRooted($PathValue)) {
+        return $PathValue
+    }
+    return (Join-Path $RepoRoot $PathValue)
+}
+
 function Get-LatestSpecimenDirectory {
     param([string]$Root)
-    $rootPath = Join-Path $RepoRoot $Root
+    $rootPath = Resolve-RootPath $Root
     if (-not (Test-Path $rootPath)) {
         throw "Specimen root does not exist: $rootPath"
     }
-    $dirs = Get-ChildItem -Path $rootPath -Directory | Sort-Object LastWriteTimeUtc -Descending
-    if (-not $dirs) {
+    $dirs = @(Get-ChildItem -Path $rootPath -Directory | Sort-Object LastWriteTimeUtc -Descending)
+    if ($dirs.Count -eq 0) {
         throw "No specimen directories found under: $rootPath"
     }
     return $dirs[0].FullName
@@ -80,13 +88,14 @@ try {
         Write-Host "=== Phase 1: acquire installed APK specimen ==="
         $pullArgs = @("-Package", $Package, "-OutputRoot", $OutputRoot)
         if ($Serial) { $pullArgs += @("-Serial", $Serial) }
+        # The acquisition helper uses $ErrorActionPreference=Stop and throws on adb failure,
+        # so do not inspect the native-command $LASTEXITCODE left over from inside it.
         & (Join-Path $ScriptDir "pull-installed-apk.ps1") @pullArgs
-        if ($LASTEXITCODE -ne 0) { throw "APK acquisition failed." }
         $SpecimenDir = Get-LatestSpecimenDirectory -Root $OutputRoot
     } elseif (-not $SpecimenDir) {
         $SpecimenDir = Get-LatestSpecimenDirectory -Root $OutputRoot
-    } elseif (-not [System.IO.Path]::IsPathRooted($SpecimenDir)) {
-        $SpecimenDir = Join-Path $RepoRoot $SpecimenDir
+    } else {
+        $SpecimenDir = Resolve-RootPath $SpecimenDir
     }
 
     $SpecimenDir = (Resolve-Path $SpecimenDir).Path
@@ -111,7 +120,11 @@ try {
     Write-Host "=== Phase 5: record signer/tool provenance ==="
     Record-ToolVersions -Destination (Join-Path $SpecimenDir "tool-versions.txt")
 
-    $apkFiles = Get-ChildItem -Path $SpecimenDir -Filter "*.apk" -File | Sort-Object Name
+    $apkFiles = @(Get-ChildItem -Path $SpecimenDir -Filter "*.apk" -File | Sort-Object Name)
+    if ($apkFiles.Count -eq 0) {
+        throw "No APK files remain in specimen directory: $SpecimenDir"
+    }
+
     $certPath = Join-Path $SpecimenDir "signing-certificates.txt"
     if (Get-Command apksigner -ErrorAction SilentlyContinue) {
         $certLines = @()
@@ -133,7 +146,8 @@ try {
         if (Get-Command jadx -ErrorAction SilentlyContinue) {
             $jadxOut = Join-Path $SpecimenDir "jadx-out"
             New-Item -ItemType Directory -Force -Path $jadxOut | Out-Null
-            & jadx -d $jadxOut @($apkFiles.FullName)
+            $apkPaths = @($apkFiles | ForEach-Object { $_.FullName })
+            & jadx -d $jadxOut @apkPaths
             if ($LASTEXITCODE -ne 0) { Write-Warning "jadx returned exit code $LASTEXITCODE" }
         } else {
             Write-Warning "jadx not found; skipping DEX decompilation."
