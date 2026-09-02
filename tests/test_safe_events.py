@@ -44,6 +44,20 @@ class SafeEventTests(unittest.TestCase):
         self.assertEqual(event["response_data_keys"], ["user_info"])
         self.assertEqual(event["response_data_headers"], {"result_code": 1})
 
+    def test_api_candidates_are_public_identity_only(self) -> None:
+        event = build_event(
+            route="/bn_consent/get_state",
+            status=404,
+            timestamp=1.0,
+            api_candidates=[
+                {"group": "A", "key": 14, "name": "BnContentGetState", "literal_index": 23438},
+            ],
+        )
+        self.assertEqual(
+            event["api_candidates"],
+            [{"group": "A", "key": 14, "name": "BnContentGetState", "literal_index": 23438}],
+        )
+
     def test_jsonl_writer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "events.jsonl"
