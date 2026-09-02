@@ -85,6 +85,16 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
         self.assertEqual(decoded["data"], {})
 
+    def test_auxiliary_load_routes_return_common_success(self) -> None:
+        for route in ("/load/set_cache_clear_flg", "/load/update_agreement_status"):
+            with self.subTest(route=route):
+                status, body = self._post_route(route)
+                self.assertEqual(status, 200)
+                decoded = cgss_codec.decode_body(body, self.udid)
+                self.assertEqual(decoded["data_headers"]["result_code"], 1)
+                self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
+                self.assertEqual(decoded["data"], {})
+
     def test_load_index_requires_configured_profile(self) -> None:
         status, body = self._post_route("/load/index")
         self.assertEqual(status, 503)
