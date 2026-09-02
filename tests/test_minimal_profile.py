@@ -10,6 +10,7 @@ from server.minimal_profile import (
     STARTER_CARD_ID,
     STARTER_CHARA_ID,
     STARTER_SERIAL_ID,
+    STARTER_UNIT_ID,
     build_home_candidate_load_index_data,
     build_minimal_load_index_data,
     build_starter_visible_load_index_data,
@@ -29,6 +30,7 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(data["user_info"]["tutorial_flag"], 100)
         self.assertNotIn("unit_slot", data["user_info"])
         self.assertNotIn("user_card_list", data)
+        self.assertNotIn("user_unit_list", data)
         self.assertNotIn("music_list", data)
 
     def test_home_candidate_keeps_minimal_contract_and_initializes_safe_containers(self) -> None:
@@ -55,7 +57,7 @@ class MinimalProfileTests(unittest.TestCase):
             ],
         )
 
-    def test_starter_visible_profile_has_one_final_master_card_and_five_slot_unit(self) -> None:
+    def test_starter_visible_profile_has_final_unit_id_and_five_slots(self) -> None:
         data = build_starter_visible_load_index_data(viewer_id=9, producer_name="Starter", now=10)
         self.assertEqual(validate_starter_visible_profile(data), [])
         self.assertEqual(validate_home_candidate_profile(data), [])
@@ -69,12 +71,12 @@ class MinimalProfileTests(unittest.TestCase):
 
         self.assertEqual(len(data["user_unit_list"]), 1)
         unit = data["user_unit_list"][0]
+        self.assertEqual(unit["unit_id"], STARTER_UNIT_ID)
         self.assertEqual(unit["serial_id_0"], STARTER_SERIAL_ID)
         self.assertEqual(
             [unit[f"serial_id_{index}"] for index in range(FINAL_UNIT_SLOT_COUNT)],
             [STARTER_SERIAL_ID, 0, 0, 0, 0],
         )
-        self.assertNotIn("unit_id", unit)
         self.assertNotIn("viewer_id", unit)
 
         self.assertEqual(data["user_chara_list"], [{"chara_id": STARTER_CHARA_ID, "fan": 0}])
@@ -83,14 +85,21 @@ class MinimalProfileTests(unittest.TestCase):
     def test_starter_visible_validator_rejects_broken_references(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
         data["user_card_list"][0]["card_id"] = 999999
+        data["user_unit_list"][0]["unit_id"] = 2
         data["user_unit_list"][0]["serial_id_0"] = 2
         data["user_chara_list"][0]["chara_id"] = 999
         data["user_info"]["leader_serial_id"] = 2
         errors = validate_starter_visible_profile(data)
         self.assertIn("user_card_list[0].card_id", errors)
+        self.assertIn("user_unit_list[0].unit_id", errors)
         self.assertIn("user_unit_list[0].serial_id_0", errors)
         self.assertIn("user_chara_list[0].chara_id", errors)
         self.assertIn("user_info.leader_serial_id", errors)
+
+    def test_starter_visible_validator_requires_unit_id_field(self) -> None:
+        data = build_starter_visible_load_index_data(now=1)
+        del data["user_unit_list"][0]["unit_id"]
+        self.assertIn("user_unit_list[0].unit_id", validate_starter_visible_profile(data))
 
     def test_validator_reports_removed_fields(self) -> None:
         data = build_minimal_load_index_data(now=1)
