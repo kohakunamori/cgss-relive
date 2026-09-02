@@ -5,9 +5,9 @@ Downloads are opt-in via ``--download``.  The default mode only verifies objects
 already present under the gitignored resource cache.  Every downloaded object is
 MD5-checked against the manifest hash before an atomic rename.
 
-Only extension/category mappings observed in current final-resource tooling are
-downloaded automatically. Unknown extensions are reported and skipped instead of
-being assigned a speculative CDN route.
+Extension/category mappings are promoted only after current-final evidence.  In
+particular, final 10133800 manifest-backed CDN probes uniquely resolve ``.awb``
+and ``.bytes`` to ``Sound``. Unknown extensions remain reported and skipped.
 """
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 CATEGORY_BY_SUFFIX = {
     ".unity3d": "AssetBundles",
     ".acb": "Sound",
+    ".awb": "Sound",
+    ".bytes": "Sound",
     ".usm": "Movie",
     ".bdb": "Generic",
     ".mdb": "Generic",
