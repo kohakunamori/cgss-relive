@@ -33,6 +33,7 @@ from .load_check import FINAL_RESOURCE_VERSION
 from .minimal_profile import (
     build_home_candidate_load_index_data,
     build_minimal_load_index_data,
+    build_starter_visible_load_index_data,
 )
 from .safe_events import SafeEventLog, build_event
 
@@ -218,7 +219,12 @@ def main() -> int:
     parser.add_argument(
         "--experimental-home-load-index",
         action="store_true",
-        help="use the parser-safe Home-candidate profile with explicit empty manager containers",
+        help="use the parser-safe Home candidate with explicit empty manager containers",
+    )
+    parser.add_argument(
+        "--experimental-starter-load-index",
+        action="store_true",
+        help="use the one-card synthetic Home profile backed by final 10133800 master data",
     )
     parser.add_argument("--viewer-id", type=int, default=1, help="viewer id for a synthetic profile")
     parser.add_argument(
@@ -248,12 +254,14 @@ def main() -> int:
             args.load_index_profile,
             args.experimental_minimal_load_index,
             args.experimental_home_load_index,
+            args.experimental_starter_load_index,
         )
     )
     if selected_profiles > 1:
         parser.error(
-            "--load-index-profile, --experimental-minimal-load-index and "
-            "--experimental-home-load-index are mutually exclusive"
+            "--load-index-profile, --experimental-minimal-load-index, "
+            "--experimental-home-load-index and --experimental-starter-load-index "
+            "are mutually exclusive"
         )
 
     load_index_data = None
@@ -269,6 +277,11 @@ def main() -> int:
         )
     elif args.experimental_home_load_index:
         load_index_data = build_home_candidate_load_index_data(
+            viewer_id=args.viewer_id,
+            producer_name=args.producer_name,
+        )
+    elif args.experimental_starter_load_index:
+        load_index_data = build_starter_visible_load_index_data(
             viewer_id=args.viewer_id,
             producer_name=args.producer_name,
         )
