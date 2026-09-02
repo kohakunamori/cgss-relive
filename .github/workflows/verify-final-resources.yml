@@ -5,6 +5,9 @@ on:
   push:
     paths:
       - .github/workflows/verify-final-resources.yml
+      - scripts/fetch-resource-bootstrap.py
+      - scripts/inspect-resource-manifest.py
+      - scripts/inspect-master-db.py
 
 permissions:
   contents: read
@@ -66,6 +69,8 @@ jobs:
           print('all_dbmanifest_sha256:', bootstrap['index']['sha256'])
           print('manifest_decoded_sha256:', bootstrap['manifest']['decoded_sha256'])
           print('manifest_rows:', manifest['rows'])
+          print('manifest_declared_categories:', manifest.get('declared_category_counts', {}))
+          print('suffix_declared_categories:', manifest.get('suffix_declared_category_counts', {}))
           print('master_compressed_md5:', bootstrap['master']['expected_compressed_md5'])
           print('master_decoded_sha256:', bootstrap['master']['decoded_sha256'])
           print('master_card_rows:', master['card_data']['row_count'])
