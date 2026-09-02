@@ -1,6 +1,6 @@
 """Verified CGSS 11.6.3 endpoint registry helpers.
 
-A small control-plane subset is embedded for normal server routing.  A complete
+A small control-plane subset is embedded for normal server routing. A complete
 supplied ``final_map.json`` can optionally be loaded at runtime for diagnostics;
 loading is strict and never fills missing keys or guesses endpoint records.
 """
@@ -39,8 +39,18 @@ A_LOAD_BY_NAME = {endpoint.name: endpoint for endpoint in A_LOAD_ENDPOINTS}
 A_LOAD_BY_PATH = {endpoint.path: endpoint for endpoint in A_LOAD_ENDPOINTS}
 
 VERSION_CHECK = A_LOAD_BY_KEY[0]
+SET_CACHE_CLEAR_FLG = A_LOAD_BY_KEY[1]
 TITLE = A_LOAD_BY_KEY[10]
 LOAD_INDEX = A_LOAD_BY_KEY[11]
+LOAD_GET_EXTERNAL_SITE_URL = A_LOAD_BY_KEY[12]
+LOAD_UPDATE_AGREEMENT_STATUS = A_LOAD_BY_KEY[13]
+
+# Final native proof status:
+# - SetCacheClearFlgTask has no Parse override -> common NetworkTask.Parse only.
+# - LoadUpdateAgreementStatusTask.Parse is a direct tail-call to NetworkTask.Parse.
+# - LoadGetExternalSiteUrlTask.Parse optionally consumes data.url, so it remains
+#   diagnostic-only until functional URL semantics are needed.
+EMPTY_SUCCESS_ENDPOINTS = frozenset({SET_CACHE_CLEAR_FLG, LOAD_UPDATE_AGREEMENT_STATUS})
 
 # The complete final A-group map contains no home/index or home/load endpoint.
 # The only home/* entry is a later customization mutation.
@@ -59,10 +69,14 @@ def route(path: str) -> str:
 BOOTSTRAP_HTTP_ROUTES = frozenset(
     {
         route(VERSION_CHECK.path),
+        route(SET_CACHE_CLEAR_FLG.path),
         route(TITLE.path),
         route(LOAD_INDEX.path),
+        route(LOAD_UPDATE_AGREEMENT_STATUS.path),
     }
 )
+
+EMPTY_SUCCESS_HTTP_ROUTES = frozenset(route(endpoint.path) for endpoint in EMPTY_SUCCESS_ENDPOINTS)
 
 
 def _parse_entry(group_name: str, raw: Any) -> ApiEndpoint:
