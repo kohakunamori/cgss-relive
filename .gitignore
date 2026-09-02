@@ -10,6 +10,9 @@
 *.hca
 *.mdb
 *.bdb
+manifest_*.db
+all_dbmanifest*
+resource-bootstrap.json
 
 # Reverse-engineering working trees
 work/
