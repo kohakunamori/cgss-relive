@@ -39,6 +39,40 @@ jobs:
             --output work/final-resource/manifest-report.json \
             --unknown-examples 20
 
+      - name: Build complete content-addressed archive plan
+        run: |
+          python - <<'PY'
+          import collections
+          import importlib.util
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path('work/final-resource')
+          script = Path('scripts/archive-resources.py')
+          spec = importlib.util.spec_from_file_location('archive_resources_ci', script)
+          module = importlib.util.module_from_spec(spec)
+          assert spec and spec.loader
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+
+          plans, skipped = module.load_plan(root / 'manifest_10133800.db')
+          categories = collections.Counter(plan.category for plan in plans)
+          skipped_statuses = collections.Counter(item.status for item in skipped)
+          report = {
+              'resource_version': 10133800,
+              'planned_unique_objects': len(plans),
+              'category_object_counts': dict(sorted(categories.items())),
+              'skipped_objects': len(skipped),
+              'skipped_status_counts': dict(sorted(skipped_statuses.items())),
+          }
+          (root / 'archive-plan-report.json').write_text(
+              json.dumps(report, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps(report, sort_keys=True))
+          PY
+
       - name: Probe CDN category directories without saving assets
         run: |
           python scripts/probe-resource-categories.py \
@@ -64,6 +98,7 @@ jobs:
           root = Path('work/final-resource')
           bootstrap = json.loads((root / 'resource-bootstrap.json').read_text(encoding='utf-8'))
           manifest = json.loads((root / 'manifest-report.json').read_text(encoding='utf-8'))
+          archive_plan = json.loads((root / 'archive-plan-report.json').read_text(encoding='utf-8'))
           probe = json.loads((root / 'category-probe.json').read_text(encoding='utf-8'))
           master = json.loads((root / 'master-report.json').read_text(encoding='utf-8'))
 
@@ -71,6 +106,8 @@ jobs:
           assert manifest['quick_check'] == ['ok']
           assert manifest['master_mdb']['hash'] == bootstrap['master']['expected_compressed_md5']
           assert manifest['unknown_category_examples'] == []
+          assert archive_plan['planned_unique_objects'] == manifest['unique_hashes']
+          assert archive_plan['skipped_objects'] == 0
           assert master['quick_check'] == ['ok']
           assert master['has_card_data'] is True
           assert master['card_data']['row_count'] > 0
@@ -89,10 +126,10 @@ jobs:
                   suffix, probe['suffixes'][suffix]['successful_categories']
               )
 
-          # .bdb remains mapped to Generic in the archive from current tooling
-          # evidence, but the selected Akamai object returns 403 for every probe
-          # category in both Range and one-byte GET modes. Preserve that fact as
-          # an explicit diagnostic instead of failing the independent freeze.
+          # .bdb remains mapped to Generic from current maintained tooling
+          # evidence. The selected final Akamai object currently returns 403 for
+          # every category in both tiny probe modes, so preserve that diagnostic
+          # instead of pretending it is an independent CDN hit.
           bdb_probe = probe['suffixes']['.bdb']['successful_categories']
           assert bdb_probe in ([], ['Generic'])
 
@@ -101,6 +138,7 @@ jobs:
           print('manifest_decoded_sha256:', bootstrap['manifest']['decoded_sha256'])
           print('manifest_rows:', manifest['rows'])
           print('manifest_unique_hashes:', manifest['unique_hashes'])
+          print('archive_plan:', archive_plan)
           print('manifest_category_counts:', manifest['category_counts'])
           print('manifest_declared_categories:', manifest.get('declared_category_counts', {}))
           print('cdn_category_probe:', {suffix: item['successful_categories'] for suffix, item in probe['suffixes'].items()})
@@ -127,6 +165,7 @@ jobs:
           path: |
             work/final-resource/resource-bootstrap.json
             work/final-resource/manifest-report.json
+            work/final-resource/archive-plan-report.json
             work/final-resource/category-probe.json
             work/final-resource/master-report.json
           if-no-files-found: warn
