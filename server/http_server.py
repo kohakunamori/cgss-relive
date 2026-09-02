@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Type
 
+from .api_registry import BOOTSTRAP_HTTP_ROUTES, LOAD_INDEX, TITLE, VERSION_CHECK, route as api_route
 from .bootstrap_core import (
     process_load_check_request,
     process_load_index_request,
@@ -22,6 +23,9 @@ from .minimal_profile import build_minimal_load_index_data
 from .safe_events import SafeEventLog, build_event
 
 MAX_REQUEST_BODY = 8 * 1024 * 1024
+ROUTE_VERSION_CHECK = api_route(VERSION_CHECK.path)
+ROUTE_TITLE = api_route(TITLE.path)
+ROUTE_LOAD_INDEX = api_route(LOAD_INDEX.path)
 
 
 def make_handler(
@@ -82,11 +86,11 @@ def make_handler(
         def do_POST(self) -> None:  # noqa: N802
             route = self.path.split("?", 1)[0]
             headers = self._safe_headers()
-            if route not in {"/load/check", "/load/index", "/load/title"}:
+            if route not in BOOTSTRAP_HTTP_ROUTES:
                 self._record(route, 404, headers=headers)
                 self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
                 return
-            if route == "/load/index" and load_index_data is None:
+            if route == ROUTE_LOAD_INDEX and load_index_data is None:
                 self._record(route, 503, headers=headers, error="load_index_profile_not_configured")
                 self._send_bytes(503, b"load/index profile is not configured\n", "text/plain; charset=utf-8")
                 return
@@ -109,15 +113,16 @@ def make_handler(
 
             body = self.rfile.read(length)
             try:
-                if route == "/load/check":
+                if route == ROUTE_VERSION_CHECK:
                     exchange = process_load_check_request(
                         headers,
                         body,
                         final_res_ver=final_res_ver,
                     )
-                elif route == "/load/title":
+                elif route == ROUTE_TITLE:
                     exchange = process_load_title_request(headers, body)
                 else:
+                    assert route == ROUTE_LOAD_INDEX
                     assert load_index_data is not None
                     exchange = process_load_index_request(headers, body, data=load_index_data)
             except (ValueError, UnicodeError) as exc:
