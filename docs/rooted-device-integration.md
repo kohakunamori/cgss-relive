@@ -134,8 +134,15 @@ python -m server.http_server `
   --key .\work\tls\server.key.pem `
   --experimental-minimal-load-index `
   --viewer-id 1 `
-  --producer-name "Relive Producer"
+  --producer-name "Relive Producer" `
+  --event-log .\work\runtime-events.jsonl
 ```
+
+The event log is intentionally sanitized. It contains route/status, APP/RES/Unity
+version headers, decoded request key names and response key/result-code shape. It
+does **not** write UDID, SID, USER-ID, PARAM or decoded request/response values.
+That file is the preferred artifact to share back during the first integration
+run.
 
 Implemented routes at this stage:
 
@@ -152,13 +159,8 @@ synthetic profile documented in `docs/load-index-11.6.3.md`.
 
 ## 7. First runtime acceptance test
 
-Start with a dedicated test install/state, then launch CGSS while observing:
-
-```powershell
-adb logcat
-```
-
-and the `cgss-relive` access log.
+Start with a dedicated test install/state, then launch CGSS while observing its
+process logcat plus `work/runtime-events.jsonl`.
 
 The first useful outcomes are deliberately narrow:
 
