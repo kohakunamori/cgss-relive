@@ -1,13 +1,18 @@
-"""Verified CGSS 11.6.3 control-plane endpoint constants.
+"""Verified CGSS 11.6.3 endpoint registry helpers.
 
-These entries are a deliberately small runtime subset of the supplied final
-ApiType endpoint map.  The complete map remains an analysis input; server code
-must not invent host assignments because the delivered map proves relative
-key->path mappings, not per-endpoint host selection.
+A small control-plane subset is embedded for normal server routing.  A complete
+supplied ``final_map.json`` can optionally be loaded at runtime for diagnostics;
+loading is strict and never fills missing keys or guesses endpoint records.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+EXPECTED_A_KEYS = frozenset(range(516))
+EXPECTED_B_KEYS = frozenset({0, 1, 2, *range(8, 27)})
 
 
 @dataclass(frozen=True)
@@ -58,3 +63,65 @@ BOOTSTRAP_HTTP_ROUTES = frozenset(
         route(LOAD_INDEX.path),
     }
 )
+
+
+def _parse_entry(group_name: str, raw: Any) -> ApiEndpoint:
+    if not isinstance(raw, list) or len(raw) != 4:
+        raise ValueError(f"invalid {group_name} endpoint entry: {raw!r}")
+    name, key, path, literal_index = raw
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"invalid {group_name} enum name: {raw!r}")
+    if not isinstance(key, int):
+        raise ValueError(f"invalid {group_name} key: {raw!r}")
+    if not isinstance(path, str) or not path or path.startswith("/"):
+        raise ValueError(f"invalid {group_name} relative path: {raw!r}")
+    if not isinstance(literal_index, int) or literal_index < 0:
+        raise ValueError(f"invalid {group_name} literal index: {raw!r}")
+    return ApiEndpoint(group_name, name, key, path, literal_index)
+
+
+def parse_delivered_map(raw: Any) -> tuple[ApiEndpoint, ...]:
+    """Validate and parse the complete delivered final-map object."""
+    if not isinstance(raw, dict) or set(raw) != {"A", "B"}:
+        raise ValueError("API map root must contain exactly groups A and B")
+
+    parsed: list[ApiEndpoint] = []
+    keys_by_group: dict[str, list[int]] = {}
+    for group_name in ("A", "B"):
+        entries = raw[group_name]
+        if not isinstance(entries, list):
+            raise ValueError(f"API map group {group_name} must be a list")
+        group_entries = [_parse_entry(group_name, entry) for entry in entries]
+        keys = [entry.key for entry in group_entries]
+        if len(keys) != len(set(keys)):
+            raise ValueError(f"API map group {group_name} contains duplicate keys")
+        keys_by_group[group_name] = keys
+        parsed.extend(group_entries)
+
+    actual_a = set(keys_by_group["A"])
+    actual_b = set(keys_by_group["B"])
+    if actual_a != EXPECTED_A_KEYS:
+        raise ValueError(
+            f"API map group A key coverage mismatch: "
+            f"missing={sorted(EXPECTED_A_KEYS - actual_a)}, "
+            f"extra={sorted(actual_a - EXPECTED_A_KEYS)}"
+        )
+    if actual_b != EXPECTED_B_KEYS:
+        raise ValueError(
+            f"API map group B key coverage mismatch: "
+            f"missing={sorted(EXPECTED_B_KEYS - actual_b)}, "
+            f"extra={sorted(actual_b - EXPECTED_B_KEYS)}"
+        )
+    return tuple(parsed)
+
+
+def load_delivered_map(path: Path) -> tuple[ApiEndpoint, ...]:
+    return parse_delivered_map(json.loads(path.read_text(encoding="utf-8")))
+
+
+def by_http_path(endpoints: Iterable[ApiEndpoint]) -> dict[str, tuple[ApiEndpoint, ...]]:
+    """Build a one-to-many HTTP path index; aliases are preserved."""
+    grouped: dict[str, list[ApiEndpoint]] = {}
+    for endpoint in endpoints:
+        grouped.setdefault(route(endpoint.path), []).append(endpoint)
+    return {path: tuple(entries) for path, entries in grouped.items()}
