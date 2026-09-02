@@ -8,28 +8,29 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Invoke-Adb {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $base = @()
-    if ($Serial) { $base += @('-s', $Serial) }
-    & adb @base @Args
-    if ($LASTEXITCODE -ne 0) {
-        throw "adb failed: adb $($base -join ' ') $($Args -join ' ')"
-    }
-}
-
 if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
     throw 'adb was not found in PATH'
 }
 
+$AdbPrefix = @()
+if ($Serial) { $AdbPrefix = @('-s', $Serial) }
+
+function Invoke-Adb {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    & adb @AdbPrefix @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "adb failed: adb $($AdbPrefix -join ' ') $($Arguments -join ' ')"
+    }
+}
+
 Invoke-Adb wait-for-device | Out-Null
 
-$state = (& adb $(if ($Serial) { @('-s', $Serial) } else { @() }) get-state 2>$null).Trim()
-if ($state -ne 'device') {
+$state = (& adb @AdbPrefix get-state 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $state -ne 'device') {
     throw "ADB target is not ready (state: $state)"
 }
 
-$rootResult = (& adb $(if ($Serial) { @('-s', $Serial) } else { @() }) shell su -c id 2>$null | Out-String).Trim()
+$rootResult = (& adb @AdbPrefix shell su -c id 2>$null | Out-String).Trim()
 $hasRoot = $LASTEXITCODE -eq 0 -and $rootResult -match 'uid=0'
 if ($RequireRoot -and -not $hasRoot) {
     throw 'Root check failed: adb shell su -c id did not return uid=0'
@@ -43,8 +44,8 @@ if ($Remove) {
 }
 
 Invoke-Adb reverse $spec "tcp:$HostPort" | Out-Null
-$listed = (& adb $(if ($Serial) { @('-s', $Serial) } else { @() }) reverse --list | Out-String)
-if ($listed -notmatch [regex]::Escape("tcp:$DevicePort tcp:$HostPort")) {
+$listed = (& adb @AdbPrefix reverse --list | Out-String)
+if ($LASTEXITCODE -ne 0 -or $listed -notmatch [regex]::Escape("tcp:$DevicePort tcp:$HostPort")) {
     throw "ADB reverse did not appear in reverse --list: tcp:$DevicePort -> tcp:$HostPort"
 }
 
