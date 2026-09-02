@@ -12,7 +12,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Type
 
-from .api_registry import BOOTSTRAP_HTTP_ROUTES, LOAD_INDEX, TITLE, VERSION_CHECK, route as api_route
+from .api_registry import (
+    ApiEndpoint,
+    BOOTSTRAP_HTTP_ROUTES,
+    LOAD_INDEX,
+    TITLE,
+    VERSION_CHECK,
+    by_http_path,
+    load_delivered_map,
+    route as api_route,
+)
 from .bootstrap_core import (
     process_load_check_request,
     process_load_index_request,
@@ -32,8 +41,10 @@ def make_handler(
     final_res_ver: str = FINAL_RESOURCE_VERSION,
     load_index_data: Mapping[str, Any] | None = None,
     event_log: Path | None = None,
+    api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
 ) -> Type[BaseHTTPRequestHandler]:
     events = SafeEventLog(event_log) if event_log is not None else None
+    api_index = api_index or {}
 
     class CGSSBootstrapHandler(BaseHTTPRequestHandler):
         server_version = "cgss-relive/0.1"
@@ -57,6 +68,15 @@ def make_handler(
         ) -> None:
             if events is None:
                 return
+            candidates = [
+                {
+                    "group": endpoint.group,
+                    "key": endpoint.key,
+                    "name": endpoint.name,
+                    "literal_index": endpoint.literal_index,
+                }
+                for endpoint in api_index.get(route, ())
+            ]
             events.append(
                 build_event(
                     route=route,
@@ -65,6 +85,7 @@ def make_handler(
                     request=request,
                     response=response,
                     error=error,
+                    api_candidates=candidates,
                 )
             )
 
@@ -87,7 +108,7 @@ def make_handler(
             route = self.path.split("?", 1)[0]
             headers = self._safe_headers()
             if route not in BOOTSTRAP_HTTP_ROUTES:
-                self._record(route, 404, headers=headers)
+                self._record(route, 404, headers=headers, error="endpoint_not_implemented")
                 self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
                 return
             if route == ROUTE_LOAD_INDEX and load_index_data is None:
@@ -150,8 +171,12 @@ def create_server(
     final_res_ver: str = FINAL_RESOURCE_VERSION,
     load_index_data: Mapping[str, Any] | None = None,
     event_log: Path | None = None,
+    api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
 ) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(final_res_ver, load_index_data, event_log))
+    server = ThreadingHTTPServer(
+        (host, port),
+        make_handler(final_res_ver, load_index_data, event_log, api_index),
+    )
     server.daemon_threads = True
     return server
 
@@ -195,6 +220,11 @@ def main() -> int:
         type=Path,
         help="append sanitized route/key-shape events as JSONL; raw identifiers and body values are excluded",
     )
+    parser.add_argument(
+        "--api-map",
+        type=Path,
+        help="optional complete validated final_map.json used only to annotate runtime routes",
+    )
     parser.add_argument("--cert", help="PEM certificate chain for HTTPS")
     parser.add_argument("--key", help="PEM private key for HTTPS")
     args = parser.parse_args()
@@ -216,12 +246,21 @@ def main() -> int:
             producer_name=args.producer_name,
         )
 
+    api_index = None
+    if args.api_map:
+        try:
+            api_endpoints = load_delivered_map(args.api_map)
+            api_index = by_http_path(api_endpoints)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(f"failed to load --api-map: {exc}")
+
     httpd = create_server(
         args.host,
         args.port,
         final_res_ver=args.final_res_ver,
         load_index_data=load_index_data,
         event_log=args.event_log,
+        api_index=api_index,
     )
     scheme = "http"
     if args.cert and args.key:
@@ -234,6 +273,8 @@ def main() -> int:
     print(f"cgss-relive bootstrap listening on {scheme}://{bound_host}:{bound_port}")
     if args.event_log:
         print(f"sanitized event log: {args.event_log}")
+    if args.api_map:
+        print(f"validated final ApiType map: {args.api_map}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
