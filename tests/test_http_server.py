@@ -50,12 +50,6 @@ class HTTPBootstrapServerTests(unittest.TestCase):
             "APP-VER": "11.6.3",
         }
 
-    def _post(self, route: str, *, res_ver: str = "10133800") -> tuple[int, bytes]:
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
-        conn.request(route, "" if False else "POST")
-        conn.close()
-        raise AssertionError("unreachable")
-
     def _post_route(self, route: str, *, res_ver: str = "10133800") -> tuple[int, bytes]:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
         conn.request("POST", route, body=self._request_body(), headers=self._headers(res_ver))
