@@ -1,0 +1,51 @@
+# Proprietary / locally acquired game material
+*.apk
+*.apks
+*.aab
+*.xapk
+*.obb
+*.unity3d
+*.acb
+*.awb
+*.hca
+*.mdb
+*.bdb
+
+# Reverse-engineering working trees
+work/
+artifacts/
+decompiled/
+jadx-out/
+apktool-out/
+il2cpp-out/
+asset-cache/
+resource-cache/
+
+# Captures can contain credentials; only sanitized fixtures should be committed
+captures/raw/
+*.pcap
+*.pcapng
+*.har
+
+# Local secrets / device data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
