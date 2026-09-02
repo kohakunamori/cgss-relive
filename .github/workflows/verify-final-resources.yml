@@ -8,6 +8,7 @@ on:
       - scripts/fetch-resource-bootstrap.py
       - scripts/inspect-resource-manifest.py
       - scripts/inspect-master-db.py
+      - scripts/probe-resource-categories.py
 
 permissions:
   contents: read
@@ -37,6 +38,12 @@ jobs:
             --output work/final-resource/manifest-report.json \
             --unknown-examples 20
 
+      - name: Probe CDN category directories without saving assets
+        run: |
+          python scripts/probe-resource-categories.py \
+            work/final-resource/manifest_10133800.db \
+            --output work/final-resource/category-probe.json
+
       - name: Inspect master and starter-card candidates
         run: |
           python scripts/inspect-master-db.py \
@@ -55,6 +62,7 @@ jobs:
           root = Path('work/final-resource')
           bootstrap = json.loads((root / 'resource-bootstrap.json').read_text(encoding='utf-8'))
           manifest = json.loads((root / 'manifest-report.json').read_text(encoding='utf-8'))
+          probe = json.loads((root / 'category-probe.json').read_text(encoding='utf-8'))
           master = json.loads((root / 'master-report.json').read_text(encoding='utf-8'))
 
           assert bootstrap['resource_version'] == 10133800
@@ -64,6 +72,7 @@ jobs:
           assert master['has_card_data'] is True
           assert master['card_data']['row_count'] > 0
           assert any(card['id'] == 100001 and card['present'] for card in master['requested_cards'])
+          assert all(len(item['successful_categories']) == 1 for item in probe['suffixes'].values())
 
           print('resource_version:', bootstrap['resource_version'])
           print('all_dbmanifest_sha256:', bootstrap['index']['sha256'])
@@ -71,6 +80,7 @@ jobs:
           print('manifest_rows:', manifest['rows'])
           print('manifest_declared_categories:', manifest.get('declared_category_counts', {}))
           print('suffix_declared_categories:', manifest.get('suffix_declared_category_counts', {}))
+          print('cdn_category_probe:', {suffix: item['successful_categories'] for suffix, item in probe['suffixes'].items()})
           print('master_compressed_md5:', bootstrap['master']['expected_compressed_md5'])
           print('master_decoded_sha256:', bootstrap['master']['decoded_sha256'])
           print('master_card_rows:', master['card_data']['row_count'])
@@ -94,6 +104,7 @@ jobs:
           path: |
             work/final-resource/resource-bootstrap.json
             work/final-resource/manifest-report.json
+            work/final-resource/category-probe.json
             work/final-resource/master-report.json
           if-no-files-found: warn
           retention-days: 7
