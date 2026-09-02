@@ -22,5 +22,7 @@ jobs:
           scripts/fetch-resource-bootstrap.py
           scripts/extract-analysis-targets.py
           scripts/scan-analysis-targets.py
+          scripts/unpack-xapk.py
+          scripts/inspect-il2cpp-metadata.py
       - name: Run tests
         run: python -m unittest discover -s tests -v
