@@ -81,6 +81,41 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
         self.assertEqual(decoded["data"], {})
 
+    def test_load_index_requires_configured_profile(self) -> None:
+        status, body = self._post_route("/load/index")
+        self.assertEqual(status, 503)
+        self.assertIn(b"profile is not configured", body)
+
+    def test_real_http_load_index_exchange_with_profile(self) -> None:
+        profile = {
+            "common_define": {"expanding_count": 5},
+            "user_info": {"tutorial_flag": 1000},
+            "user_card_list": [],
+        }
+        server = create_server(
+            "127.0.0.1",
+            0,
+            final_res_ver="10133800",
+            load_index_data=profile,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        try:
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("POST", "/load/index", body=self._request_body(), headers=self._headers())
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            body = response.read()
+            conn.close()
+            decoded = cgss_codec.decode_body(body, self.udid)
+            self.assertEqual(decoded["data_headers"]["result_code"], 1)
+            self.assertEqual(decoded["data"], profile)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_health_and_unknown_route(self) -> None:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
         conn.request("GET", "/healthz")
@@ -90,7 +125,7 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         conn.close()
 
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
-        conn.request("POST", "/load/index", body=b"", headers={"Content-Length": "0"})
+        conn.request("POST", "/load/unknown", body=b"", headers={"Content-Length": "0"})
         response = conn.getresponse()
         self.assertEqual(response.status, 404)
         response.read()
