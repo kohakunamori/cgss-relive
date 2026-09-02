@@ -49,11 +49,10 @@ REQUIRED_USER_INFO_FIELDS = (
     "stamina_heal_time",
 )
 
-# These top-level sections are all individually ContainsKey-guarded by the final
+# These top-level sections are individually ContainsKey-guarded by the final
 # ``Stage.LoadTask.Parse`` and then treated as list-like containers. Supplying an
-# empty list therefore enters the manager-reset/initialization path without
-# fabricating card, unit, item or live records whose master-data validity would
-# otherwise have to be proven first.
+# empty list therefore avoids fabricating records whose master-data validity
+# would otherwise have to be proven first.
 HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "user_card_list",
     "user_unit_list",
@@ -65,6 +64,12 @@ HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "user_live_list",
     "master_plus_live_list",
 )
+
+# A subtle dependency proven in the final native parser: once user_unit_list is
+# present (even when empty), the parser reads data.user_info.unit_slot before it
+# checks the unit-list count. This field therefore belongs to the Home candidate,
+# not to the strict profile where user_unit_list is absent.
+HOME_CANDIDATE_USER_INFO_FIELDS = ("unit_slot",)
 
 
 def build_minimal_load_index_data(
@@ -125,18 +130,22 @@ def build_home_candidate_load_index_data(
     """Return a parser-safe candidate intended for the first Home transition.
 
     This deliberately does *not* invent starter cards or units. Instead it adds
-    empty containers whose final-client parsers are guarded at the section level,
-    allowing their corresponding managers to observe an explicit empty state.
+    empty containers whose final-client parsers are section-guarded, allowing
+    their corresponding managers to observe an explicit empty state.
 
-    ``music_list`` is special: once that optional top-level map is present, the
-    final parser directly reads its ``normal`` list. ``sp`` is separately guarded,
-    so the smallest safe shape is ``{"normal": []}``.
+    ``user_unit_list`` has one proven side dependency: its presence causes the
+    parser to directly read ``user_info.unit_slot`` before list iteration.
+
+    ``music_list`` is also special: once that optional top-level map is present,
+    the final parser directly reads its ``normal`` list. ``sp`` is separately
+    guarded, so the smallest safe shape is ``{"normal": []}``.
     """
     data = build_minimal_load_index_data(
         viewer_id=viewer_id,
         producer_name=producer_name,
         now=now,
     )
+    data["user_info"]["unit_slot"] = 1
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         data[section] = []
     data["music_list"] = {"normal": []}
@@ -169,8 +178,13 @@ def validate_minimal_profile(data: dict[str, Any]) -> list[str]:
 
 
 def validate_home_candidate_profile(data: dict[str, Any]) -> list[str]:
-    """Validate the additional statically-proven Home-candidate container shapes."""
+    """Validate the additional statically-proven Home-candidate shapes."""
     errors = validate_minimal_profile(data)
+    user = data.get("user_info")
+    if isinstance(user, dict):
+        for name in HOME_CANDIDATE_USER_INFO_FIELDS:
+            if name not in user:
+                errors.append(f"user_info.{name}")
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         value = data.get(section)
         if not isinstance(value, list):
