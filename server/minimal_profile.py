@@ -16,8 +16,6 @@ import time
 from typing import Any
 
 
-# ``data.common_define`` fields read unconditionally by final 11.6.3 before the
-# parser switches to ContainsKey-guarded optional additions.
 REQUIRED_COMMON_DEFINE_FIELDS = (
     "expanding_count",
     "expanding_jewel",
@@ -28,8 +26,6 @@ REQUIRED_COMMON_DEFINE_FIELDS = (
     "room_lvup_jewel",
 )
 
-# Union of direct reads from the observed final ``data.user_info`` branches plus
-# tutorial_flag, which is consumed by the completed-tutorial bootstrap path.
 REQUIRED_USER_INFO_FIELDS = (
     "tutorial_flag",
     "viewer_id",
@@ -52,9 +48,6 @@ REQUIRED_USER_INFO_FIELDS = (
     "stamina_heal_time",
 )
 
-# These top-level sections are individually ContainsKey-guarded by final
-# ``Stage.LoadTask.Parse`` and can be represented as empty lists for the Home
-# candidate. ``user_unit_list`` has an additional user_info dependency below.
 HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "user_card_list",
     "user_unit_list",
@@ -67,12 +60,11 @@ HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "master_plus_live_list",
 )
 
-# Once user_unit_list is present (even empty), final 11.6.3 directly reads this
-# field before checking the unit-list count.
+# Both final user-unit parsing passes independently ContainsKey-guard
+# user_unit_list. Once the section exists, they read user_info.unit_slot before
+# iterating items, so an explicitly empty list still needs this field.
 HOME_CANDIDATE_USER_INFO_FIELDS = ("unit_slot",)
 
-# Final parser directly reads these keys for every user_card_list item. join_type,
-# is_custom and custom_info are separately presence/state guarded.
 STARTER_CARD_REQUIRED_FIELDS = (
     "serial_id",
     "card_id",
@@ -83,20 +75,25 @@ STARTER_CARD_REQUIRED_FIELDS = (
     "protect",
 )
 
-# The final unit parser reads ``name`` and loops exactly five times over the
-# format string ``serial_id_{0}`` (w20=0..4; cmp w20,#5).
 FINAL_UNIT_SLOT_COUNT = 5
+# The first final unit pass reads name + serial_id_0..4. A later independent
+# unit pass directly reads unit_id and name before traversing the same five
+# serial slots, making unit_id mandatory whenever the list is non-empty.
 STARTER_UNIT_REQUIRED_FIELDS = (
+    "unit_id",
     "name",
     *(f"serial_id_{index}" for index in range(FINAL_UNIT_SLOT_COUNT)),
 )
 STARTER_CHARA_REQUIRED_FIELDS = ("chara_id", "fan")
 
-# Verified by the independent 10133800 master-resource CI, not copied from an
-# account response. Serial ID 1 is synthetic local ownership state.
+# Card/chara identity is independently verified against final 10133800 master.
+# Ownership serial, user unit id, slot selection and progress are synthetic
+# local state. Historical response structure also uses 1-based unit_id values;
+# no historical account payload is copied into the profile.
 STARTER_CARD_ID = 100001
 STARTER_CHARA_ID = 101
 STARTER_SERIAL_ID = 1
+STARTER_UNIT_ID = 1
 STARTER_UNIT_SLOT = 1
 
 
@@ -119,8 +116,6 @@ def build_minimal_load_index_data(
             "room_lvup_jewel": 1,
         },
         "user_info": {
-            # Final bootstrap normalizes server-side tutorial step 100 into the
-            # local completed step 1000.
             "tutorial_flag": 100,
             "viewer_id": int(viewer_id),
             "name": str(producer_name),
@@ -159,8 +154,6 @@ def build_home_candidate_load_index_data(
     data["user_info"]["unit_slot"] = STARTER_UNIT_SLOT
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         data[section] = []
-
-    # Once music_list exists, final 11.6.3 directly reads normal; sp is guarded.
     data["music_list"] = {"normal": []}
     return data
 
@@ -171,12 +164,7 @@ def build_starter_visible_load_index_data(
     producer_name: str = "Relive Producer",
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Return a tiny synthetic profile with one visible final-master starter card.
-
-    ``100001`` / 島村卯月 is selected only because the final 10133800 master CI
-    independently proves the card and chara id are present. The ownership serial,
-    unit composition, producer identity and progress values are synthetic.
-    """
+    """Return a tiny synthetic profile with one visible final-master starter card."""
     data = build_home_candidate_load_index_data(
         viewer_id=viewer_id,
         producer_name=producer_name,
@@ -195,6 +183,7 @@ def build_starter_visible_load_index_data(
     ]
     data["user_unit_list"] = [
         {
+            "unit_id": STARTER_UNIT_ID,
             "name": "Relive Unit",
             "serial_id_0": STARTER_SERIAL_ID,
             "serial_id_1": 0,
@@ -204,10 +193,6 @@ def build_starter_visible_load_index_data(
         }
     ]
     data["user_chara_list"] = [{"chara_id": STARTER_CHARA_ID, "fan": 0}]
-
-    # leader_serial_id is presence-guarded by the final parser, so it is not part
-    # of the mandatory schema. Supplying the owned serial here is an intentional
-    # functional choice for a Home-visible profile.
     data["user_info"]["leader_serial_id"] = STARTER_SERIAL_ID
     return data
 
@@ -283,6 +268,8 @@ def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
     else:
         errors.extend(_missing_item_fields(units[0], STARTER_UNIT_REQUIRED_FIELDS, "user_unit_list[0]"))
         if isinstance(units[0], dict):
+            if units[0].get("unit_id") != STARTER_UNIT_ID:
+                errors.append("user_unit_list[0].unit_id")
             if units[0].get("serial_id_0") != STARTER_SERIAL_ID:
                 errors.append("user_unit_list[0].serial_id_0")
             for index in range(1, FINAL_UNIT_SLOT_COUNT):
