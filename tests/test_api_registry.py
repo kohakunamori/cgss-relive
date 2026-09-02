@@ -35,7 +35,19 @@ class ApiRegistryTests(unittest.TestCase):
     def test_bootstrap_routes_are_registry_backed(self) -> None:
         self.assertEqual(
             api_registry.BOOTSTRAP_HTTP_ROUTES,
-            frozenset({"/load/check", "/load/title", "/load/index"}),
+            frozenset(
+                {
+                    "/load/check",
+                    "/load/set_cache_clear_flg",
+                    "/load/title",
+                    "/load/index",
+                    "/load/update_agreement_status",
+                }
+            ),
+        )
+        self.assertEqual(
+            api_registry.EMPTY_SUCCESS_HTTP_ROUTES,
+            frozenset({"/load/set_cache_clear_flg", "/load/update_agreement_status"}),
         )
 
     def test_home_is_update_only_in_verified_runtime_subset(self) -> None:
