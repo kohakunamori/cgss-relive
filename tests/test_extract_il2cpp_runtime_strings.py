@@ -32,6 +32,23 @@ class RuntimeStringReferenceTests(unittest.TestCase):
             [(0x491F3A8, 0x81F28B0), (0x491F418, 0x824B1B8)],
         )
 
+    def test_filter_refs_by_address_and_literal(self) -> None:
+        refs = [
+            {"instruction": 0x1000, "slot": 1, "literal": "noise"},
+            {"instruction": 0x1010, "slot": 2, "literal": "data"},
+            {"instruction": 0x1020, "slot": 3, "literal": "common_define"},
+            {"instruction": 0x1030, "slot": 4, "literal": "data"},
+        ]
+        self.assertEqual(
+            MODULE.filter_refs(refs, start=0x1010, end=0x1030, literals=["data", "common_define"]),
+            refs[1:3],
+        )
+        self.assertEqual(MODULE.filter_refs(refs, literals=["common_define"]), [refs[2]])
+
+    def test_parse_address_accepts_decimal_and_hex(self) -> None:
+        self.assertEqual(MODULE.parse_address("4096"), 0x1000)
+        self.assertEqual(MODULE.parse_address("0x4852398"), 0x4852398)
+
 
 if __name__ == "__main__":
     unittest.main()
