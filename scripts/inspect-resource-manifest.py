@@ -5,6 +5,10 @@ The report is designed for preservation work: it verifies SQLite integrity,
 checks the ``manifests`` schema, classifies the CDN category for extensions whose
 current final-resource routing has been independently observed, and reports every
 unclassified suffix rather than silently guessing a URL.
+
+When the manifest itself contains a ``category`` column, the report also records
+suffix x declared-category counts.  This is evidence only: declared values are not
+silently converted into CDN directory names until their meaning is proven.
 """
 from __future__ import annotations
 
@@ -51,6 +55,12 @@ def resource_path(name: str, digest: str) -> str | None:
     return f"/dl/resources/{category}/{digest[:2]}/{digest}"
 
 
+def _declared_category_key(value: Any) -> str:
+    if value is None:
+        return "<null>"
+    return str(value)
+
+
 def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any]:
     raw_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
@@ -67,16 +77,20 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
         column_names = {column["name"] for column in columns}
         if not {"name", "hash"}.issubset(column_names):
             raise ValueError("manifests table is missing required name/hash columns")
+        has_declared_category = "category" in column_names
 
         suffix_counts: collections.Counter[str] = collections.Counter()
         category_counts: collections.Counter[str] = collections.Counter()
+        declared_category_counts: collections.Counter[str] = collections.Counter()
+        suffix_declared: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
         invalid_hashes: list[dict[str, str]] = []
         unknown: list[dict[str, str]] = []
         total = 0
         unique_names: set[str] = set()
         unique_hashes: set[str] = set()
 
-        for name, digest in conn.execute("SELECT name, hash FROM manifests ORDER BY name"):
+        query = "SELECT name, hash, category FROM manifests ORDER BY name" if has_declared_category else "SELECT name, hash, NULL FROM manifests ORDER BY name"
+        for name, digest, declared_category in conn.execute(query):
             name = str(name)
             digest = str(digest)
             total += 1
@@ -86,10 +100,17 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
             suffix_counts[suffix] += 1
             category = category_for_name(name)
             category_counts[category or "<unknown>"] += 1
+            if has_declared_category:
+                declared_key = _declared_category_key(declared_category)
+                declared_category_counts[declared_key] += 1
+                suffix_declared[suffix][declared_key] += 1
             if not HASH_RE.fullmatch(digest) and len(invalid_hashes) < unknown_examples:
                 invalid_hashes.append({"name": name, "hash": digest})
             if category is None and len(unknown) < unknown_examples:
-                unknown.append({"name": name, "hash": digest, "suffix": suffix})
+                example = {"name": name, "hash": digest, "suffix": suffix}
+                if has_declared_category:
+                    example["declared_category"] = _declared_category_key(declared_category)
+                unknown.append(example)
 
         duplicate_names = conn.execute(
             "SELECT COUNT(*) FROM (SELECT name FROM manifests GROUP BY name HAVING COUNT(*) > 1)"
@@ -118,6 +139,12 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
             },
             "suffix_counts": dict(sorted(suffix_counts.items(), key=lambda item: (-item[1], item[0]))),
             "category_counts": dict(sorted(category_counts.items())),
+            "has_declared_category": has_declared_category,
+            "declared_category_counts": dict(sorted(declared_category_counts.items())),
+            "suffix_declared_category_counts": {
+                suffix: dict(sorted(counter.items()))
+                for suffix, counter in sorted(suffix_declared.items())
+            },
             "invalid_hash_examples": invalid_hashes,
             "unknown_category_examples": unknown,
         }
@@ -131,8 +158,11 @@ def write_catalog(db_path: Path, catalog_path: Path) -> int:
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     count = 0
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(manifests)")}
+        has_declared_category = "category" in columns
+        query = "SELECT name, hash, category FROM manifests ORDER BY name" if has_declared_category else "SELECT name, hash, NULL FROM manifests ORDER BY name"
         with catalog_path.open("w", encoding="utf-8") as output:
-            for name, digest in conn.execute("SELECT name, hash FROM manifests ORDER BY name"):
+            for name, digest, declared_category in conn.execute(query):
                 name = str(name)
                 digest = str(digest).lower()
                 row = {
@@ -142,6 +172,8 @@ def write_catalog(db_path: Path, catalog_path: Path) -> int:
                     "category": category_for_name(name),
                     "resource_path": resource_path(name, digest),
                 }
+                if has_declared_category:
+                    row["declared_category"] = _declared_category_key(declared_category)
                 output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
                 count += 1
     finally:
