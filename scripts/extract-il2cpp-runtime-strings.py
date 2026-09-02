@@ -2,13 +2,13 @@
 """Resolve IL2CPP runtime string-literal references from AArch64 disassembly.
 
 Unity 2022 / IL2CPP metadata v31 stores runtime metadata usages behind relocated
-pointer slots.  This helper combines ``global-metadata.dat``, the matching ELF,
+pointer slots. This helper combines ``global-metadata.dat``, the matching ELF,
 and a text disassembly (for example from ``llvm-objdump -d``) to turn the
 ``ADRP + LDR`` pointer loads back into managed string literals.
 
 It is intentionally narrow: the current implementation targets the final CGSS
 11.6.3 arm64 specimen and other Unity 2022 metadata-v31 binaries with the same
-metadata-usage encoding.  It does not dump code or proprietary resources.
+metadata-usage encoding. It does not dump code or proprietary resources.
 """
 from __future__ import annotations
 
@@ -40,6 +40,14 @@ ADRP_RE = re.compile(r"^\s*([0-9a-fA-F]+):.*\badrp\s+x(\d+),\s*0x([0-9a-fA-F]+)"
 LDR_RE = re.compile(
     r"^\s*([0-9a-fA-F]+):.*\bldr\s+x(\d+),\s*\[x(\d+),\s*#(0x[0-9a-fA-F]+|\d+)\]"
 )
+
+
+def parse_address(value: str) -> int:
+    """Parse a decimal or ``0x``-prefixed virtual address for CLI filters."""
+    try:
+        return int(value, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid address: {value}") from exc
 
 
 def decode_metadata_usage(encoded: int, literals: list[str]) -> str | None:
@@ -168,15 +176,54 @@ def extract_refs(metadata_path: Path, elf_path: Path, disassembly_path: Path) ->
     return refs
 
 
+def filter_refs(
+    refs: Iterable[dict[str, object]],
+    *,
+    start: int | None = None,
+    end: int | None = None,
+    literals: Iterable[str] = (),
+) -> list[dict[str, object]]:
+    """Filter refs by half-open address range and/or exact literal values."""
+    wanted = set(literals)
+    results: list[dict[str, object]] = []
+    for ref in refs:
+        instruction = int(ref["instruction"])
+        literal = str(ref["literal"])
+        if start is not None and instruction < start:
+            continue
+        if end is not None and instruction >= end:
+            continue
+        if wanted and literal not in wanted:
+            continue
+        results.append(ref)
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("metadata", type=Path)
     parser.add_argument("elf", type=Path)
     parser.add_argument("disassembly", type=Path)
+    parser.add_argument("--from-address", type=parse_address, help="only refs at/after this virtual address")
+    parser.add_argument("--to-address", type=parse_address, help="only refs before this virtual address")
+    parser.add_argument(
+        "--literal",
+        action="append",
+        default=[],
+        help="only print this exact literal; repeat to allow more than one",
+    )
     parser.add_argument("--unique", action="store_true", help="print each literal once, preserving first-use order")
     args = parser.parse_args()
 
-    refs = extract_refs(args.metadata, args.elf, args.disassembly)
+    if args.from_address is not None and args.to_address is not None and args.from_address >= args.to_address:
+        parser.error("--from-address must be lower than --to-address")
+
+    refs = filter_refs(
+        extract_refs(args.metadata, args.elf, args.disassembly),
+        start=args.from_address,
+        end=args.to_address,
+        literals=args.literal,
+    )
     seen: set[str] = set()
     for ref in refs:
         literal = str(ref["literal"])
