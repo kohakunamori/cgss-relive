@@ -26,7 +26,7 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
-    def _post(self, res_ver: str) -> tuple[int, bytes]:
+    def _request_body(self) -> bytes:
         request = {
             "campaign_data": "",
             "campaign_user": 0,
@@ -35,24 +35,30 @@ class HTTPBootstrapServerTests(unittest.TestCase):
             "viewer_id": "opaque-viewer-id",
             "timezone": "+09:00:00",
         }
-        body = cgss_codec.encode_body(
+        return cgss_codec.encode_body(
             request,
             self.udid,
             dynamic_key=b"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         )
+
+    def _headers(self, res_ver: str = "10133800") -> dict[str, str]:
+        return {
+            "Content-Type": "application/octet-stream",
+            "UDID": synthetic_header_encode(self.udid),
+            "RES-VER": res_ver,
+            "SID": "synthetic-sid",
+            "APP-VER": "11.6.3",
+        }
+
+    def _post(self, route: str, *, res_ver: str = "10133800") -> tuple[int, bytes]:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
-        conn.request(
-            "POST",
-            "/load/check",
-            body=body,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "UDID": synthetic_header_encode(self.udid),
-                "RES-VER": res_ver,
-                "SID": "synthetic-sid",
-                "APP-VER": "11.6.3",
-            },
-        )
+        conn.request(route, "" if False else "POST")
+        conn.close()
+        raise AssertionError("unreachable")
+
+    def _post_route(self, route: str, *, res_ver: str = "10133800") -> tuple[int, bytes]:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        conn.request("POST", route, body=self._request_body(), headers=self._headers(res_ver))
         response = conn.getresponse()
         payload = response.read()
         status = response.status
@@ -60,18 +66,26 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         return status, payload
 
     def test_real_http_mismatch_exchange(self) -> None:
-        status, body = self._post("10133000")
+        status, body = self._post_route("/load/check", res_ver="10133000")
         self.assertEqual(status, 200)
         decoded = cgss_codec.decode_body(body, self.udid)
         self.assertEqual(decoded["data_headers"]["result_code"], 214)
         self.assertEqual(decoded["data_headers"]["required_res_ver"], "10133800")
 
     def test_real_http_success_exchange(self) -> None:
-        status, body = self._post("10133800")
+        status, body = self._post_route("/load/check")
         self.assertEqual(status, 200)
         decoded = cgss_codec.decode_body(body, self.udid)
         self.assertEqual(decoded["data_headers"]["result_code"], 1)
         self.assertNotIn("required_res_ver", decoded["data_headers"])
+
+    def test_real_http_title_exchange(self) -> None:
+        status, body = self._post_route("/load/title")
+        self.assertEqual(status, 200)
+        decoded = cgss_codec.decode_body(body, self.udid)
+        self.assertEqual(decoded["data_headers"]["result_code"], 1)
+        self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
+        self.assertEqual(decoded["data"], {})
 
     def test_health_and_unknown_route(self) -> None:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
@@ -82,7 +96,7 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         conn.close()
 
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
-        conn.request("POST", "/load/title", body=b"", headers={"Content-Length": "0"})
+        conn.request("POST", "/load/index", body=b"", headers={"Content-Length": "0"})
         response = conn.getresponse()
         self.assertEqual(response.status, 404)
         response.read()
