@@ -1,0 +1,94 @@
+name: Verify final CGSS resources
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/verify-final-resources.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify-final-resources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch and verify frozen 10133800 manifest and master
+        run: |
+          python scripts/fetch-resource-bootstrap.py \
+            --version 10133800 \
+            --output work/final-resource \
+            --force
+
+      - name: Inspect manifest without exporting game data
+        run: |
+          python scripts/inspect-resource-manifest.py \
+            work/final-resource/manifest_10133800.db \
+            --output work/final-resource/manifest-report.json \
+            --unknown-examples 20
+
+      - name: Inspect master and starter-card candidates
+        run: |
+          python scripts/inspect-master-db.py \
+            work/final-resource/master.mdb \
+            --output work/final-resource/master-report.json \
+            --card-id 100001 \
+            --card-id 200001 \
+            --card-id 300001
+
+      - name: Assert sanitized final-resource invariants
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('work/final-resource')
+          bootstrap = json.loads((root / 'resource-bootstrap.json').read_text(encoding='utf-8'))
+          manifest = json.loads((root / 'manifest-report.json').read_text(encoding='utf-8'))
+          master = json.loads((root / 'master-report.json').read_text(encoding='utf-8'))
+
+          assert bootstrap['resource_version'] == 10133800
+          assert manifest['quick_check'] == ['ok']
+          assert manifest['master_mdb']['hash'] == bootstrap['master']['expected_compressed_md5']
+          assert master['quick_check'] == ['ok']
+          assert master['has_card_data'] is True
+          assert master['card_data']['row_count'] > 0
+          assert any(card['id'] == 100001 and card['present'] for card in master['requested_cards'])
+
+          print('resource_version:', bootstrap['resource_version'])
+          print('all_dbmanifest_sha256:', bootstrap['index']['sha256'])
+          print('manifest_decoded_sha256:', bootstrap['manifest']['decoded_sha256'])
+          print('manifest_rows:', manifest['rows'])
+          print('master_compressed_md5:', bootstrap['master']['expected_compressed_md5'])
+          print('master_decoded_sha256:', bootstrap['master']['decoded_sha256'])
+          print('master_card_rows:', master['card_data']['row_count'])
+          print('starter_candidates:', master['requested_cards'])
+          PY
+
+      - name: Remove proprietary databases before artifact upload
+        if: always()
+        run: |
+          rm -f work/final-resource/manifest_10133800.db
+          rm -f work/final-resource/master.mdb
+          rm -f work/final-resource/all_dbmanifest.txt
+          rm -f work/final-resource/*.lz4
+          find work/final-resource -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Upload sanitized verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-resource-verification
+          path: |
+            work/final-resource/resource-bootstrap.json
+            work/final-resource/manifest-report.json
+            work/final-resource/master-report.json
+          if-no-files-found: warn
+          retention-days: 7
