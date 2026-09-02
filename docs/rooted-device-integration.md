@@ -1,18 +1,18 @@
 # Rooted Android integration for the final CGSS 11.6.3 client
 
 This document is the first real-client integration path for the supplied final
-Android 11.6.3 build.  It keeps the client hostname and HTTPS semantics intact
+Android 11.6.3 build. It keeps the client hostname and HTTPS semantics intact
 while redirecting only the CGSS control API to a local `cgss-relive` server.
 
 ## Why HTTPS is the default
 
 The final 11.6.3 client targets modern Android and its manifest does not declare a
-custom `networkSecurityConfig` or a cleartext opt-in.  Static IL2CPP metadata
+custom `networkSecurityConfig` or a cleartext opt-in. Static IL2CPP metadata
 contains Unity/Mono's normal certificate-validation surface but, so far, no game
 class overriding a `ValidateCertificate` method has been found.
 
 That is evidence against a managed custom certificate pin, not a guarantee that
-no native/plugin validation exists.  The least invasive integration experiment
+no native/plugin validation exists. The least invasive integration experiment
 therefore preserves:
 
 - hostname: `apis.game.starlight-stage.jp`
@@ -20,10 +20,10 @@ therefore preserves:
 - port from the client's point of view: 443
 - original Host header and TLS SNI
 
-A local test CA is trusted as a **system** CA on a dedicated rooted device.  A
+A local test CA is trusted as a **system** CA on a dedicated rooted device. A
 user-installed CA alone is not a reliable choice for a modern target-SDK app.
 
-Do not redirect the asset CDN yet.  The first test redirects only the control API
+Do not redirect the asset CDN yet. The first test redirects only the control API
 hostname so resource downloads can remain independently observable.
 
 ## 1. Install Python dependencies
@@ -65,7 +65,7 @@ Conscrypt/APEX layouts and root-manager overlay mechanisms differ across Magisk,
 KernelSU and ROMs.
 
 On the dedicated rooted device, use the root solution's supported system-CA
-mechanism to make `work/tls/ca.cert.pem` trusted by apps as a **system** CA.  If
+mechanism to make `work/tls/ca.cert.pem` trusted by apps as a **system** CA. If
 the root solution offers a "trust user certificates as system" or systemless CA
 module, use a version compatible with that Android release.
 
@@ -85,7 +85,7 @@ The rooted device needs this effective hosts entry:
 ```
 
 Use the root manager's systemless-hosts mechanism or another reversible rooted
-hosts override.  Do not edit a read-only system partition in place just for this
+hosts override. Do not edit a read-only system partition in place just for this
 experiment.
 
 Confirm from a root shell that name resolution reaches loopback before launching
@@ -124,7 +124,10 @@ Remove the reverse mapping with:
 ## 6. Start the current bootstrap server
 
 The static-parser-derived `/load/index` profile is still experimental, so it is
-behind an explicit switch:
+behind an explicit switch. When the reconstructed final `final_map.json` is
+available locally, pass it with `--api-map`; the map is strictly validated before
+the server starts and is used only to annotate runtime routes, not to invent
+responses.
 
 ```powershell
 python -m server.http_server `
@@ -135,7 +138,8 @@ python -m server.http_server `
   --experimental-minimal-load-index `
   --viewer-id 1 `
   --producer-name "Relive Producer" `
-  --event-log .\work\runtime-events.jsonl
+  --event-log .\work\runtime-events.jsonl `
+  --api-map .\work\final_map.json
 ```
 
 The event log is intentionally sanitized. It contains route/status, APP/RES/Unity
@@ -143,6 +147,23 @@ version headers, decoded request key names and response key/result-code shape. I
 does **not** write UDID, SID, USER-ID, PARAM or decoded request/response values.
 That file is the preferred artifact to share back during the first integration
 run.
+
+With `--api-map`, an unimplemented request that is present in the final 11.6.3
+ApiType map is also annotated with its public protocol identity:
+
+```json
+{
+  "route": "/bn_consent/get_state",
+  "status": 404,
+  "error": "endpoint_not_implemented",
+  "api_candidates": [
+    {"group": "A", "key": 14, "name": "BnContentGetState", "literal_index": 23438}
+  ]
+}
+```
+
+Path aliases are preserved as multiple candidates; the server never assumes that
+one relative path uniquely identifies an enum key.
 
 Implemented routes at this stage:
 
@@ -153,8 +174,18 @@ POST /load/index
 GET  /healthz
 ```
 
-`/load/check` negotiates resource revision `10133800`.  `/load/title` uses the
-statically proven minimal success response.  `/load/index` uses the candidate
+The complete final A-group endpoint map contains six `load/` entries but no
+`home/index` or `home/load`. Therefore the first integration target is now:
+
+```text
+/load/check -> /load/title -> /load/index -> local Home transition
+```
+
+not a speculative Home-loading API. The map only proves endpoint availability,
+not execution order, so runtime observation remains authoritative.
+
+`/load/check` negotiates resource revision `10133800`. `/load/title` uses the
+statically proven minimal success response. `/load/index` uses the candidate
 synthetic profile documented in `docs/load-index-11.6.3.md`.
 
 ## 7. First runtime acceptance test
@@ -168,11 +199,12 @@ The first useful outcomes are deliberately narrow:
 2. Does the server receive `POST /load/check`?
 3. Does the client accept the encrypted response and continue/restart according
    to the resource-version result?
-4. Which endpoint is requested next?
-5. If `/load/index` is reached, does the candidate minimal profile parse, or what
-   is the first missing/state-dependent field?
+4. Which endpoint is requested next? If it is in the supplied final map, the
+   event log should identify its exact ApiType group/key/name.
+5. If `/load/index` is reached, does the candidate minimal profile parse and
+   transition toward Home, or what is the first missing/state-dependent field?
 
-Do not collect or commit raw production credentials.  For a golden fixture,
+Do not collect or commit raw production credentials. For a golden fixture,
 retain only a dedicated test installation and sanitize identifiers/session
 values before committing anything under `tests/fixtures/`.
 
@@ -187,15 +219,22 @@ using IPv6 or another API hostname.
 
 The most likely causes are that the CA is only user-trusted, the certificate SAN
 or date is wrong, or the final client has a validation path not visible in the
-managed metadata.  Capture the exact logcat error before modifying the APK.
+managed metadata. Capture the exact logcat error before modifying the APK.
+
+### A known final ApiType route returns 404
+
+This is now a precise implementation gap rather than an unknown request. Use the
+logged `api_candidates` entry to select the matching final-client Task/Parse
+method for the next static pass. Do not return an empty success response unless
+the 11.6.3 parser proves that shape is valid.
 
 ### HTTP request arrives but client reports a connection/protocol error
 
-Record the route and HTTP status.  The wire codec is already round-trip tested;
+Record the route and HTTP status. The wire codec is already round-trip tested;
 this class of failure is more likely a response-schema/state issue than TLS.
 
 ### `/load/index` arrives and then the client errors
 
-This is the expected place for the next schema iteration.  The profile is
+This is the expected place for the next schema iteration. The profile is
 explicitly a static candidate, not yet a runtime-proven complete account model.
 The first failing field/state transition becomes the next native-parser target.
