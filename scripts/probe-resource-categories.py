@@ -42,13 +42,19 @@ def select_examples(manifest: Path, suffix: str, *, limit: int = 1) -> list[tupl
     return [(str(name), str(digest).lower()) for name, digest in rows]
 
 
+def select_example(manifest: Path, suffix: str) -> tuple[str, str]:
+    """Backward-compatible single-sample helper used by existing callers/tests."""
+    return select_examples(manifest, suffix, limit=1)[0]
+
+
 def probe(
     category: str,
     digest: str,
     *,
-    mode: str,
+    mode: str = "range",
     timeout: float = 20.0,
 ) -> dict[str, Any]:
+    """Probe one CDN category; default to the historical Range-only behavior."""
     if mode not in REQUEST_MODES:
         raise ValueError(f"unsupported probe mode: {mode!r}")
 
@@ -65,9 +71,9 @@ def probe(
     request = urllib.request.Request(CDN_BASE + path, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            # The ordinary GET path intentionally reads exactly one byte and then
-            # closes the socket. This distinguishes Range policy from a category
-            # miss without turning the probe into an asset downloader.
+            # Read exactly one byte and close the response. This remains a path
+            # probe rather than an asset downloader even when the CDN ignores
+            # Range and returns HTTP 200.
             body_prefix = response.read(1)
             return {
                 "mode": mode,
@@ -104,8 +110,6 @@ def probe_category(category: str, digest: str, *, timeout: float) -> dict[str, A
     range_result = probe(category, digest, mode="range", timeout=timeout)
     attempts.append(range_result)
 
-    # A successful range response already proves the path. Only retry with a
-    # one-byte ordinary GET when Range did not establish the category.
     range_success = (
         range_result.get("status") in {200, 206}
         and int(range_result.get("received_prefix_bytes", 0)) == 1
