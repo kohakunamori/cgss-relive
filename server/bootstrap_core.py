@@ -7,11 +7,12 @@ of this layer so reconstructed CGSS contracts can be tested deterministically.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Any
+from typing import Any, Mapping
 
 from . import cgss_codec
 from .header_codec import decode_header_value
 from .load_check import FINAL_RESOURCE_VERSION, encode_load_check_response
+from .load_index import encode_load_index_response
 from .load_title import encode_load_title_response
 
 
@@ -81,6 +82,32 @@ def process_load_title_request(
     sid = _get_header(headers, "SID")
     response = encode_load_title_response(
         udid,
+        sid=sid,
+        servertime=servertime,
+        dynamic_key=dynamic_key,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_load_index_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    data: Mapping[str, Any],
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+) -> BootstrapExchange:
+    """Decode ``/load/index`` and return an encrypted injected archival profile."""
+    udid, request = decode_client_request(headers, body, route="load/index")
+    sid = _get_header(headers, "SID")
+    response = encode_load_index_response(
+        udid,
+        data,
         sid=sid,
         servertime=servertime,
         dynamic_key=dynamic_key,
