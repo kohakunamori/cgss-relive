@@ -16,6 +16,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile Python helpers
-        run: python -m py_compile scripts/inspect-apk.py
+        run: >-
+          python -m py_compile
+          scripts/inspect-apk.py
+          scripts/fetch-resource-bootstrap.py
       - name: Run tests
         run: python -m unittest discover -s tests -v
