@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Inspect a CGSS resource-manifest SQLite database without downloading assets.
 
-The report is designed for preservation work: it verifies SQLite integrity,
-checks the ``manifests`` schema, classifies the CDN category for extensions whose
-current final-resource routing has been independently observed, and reports every
-unclassified suffix rather than silently guessing a URL.
+The report verifies SQLite integrity, checks the ``manifests`` schema, classifies
+CDN categories only for extensions backed by current-final evidence, and reports
+any still-unclassified suffix instead of silently guessing a URL.
 
-When the manifest itself contains a ``category`` column, the report also records
-suffix x declared-category counts.  This is evidence only: declared values are not
-silently converted into CDN directory names until their meaning is proven.
+When the manifest contains a ``category`` column, suffix x declared-category
+counts are also recorded. Those values are delivery groups (for example
+``every``/``common``), not CDN directory names.
 """
 from __future__ import annotations
 
@@ -26,6 +25,8 @@ HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 CATEGORY_BY_SUFFIX = {
     ".unity3d": "AssetBundles",
     ".acb": "Sound",
+    ".awb": "Sound",
+    ".bytes": "Sound",
     ".usm": "Movie",
     ".bdb": "Generic",
     ".mdb": "Generic",
