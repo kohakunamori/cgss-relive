@@ -21,6 +21,7 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(data["user_info"]["name"], "Relive")
         self.assertEqual(data["user_info"]["stamina_heal_time"], 456)
         self.assertEqual(data["user_info"]["tutorial_flag"], 100)
+        self.assertNotIn("unit_slot", data["user_info"])
         self.assertNotIn("user_card_list", data)
         self.assertNotIn("music_list", data)
 
@@ -29,17 +30,23 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(validate_home_candidate_profile(data), [])
         self.assertEqual(validate_minimal_profile(data), [])
         self.assertEqual(data["user_info"]["viewer_id"], 321)
+        self.assertEqual(data["user_info"]["unit_slot"], 1)
         for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
             self.assertEqual(data[section], [])
         self.assertEqual(data["music_list"], {"normal": []})
 
-    def test_home_candidate_validator_rejects_wrong_container_shapes(self) -> None:
+    def test_home_candidate_validator_rejects_dependencies_and_wrong_shapes(self) -> None:
         data = build_home_candidate_load_index_data(now=1)
+        del data["user_info"]["unit_slot"]
         data[HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0]] = {}
         data["music_list"] = {"normal": {}}
         self.assertEqual(
             validate_home_candidate_profile(data),
-            [HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0], "music_list.normal"],
+            [
+                "user_info.unit_slot",
+                HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0],
+                "music_list.normal",
+            ],
         )
 
     def test_validator_reports_removed_fields(self) -> None:
