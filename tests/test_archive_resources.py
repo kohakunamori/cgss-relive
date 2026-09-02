@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import pathlib
 import sqlite3
+import sys
 import tempfile
 import unittest
 
@@ -12,6 +13,7 @@ SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "archive-resources.py"
 SPEC = importlib.util.spec_from_file_location("archive_resources", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
