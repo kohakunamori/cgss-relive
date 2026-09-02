@@ -36,14 +36,18 @@ python .\scripts\analyze-runtime-events.py `
 The report records, without request/response values:
 
 - whether `/load/check`, `/load/title`, and `/load/index` were reached;
-- whether a `214` resource-version result was observed;
-- whether a later `/load/check` with `RES-VER=10133800` succeeded;
+- whether the server returned a `214` resource-version result;
+- whether the client subsequently sent a `/load/check` with `RES-VER=10133800`;
+- whether the server returned success for that final-resource request;
+- whether any later client HTTP request was observed after that success response;
 - the first recorded server-side failure;
 - the first event after the final `/load/index` event;
 - final-map `api_candidates` when a logged 404 already has a known endpoint identity.
 
-A server event proves that HTTP reached the compatibility server. It does **not**
-prove TLS success when no event was received; use ADB logcat and the routing checks
+A server event proves that HTTP reached the compatibility server. A success event
+for `RES-VER=10133800` proves only what the server returned; it is not labeled as
+client acceptance unless a later request is actually observed. Likewise, no event
+does **not** prove or disprove TLS by itself; use ADB logcat and the routing checks
 in `rooted-device-integration.md` for failures before HTTP.
 
 ## Three-profile differential

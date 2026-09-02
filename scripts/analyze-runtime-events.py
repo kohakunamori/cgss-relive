@@ -146,18 +146,34 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
     check_indices = [index for index, route in enumerate(routes) if route == "/load/check"]
     index_indices = [index for index, route in enumerate(routes) if route == "/load/index"]
 
-    saw_214 = any(
-        routes[index] == "/load/check" and _response_result(events[index]) == 214
-        for index in range(len(events))
-    )
-    final_check_success = False
+    resource_214_indices = [
+        index
+        for index in check_indices
+        if _response_result(events[index]) == 214
+    ]
+    final_retry_indices: list[int] = []
+    final_success_indices: list[int] = []
     for index in check_indices:
         event = events[index]
         headers = event.get("headers")
         res_ver = headers.get("RES-VER") if isinstance(headers, Mapping) else None
-        if str(res_ver) == FINAL_RESOURCE_VERSION and _response_result(event) == 1:
-            final_check_success = True
-            break
+        if str(res_ver) != FINAL_RESOURCE_VERSION:
+            continue
+        final_retry_indices.append(index)
+        if _response_result(event) == 1:
+            final_success_indices.append(index)
+
+    server_returned_214 = bool(resource_214_indices)
+    observed_retry_after_214 = any(
+        retry_index > result_index
+        for result_index in resource_214_indices
+        for retry_index in final_retry_indices
+    )
+    server_returned_final_success = bool(final_success_indices)
+    observed_followup_after_final_success = any(
+        success_index + 1 < len(events)
+        for success_index in final_success_indices
+    )
 
     first_failure: dict[str, Any] | None = None
     for index, event in enumerate(events):
@@ -193,8 +209,10 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         phase = "http_reached"
     if check_indices:
         phase = "load_check_reached"
-    if final_check_success:
-        phase = "final_resource_check_accepted"
+    if observed_retry_after_214:
+        phase = "resource_retry_observed"
+    if server_returned_final_success:
+        phase = "final_resource_check_responded"
     if "/load/title" in routes:
         phase = "load_title_reached"
     if index_indices:
@@ -206,8 +224,10 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         "events": len(events),
         "phase": phase,
         "resource_negotiation": {
-            "saw_214": saw_214,
-            "final_10133800_success": final_check_success,
+            "server_returned_214": server_returned_214,
+            "observed_10133800_retry_after_214": observed_retry_after_214,
+            "server_returned_success_for_10133800": server_returned_final_success,
+            "observed_followup_request_after_10133800_success": observed_followup_after_final_success,
         },
         "reached": {
             "load_check": bool(check_indices),

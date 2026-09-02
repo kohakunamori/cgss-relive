@@ -39,10 +39,23 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
         ]
         report = module.analyze_events(events)
         self.assertEqual(report["phase"], "post_load_index_observed")
-        self.assertTrue(report["resource_negotiation"]["saw_214"])
-        self.assertTrue(report["resource_negotiation"]["final_10133800_success"])
+        negotiation = report["resource_negotiation"]
+        self.assertTrue(negotiation["server_returned_214"])
+        self.assertTrue(negotiation["observed_10133800_retry_after_214"])
+        self.assertTrue(negotiation["server_returned_success_for_10133800"])
+        self.assertTrue(negotiation["observed_followup_request_after_10133800_success"])
         self.assertEqual(report["after_load_index"]["route"], "/bn_consent/get_state")
         self.assertEqual(report["first_failure"]["api_candidates"][0]["key"], 14)
+
+
+    def test_final_success_response_alone_does_not_claim_client_acceptance(self) -> None:
+        report = module.analyze_events([self.event("/load/check", res_ver="10133800", result=1)])
+        self.assertEqual(report["phase"], "final_resource_check_responded")
+        negotiation = report["resource_negotiation"]
+        self.assertFalse(negotiation["server_returned_214"])
+        self.assertFalse(negotiation["observed_10133800_retry_after_214"])
+        self.assertTrue(negotiation["server_returned_success_for_10133800"])
+        self.assertFalse(negotiation["observed_followup_request_after_10133800_success"])
 
     def test_compare_runs_reports_first_divergence(self) -> None:
         prefix = [self.event("/load/check", res_ver="10133800"), self.event("/load/title")]
