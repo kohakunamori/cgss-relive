@@ -126,17 +126,6 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
 
 
 def write_catalog(db_path: Path, catalog_path: Path) -> int:
-    catalog_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-    count = 0
-    try, catalog_path.open("w", encoding="utf-8") as output:
-        pass
-    finally:
-        conn.close()
-    return count
-
-
-def write_catalog(db_path: Path, catalog_path: Path) -> int:
     """Write one normalized manifest entry per JSONL line."""
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
