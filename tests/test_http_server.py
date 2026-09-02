@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import http.client
+import json
+import pathlib
+import tempfile
 import threading
 import unittest
 
 from server import cgss_codec
+from server.api_registry import ApiEndpoint
 from server.http_server import create_server
 
 
@@ -115,6 +119,42 @@ class HTTPBootstrapServerTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_unknown_known_api_route_is_annotated_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = pathlib.Path(directory) / "events.jsonl"
+            api_index = {
+                "/bn_consent/get_state": (
+                    ApiEndpoint("A", "BnContentGetState", 14, "bn_consent/get_state", 23438),
+                )
+            }
+            server = create_server(
+                "127.0.0.1",
+                0,
+                event_log=event_path,
+                api_index=api_index,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address[:2]
+            try:
+                conn = http.client.HTTPConnection(host, port, timeout=5)
+                conn.request("POST", "/bn_consent/get_state", body=b"", headers={"Content-Length": "0"})
+                response = conn.getresponse()
+                self.assertEqual(response.status, 404)
+                response.read()
+                conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+            event = json.loads(event_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(event["error"], "endpoint_not_implemented")
+            self.assertEqual(
+                event["api_candidates"],
+                [{"group": "A", "key": 14, "name": "BnContentGetState", "literal_index": 23438}],
+            )
 
     def test_health_and_unknown_route(self) -> None:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
