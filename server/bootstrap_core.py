@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from . import cgss_codec
+from .empty_success import encode_empty_success_response
 from .header_codec import decode_header_value
 from .load_check import FINAL_RESOURCE_VERSION, encode_load_check_response
 from .load_index import encode_load_index_response
@@ -81,6 +82,31 @@ def process_load_title_request(
     udid, request = decode_client_request(headers, body, route="load/title")
     sid = _get_header(headers, "SID")
     response = encode_load_title_response(
+        udid,
+        sid=sid,
+        servertime=servertime,
+        dynamic_key=dynamic_key,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_empty_success_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    route: str,
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+) -> BootstrapExchange:
+    """Handle a task proven to consume only the common NetworkTask response."""
+    udid, request = decode_client_request(headers, body, route=route.lstrip("/"))
+    sid = _get_header(headers, "SID")
+    response = encode_empty_success_response(
         udid,
         sid=sid,
         servertime=servertime,
