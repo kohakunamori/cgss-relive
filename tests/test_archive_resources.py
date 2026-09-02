@@ -66,7 +66,10 @@ class ArchiveResourceTests(unittest.TestCase):
             self.assertEqual(result.status, "hash_mismatch")
 
     def test_current_category_routes(self) -> None:
+        self.assertEqual(MODULE.category_for_name("x.unity3d"), "AssetBundles")
         self.assertEqual(MODULE.category_for_name("x.acb"), "Sound")
+        self.assertEqual(MODULE.category_for_name("x.awb"), "Sound")
+        self.assertEqual(MODULE.category_for_name("x.bytes"), "Sound")
         self.assertEqual(MODULE.category_for_name("x.usm"), "Movie")
         self.assertEqual(MODULE.category_for_name("x.bdb"), "Generic")
         self.assertEqual(MODULE.category_for_name("master.mdb"), "Generic")
