@@ -10,6 +10,7 @@ from server.minimal_profile import (
     STARTER_CARD_ID,
     STARTER_CHARA_ID,
     STARTER_SERIAL_ID,
+    STARTER_WORK_CARD_SECTION,
     build_starter_visible_load_index_data,
     validate_starter_visible_profile,
 )
@@ -72,7 +73,12 @@ class StarterVisibleHTTPTests(unittest.TestCase):
             self.assertEqual(decoded["data_headers"]["result_code"], 1)
             data = decoded["data"]
             self.assertEqual(data, profile)
-            self.assertEqual(data["user_card_list"][0]["card_id"], STARTER_CARD_ID)
+            self.assertEqual(data["user_card_list"], [])
+            self.assertEqual(data[STARTER_WORK_CARD_SECTION][0]["card_id"], STARTER_CARD_ID)
+            self.assertEqual(
+                data[STARTER_WORK_CARD_SECTION][0]["serial_id"],
+                STARTER_SERIAL_ID,
+            )
             self.assertEqual(data["user_unit_list"][0]["serial_id_0"], STARTER_SERIAL_ID)
             self.assertEqual(data["user_chara_list"][0]["chara_id"], STARTER_CHARA_ID)
         finally:
