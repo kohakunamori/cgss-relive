@@ -1,11 +1,16 @@
 param(
     [string]$Serial,
     [string]$Package = 'jp.co.bandainamcoent.BNEI0242',
+    [string]$Activity = 'jp.co.cygames.stage.StageUnityPlayerActivity',
+    [string]$ExpectedVersionName = '11.6.3',
+    [int]$ExpectedVersionCode = 438,
     [int]$WaitForProcessSeconds = 120,
     [string]$Python = 'python',
     [string]$RawPath,
     [string]$SanitizedPath,
-    [switch]$ClearBuffer
+    [switch]$ClearBuffer,
+    [switch]$Launch,
+    [switch]$PreserveProcess
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,11 +58,44 @@ if ($state.ExitCode -ne 0 -or $state.Text -ne 'device') {
     throw 'ADB target is not in device state'
 }
 
+if ($Launch) {
+    # The Activity default is derived from the exact hash-verified final 11.6.3
+    # XAPK with aapt; do not substitute a guessed UnityPlayerActivity name.
+    $packageResult = Invoke-AdbCapture -Arguments @('shell', 'dumpsys', 'package', $Package) -AllowFailure
+    $versionName = $null
+    $versionCode = $null
+    if ($packageResult.Text -match '(?m)^\s*versionName=(\S+)\s*$') {
+        $versionName = $Matches[1]
+    }
+    if ($packageResult.Text -match '(?m)^\s*versionCode=(\d+)\b') {
+        $versionCode = [int64]$Matches[1]
+    }
+    if ($versionName -ne $ExpectedVersionName -or $versionCode -ne $ExpectedVersionCode) {
+        throw "Installed package is not the expected final $ExpectedVersionName / versionCode $ExpectedVersionCode specimen"
+    }
+
+    if (-not $PreserveProcess) {
+        $stop = Invoke-AdbCapture -Arguments @('shell', 'am', 'force-stop', $Package) -AllowFailure
+        if ($stop.ExitCode -ne 0) {
+            throw 'Failed to stop the existing target process before exact launch'
+        }
+    }
+}
+
 if ($ClearBuffer) {
     $clear = Invoke-AdbCapture -Arguments @('logcat', '-c') -AllowFailure
     if ($clear.ExitCode -ne 0) {
         throw 'Failed to clear device logcat buffer'
     }
+}
+
+if ($Launch) {
+    $component = "$Package/$Activity"
+    $start = Invoke-AdbCapture -Arguments @('shell', 'am', 'start', '-W', '-n', $component) -AllowFailure
+    if ($start.ExitCode -ne 0) {
+        throw "Exact final launchable activity failed to start: $component"
+    }
+    Write-Host "Started exact final launchable activity: $component"
 }
 
 Write-Host "Waiting for target package process: $Package"
