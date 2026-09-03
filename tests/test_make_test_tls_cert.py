@@ -35,6 +35,25 @@ class TestTLSCertificateGenerator(unittest.TestCase):
             chain = paths["server_chain"].read_bytes()
             self.assertGreaterEqual(chain.count(b"BEGIN CERTIFICATE"), 2)
 
+    def test_generates_one_leaf_for_api_and_resource_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = MODULE.generate(
+                pathlib.Path(directory),
+                "apis.game.starlight-stage.jp",
+                additional_hostnames=[
+                    "storages.game.starlight-stage.jp",
+                    "apis.game.starlight-stage.jp",
+                ],
+                days=2,
+            )
+            leaf = x509.load_pem_x509_certificate(paths["server_cert"].read_bytes())
+            sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            dns_names = sans.get_values_for_type(x509.DNSName)
+            self.assertEqual(
+                dns_names,
+                ["apis.game.starlight-stage.jp", "storages.game.starlight-stage.jp"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
