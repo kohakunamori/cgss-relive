@@ -12,13 +12,23 @@ import argparse
 import base64
 import gzip
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
-
-from validate_api_map import validate_map
+from typing import Any, Callable
 
 EXPECTED_SOURCE_SHA256 = "5d2655d40adaeab08ee6331a5a19f59f119809b47ee8571b23f16893a39766d5"
 EXPECTED_SEMANTIC_SHA256 = "8e8711e62e53645d994ab4d2d2cec3db6994e45ccb252b068df960b9bd51bcd9"
+
+
+def load_validator() -> Callable[[Any], dict[str, Any]]:
+    path = Path(__file__).resolve().with_name("validate-api-map.py")
+    spec = importlib.util.spec_from_file_location("cgss_validate_api_map", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load validator at {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.validate_map
 
 
 def main() -> int:
@@ -30,7 +40,7 @@ def main() -> int:
     encoded = "".join(args.payload.read_text(encoding="ascii").split())
     raw = gzip.decompress(base64.b64decode(encoded, validate=True))
     obj = json.loads(raw.decode("utf-8"))
-    report = validate_map(obj)
+    report = load_validator()(obj)
 
     canonical = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
     semantic_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
