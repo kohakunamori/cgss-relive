@@ -1,15 +1,11 @@
 # CGSS Android 11.6.3 `/load/check` reconstruction
 
-This note records the point at which the final Android 11.6.3 cold-start
-transport is sufficiently reconstructed to implement the first clean-room
-bootstrap response.  Findings below are based on the supplied 11.6.3 IL2CPP v31
-specimen and its arm64 `libil2cpp.so`; older community clients were used only as
-cross-checks after the current native control flow had been identified.
+This note records the current clean-room understanding of the final Android
+11.6.3 version-check path and the behavior implemented by `cgss-relive`.
 
 ## Final-client native targets
 
-For the exact arm64 binary with SHA-256
-`2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5`:
+For the exact final arm64 IL2CPP specimen:
 
 | Managed method | arm64 RVA |
 | --- | ---: |
@@ -18,168 +14,177 @@ For the exact arm64 binary with SHA-256
 | `Cute.NetworkTask.Parse` | `0x050c437c` |
 | `Cute.VersionCheckTask.Parse` | `0x050c5400` |
 | `Cute.CryptAES.decrypt` | `0x050c2434` |
-| `Cute.CryptAES.DecryptRJ256` | `0x050c2438` |
-| `Cute.Cryptographer.encode` | `0x050c0294` |
 | `Cute.Cryptographer.decode` | `0x050c3688` |
 | `Cute.Certification.VersionCheckTaskExec` | `0x050bde1c` |
 | `<VersionCheckTaskExec>d__43.MoveNext` | `0x050bf3c8` |
+| `NetworkManager.<Connect>d__48.MoveNext` | `0x050b61c8` |
 
-## Response wire path: proven inverse of the request
+## Response wire path
 
-The current HTTP completion callback performs the following sequence before it
-calls `NetworkTask.SetResponseData`:
-
-```text
-HTTP response ASCII body
-  -> Cute.CryptAES.decrypt
-  -> outer Base64 decode
-  -> split final 32 bytes as dynamic AES key
-  -> AES-256-CBC decrypt (IV = hex-decoded UDID without dashes)
-  -> inner Base64 text
-  -> Convert.FromBase64String
-  -> MessagePack.MessagePackSerializer.ToJson
-  -> LitJson parse
-  -> NetworkTask.SetResponseData(JsonData)
-  -> CheckResult / Parse
-```
-
-`DecryptRJ256` independently confirms the envelope details.  It takes the final
-32 decoded bytes as the 256-bit key, uses the remaining bytes as ciphertext,
-reconstructs the 16-byte IV from the current certification UDID, and follows the
-same 128-bit-block CBC/PKCS7-compatible path as request encryption.
-
-Therefore the existing `server.cgss_codec.encode_body` routine is valid for
-server responses as well as synthetic requests.
-
-## Request header UDID can be recovered by the server
-
-The final client still runs the UDID through `Cute.Cryptographer.encode` before
-putting it into the request header.  The current `Cryptographer.decode` native
-routine at `0x050c3688` proves the reversible layout:
+The common HTTP completion path performs:
 
 ```text
-encoded = hex4(plaintext string length)
-        + repeated 4-character noise groups
-        + random suffix
-
-plaintext character i = chr(encoded_payload[2 + 4*i] - 10)
+HTTP response body
+  -> CGSS AES/base64 decode
+  -> MessagePack -> JSON/LitJson
+  -> NetworkTask.SetResponseData
+  -> CheckResult / task Parse
 ```
 
-The decoder stops after the length declared by the four hexadecimal prefix
-characters, so the random suffix has no semantic value.
+The repository's response codec is the tested inverse of the final-client
+request envelope. Response cryptography is no longer the main uncertainty.
 
-`server/header_codec.py` implements the clean-room inverse.  Consequently the
-bootstrap server does not need a separately configured raw UDID: it can recover
-it from the request header and immediately use it as the body AES IV.
+## Result-code constants
 
-## Current result-code constants
+Final 11.6.3 constants:
 
-IL2CPP field default values on `Cute.NetworkTask` decode to:
-
-| Meaning | Current 11.6.3 value |
+| meaning | code |
 | --- | ---: |
 | success | `1` |
 | session error | `201` |
-| application-version error | `204` |
+| app-version error | `204` |
 | resource-version error | `214` |
 
-The resource-version value is therefore current-client evidence, not merely a
-legacy downloader convention.
+`data_headers.result_code` is the common business-code field.
 
-## `data_headers` behavior
+## Correct 214 semantics
 
-`NetworkTask.Parse` unconditionally returns:
+The previous bootstrap working model treated 214 as if it directly caused an
+immediate `/load/check` retry. Final static control-flow analysis disproves that.
 
-```text
-(int)ResponseData["data_headers"]["result_code"]
-```
+For a response with result code 214:
 
-So the absolute minimum structurally valid response contains a top-level
-`data_headers` map with integer `result_code`.
+1. the d48 HTTP coroutine accepts 214 through the final-client skip/allowed-code
+   table instead of treating it as a generic transport error;
+2. common result handling persists `required_res_ver` into local Savedata
+   `RES_VER`;
+3. no popup is required for 214 in this path;
+4. the same d48 coroutine does **not** automatically resend `/load/check`;
+5. any later resource download, view transition or later version-check request is
+   initiated by a higher-level boot/resource state machine.
 
-Common response processing additionally establishes these rules:
-
-- `data_headers.sid` is optional; when present it is copied into
-  `Cute.Certification.SessionId` before later result processing.
-- `data_headers.app_ver` is optional and participates in local app-version
-  persistence.
-- `data_headers.required_res_ver` is optional; when present it is persisted to
-  local `RES_VER` and can cause the current bootstrap/tutorial state machine to
-  continue, reload, or reset as appropriate.
-- `VersionCheckTask.Parse` only enters its extra `data` parsing on success and
-  treats its live-suspension/popup fields as optional.  A large `data` object is
-  therefore not required for the first preservation response.
-
-## Preservation resource negotiation
-
-The final 11.6.3 application binary contains default resource revision
-`10133000`; maintained final-resource tooling identifies later resource revision
-`10133800`.
-
-The first compatibility implementation models the transition as:
+Therefore this sequence is valid only as two observations separated by an
+unknown higher-level transition:
 
 ```text
-client: POST /load/check, RES-VER: 10133000
-server: result_code = 214
-        required_res_ver = "10133800"
-
-client persists/reloads its RES_VER state according to final-client common
-result handling
-
-client: POST /load/check, RES-VER: 10133800
-server: result_code = 1
+observed /load/check with RES-VER 10133000
+server -> 214 + required_res_ver 10133800
+client persists RES_VER = 10133800
+... higher-level boot/resource behavior ...
+possible later request(s) with RES-VER 10133800
 ```
 
-The server must tolerate a process/title restart between these two requests; it
-must not depend on an in-memory retry sequence.
+Do not describe the second request as an automatic retry unless runtime evidence
+actually shows it.
 
-## Implemented clean-room bootstrap core
+## Resource-host selector: `data.isS3`
 
-The repository now contains:
+`Cute.VersionCheckTask.Parse` is the confirmed writer of `NetworkUtil.isS3`:
 
-- `server/cgss_codec.py` — MessagePack/AES request+response envelope;
-- `server/header_codec.py` — final-client `Cryptographer.decode` for UDID header;
-- `server/load_check.py` — result-code/resource negotiation response builder;
-- `server/bootstrap_core.py` — complete transport-independent exchange:
-  request headers/body -> raw UDID -> decoded MessagePack params -> version
-  negotiation -> encrypted final-client response.
+```text
+response data["isS3"] -> ToBoolean -> NetworkUtil.isS3
+```
 
-`bootstrap_core.process_load_check_request` intentionally does not validate
-production authentication/integrity values (`PARAM`, account credentials or
-SID salt).  That is sufficient for a preservation server under our control and
-keeps production-static secrets out of the repository.
+The selector chooses between the final resource hosts/URL families:
 
-## Synthetic end-to-end proof
+```text
+isS3 = false -> storages.game.starlight-stage.jp
+isS3 = true  -> asset-starlight-stage.akamaized.net
+```
 
-Regression tests construct a final-format request with:
+The offline server fixes `isS3=false` so the resource plane is deterministic and
+matches the storages URL family supported by `server.resource_server`.
 
-1. an obfuscated `UDID` header;
-2. a current-format encrypted MessagePack body;
-3. `RES-VER=10133000`;
+## Default preservation policy
 
-then feed only HTTP-like headers + body into the bootstrap core.  The test proves
-that the server:
+The default server behavior remains native resource-version negotiation:
 
-1. recovers the raw UDID;
-2. decrypts and deserializes the request;
-3. returns `214 + required_res_ver=10133800`;
-4. encrypts that response with the final-client envelope;
-5. can decode its emitted response back to the exact expected object.
+```text
+incoming RES-VER != 10133800
+  -> result_code = 214
+  -> required_res_ver = 10133800
+  -> data.isS3 = false
 
-A second exchange with `RES-VER=10133800` proves the success (`1`) path.
+incoming RES-VER == 10133800
+  -> result_code = 1
+  -> data.isS3 = false
+```
 
-## What remains dynamic rather than cryptographic
+This models the final-client business-code path without inventing an immediate
+retry.
 
-The control-plane codec and minimum `/load/check` response contract are now
-statically reconstructed.  The remaining proof is runtime integration:
+## Diagnostic direct-success policy
 
-- run the actual 11.6.3 client against the compatibility endpoint;
-- confirm its TLS/certificate behavior and choose the least invasive redirect;
-- capture one sanitized real `/load/check` fixture to freeze as a golden test;
-- observe whether the 214 response causes immediate retry, title reset, or
-  process restart for the chosen clean test-state;
-- continue the same method for `/load/index` and `/load/title`.
+For a controlled runtime differential, the server exposes:
 
-The current analysis environment has no Android emulator/ADB target, so those
-items cannot be honestly claimed as executed here.  They are no longer blockers
-to understanding the response cryptography or the minimum `load/check` schema.
+```text
+--accept-old-resource-version
+```
+
+When the client sends old `RES-VER: 10133000`, this mode returns:
+
+```text
+result_code = 1
+required_res_ver = 10133800
+data.isS3 = false
+```
+
+The purpose is to answer a narrow question: does bypassing the 214 gate allow the
+client to reach a later BootMain or `/load/index` stage?
+
+It is **not** the default protocol model and it does not prove that all local
+resource prerequisites are satisfied. `required_res_ver` is still supplied so
+common result handling can advance subsequent request headers to the frozen
+version.
+
+## Why both modes matter
+
+A native-mode stall after server-side 214 is ambiguous because static analysis
+says no in-coroutine retry should be expected. Compare:
+
+- native 214 mode;
+- direct-success mode;
+- and, when needed, native mode with the local storages resource host redirected.
+
+That three-way differential separates:
+
+1. version-result handling;
+2. higher-level resource initialization/update;
+3. later BootMain `/load/index` parsing.
+
+## Resource version facts
+
+Keep these two values distinct:
+
+```text
+binary/default RES_VER: 10133000
+frozen final server/resource revision: 10133800
+```
+
+`10133800` is independently validated by the repository's public-CDN bootstrap
+and manifest/master verification workflow.
+
+## Implemented modules
+
+- `server/cgss_codec.py` — final request/response envelope;
+- `server/header_codec.py` — reversible final UDID-header decode;
+- `server/load_check.py` — native 214 and explicit direct-success policies;
+- `server/bootstrap_core.py` — transport-independent request/response exchange;
+- `server/http_server.py` — HTTPS/control front end, defaults `isS3=false`;
+- `server/resource_server.py` — final-client resource URL-family resolver over
+  the frozen content-addressed archive.
+
+## Runtime evidence boundary
+
+A server event showing `result_code=1` or 214 proves what the server returned.
+It does not, by itself, prove the original client accepted the response.
+
+Client acceptance requires a later observable client action such as:
+
+- a resource request;
+- a subsequent control request;
+- `/load/index`;
+- a view transition/logcat event;
+- or visible Home behavior.
+
+The sanitized runtime analyzer deliberately keeps this distinction.
