@@ -10,6 +10,7 @@ on:
       - 'scripts/analyze-common-apitype-native.py'
       - 'scripts/analyze-arcade-convert-map.py'
       - 'scripts/resolve-arcade-convert-prefix.py'
+      - 'scripts/analyze-dynamic-networktask-writers.py'
 
 permissions:
   contents: read
@@ -102,12 +103,27 @@ jobs:
           d=json.load(open('reports/arcade-convert-map.json'))
           p=json.load(open('reports/arcade-convert-prefix.json'))
           assert d['schema']==1 and p['schema']==1
+          assert p['exact_literal_matches']==[{'literal_index':7314,'value':'Garden','address':0x85933C0}]
+          print(json.dumps({'prefix_resolution':p,'convert_call_names':[c['target_name'] for m in d['methods'] if m['name'].endswith('$$ConvertType') for c in m['calls']]},indent=2))
+          PY
+
+      - name: Inspect remaining dynamic NetworkTask type writers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-dynamic-networktask-writers.py \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --output reports/dynamic-networktask-writers.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/dynamic-networktask-writers.json'))
+          assert d['schema']==1
           print(json.dumps({
-            'convert_methods': [
-              {'name':m['name'],'rva':hex(m['rva']),'signature':m['signature'],'api_range_immediates':m['api_range_immediates'],'calls':m['calls']}
-              for m in d['methods']
-            ],
-            'prefix_resolution': p,
+            'types':d['types'],
+            'constructors':{k:{'rva':hex(v['rva']),'signature':v['signature'],'calls':v['calls'],'instructions':v['instructions']} for k,v in d['constructors'].items()},
+            'caller_counts':{k:len(v) for k,v in d['callers'].items()},
+            'callers':d['callers'],
+            'unmapped':d['unmapped_xrefs'],
           },indent=2))
           PY
 
