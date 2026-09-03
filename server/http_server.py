@@ -2,6 +2,12 @@
 
 Early bootstrap routes are deliberately thin adapters over :mod:`bootstrap_core`
 so socket/TLS choices remain independent from reconstructed CGSS contracts.
+
+Raw ``BaseHTTPRequestHandler`` access logging is suppressed. Runtime integration
+must use :mod:`server.safe_events`, whose schema intentionally excludes query
+strings, request bodies, account/session identifiers, and non-whitelisted
+headers. This prevents terminal transcripts from bypassing the clean-room log
+boundary even if a future client route carries sensitive query parameters.
 """
 from __future__ import annotations
 
@@ -58,9 +64,15 @@ def make_handler(
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
-            super().log_message(fmt, *args)
+            # BaseHTTPRequestHandler's default access log includes the complete
+            # raw request line. A future API may place sensitive values in the
+            # query string, so never let that line escape to stderr. The
+            # sanitized JSONL event log is the supported runtime trace.
+            return
 
         def _safe_headers(self) -> dict[str, str]:
+            # Passing the mapping into build_event is safe: build_event copies
+            # only its explicit version-header allow-list into persisted output.
             return {key: value for key, value in self.headers.items()}
 
         def _record(
