@@ -12,7 +12,8 @@ manifest SQLite database. Verified bootstrap manifests may be placed under
 When ``--event-log`` is enabled, the server emits only sanitized resource-plane
 events. It never records a resource filename, object hash, query string, account
 identifier, or request body. Routes are reduced to categories such as
-``@resource/manifest`` and ``@resource/AssetBundles``.
+``@resource/manifest`` and ``@resource/AssetBundles``. Health checks are excluded
+from evidence logging so monitoring traffic cannot advance runtime phases.
 """
 from __future__ import annotations
 
@@ -192,7 +193,12 @@ def make_handler(
         protocol_version = "HTTP/1.1"
 
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
-            if sanitized_event_log is not None and isinstance(code, int):
+            path = urlsplit(self.path).path
+            if (
+                path != "/healthz"
+                and sanitized_event_log is not None
+                and isinstance(code, int)
+            ):
                 sanitized_event_log.append(
                     build_event(route=resource_event_route(self.path), status=code)
                 )
