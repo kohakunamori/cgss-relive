@@ -4,8 +4,8 @@ The profiles are intentionally layered:
 
 * strict minimal: only fields directly required on the reduced bootstrap path;
 * Home candidate: explicit empty containers for selected Home-facing managers;
-* starter visible: one synthetic owned card/unit/character record using a card
-  proven to exist in the independently verified final 10133800 master database.
+* starter visible: one synthetic owned card/unit record using a card proven to
+  exist in the independently verified final 10133800 master database.
 
 Final-client static analysis distinguishes the guarded ``user_card_list`` Cenere
 merge block from the separate seven-hard-field container whose literal key is
@@ -17,6 +17,13 @@ The final ``Stage.BaseTask.setupTutorial`` gate is also statically closed:
 response ``tutorial_flag=100`` maps to local ``TutorialData.step=1000`` and saves
 that completed state. If local step is already 1000 the client internally forces
 the logical flag to 100 before the same mapping.
+
+The real ``user_chara_list`` block is now bounded as well: an empty array is safe;
+a non-empty element hard-reads exactly ``chara_id`` and ``fan`` before
+``WorkCharaData.AddCharaData``. Home startup analysis does not consume
+``WorkCharaData``; the card predownload path obtains its character id directly
+from ``WorkCardData.CardData.GetCharaId``. The starter therefore keeps
+``user_chara_list=[]`` instead of fabricating an unnecessary character-state row.
 
 No profile contains captured account data. Runtime acceptance by the original
 client remains a separate integration criterion.
@@ -102,13 +109,11 @@ STARTER_UNIT_REQUIRED_FIELDS = (
     "name",
     *(f"serial_id_{index}" for index in range(FINAL_UNIT_SLOT_COUNT)),
 )
-STARTER_CHARA_REQUIRED_FIELDS = ("chara_id", "fan")
 
-# Card/chara identity is independently verified against final 10133800 master.
-# Ownership serial, user unit id, slot selection and progress are synthetic
-# local state. No historical account payload is copied into the profile.
+# Card identity is independently verified against final 10133800 master.
+# Ownership serial, user unit id, slot selection and progress are synthetic local
+# state. No historical account payload is copied into the profile.
 STARTER_CARD_ID = 100001
-STARTER_CHARA_ID = 101
 STARTER_SERIAL_ID = 1
 STARTER_UNIT_ID = 1
 STARTER_UNIT_SLOT = 1
@@ -211,7 +216,9 @@ def build_starter_visible_load_index_data(
             "serial_id_4": 0,
         }
     ]
-    data["user_chara_list"] = [{"chara_id": STARTER_CHARA_ID, "fan": 0}]
+    # Keep user_chara_list empty. The final parser proves [] is safe, while Home
+    # startup resolves chara id from the WorkCardData card and has no proven
+    # WorkCharaData consumer.
     data["user_info"]["leader_serial_id"] = STARTER_SERIAL_ID
     return data
 
@@ -302,13 +309,10 @@ def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
                 if units[0].get(f"serial_id_{index}") != 0:
                     errors.append(f"user_unit_list[0].serial_id_{index}")
 
-    charas = data.get("user_chara_list")
-    if not isinstance(charas, list) or len(charas) != 1:
-        errors.append("user_chara_list[1]")
-    else:
-        errors.extend(_missing_item_fields(charas[0], STARTER_CHARA_REQUIRED_FIELDS, "user_chara_list[0]"))
-        if isinstance(charas[0], dict) and charas[0].get("chara_id") != STARTER_CHARA_ID:
-            errors.append("user_chara_list[0].chara_id")
+    # The exact user_chara_list parser is empty-array safe. Keep it empty until a
+    # runtime or bounded Home consumer proves WorkCharaData is required.
+    if data.get("user_chara_list") != []:
+        errors.append("user_chara_list")
 
     user = data.get("user_info")
     if isinstance(user, dict):
