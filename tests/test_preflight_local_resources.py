@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sqlite3
+import struct
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,28 @@ assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+
+
+def literal_only_block(payload: bytes) -> bytes:
+    length = len(payload)
+    if length < 15:
+        return bytes([length << 4]) + payload
+    extra = length - 15
+    extensions = bytearray()
+    while extra >= 255:
+        extensions.append(255)
+        extra -= 255
+    extensions.append(extra)
+    return b"\xF0" + bytes(extensions) + payload
+
+
+def wrap_lz4(payload: bytes) -> bytes:
+    return (
+        b"CGSS"
+        + struct.pack("<I", len(payload))
+        + b"\x00" * 8
+        + literal_only_block(payload)
+    )
 
 
 class LocalResourcePreflightTests(unittest.TestCase):
@@ -31,10 +55,18 @@ class LocalResourcePreflightTests(unittest.TestCase):
                 "INSERT INTO manifests(name, hash) VALUES (?, ?)",
                 [("a", self.hashes[0]), ("b", self.hashes[1])],
             )
+            connection.commit()
+
         wire = self.root / "manifests"
         wire.mkdir()
-        for name in module.WIRE_MANIFESTS:
-            (wire / name).write_bytes(b"wire")
+        compressed = wrap_lz4(self.db.read_bytes())
+        compressed_md5 = hashlib.md5(compressed).hexdigest()
+        (wire / "all_dbmanifest").write_text(
+            f"Android_AHigh_SHigh,{compressed_md5},{len(compressed)}\n",
+            encoding="utf-8",
+        )
+        (wire / "Android_AHigh_SHigh").write_bytes(compressed)
+
         for digest in self.hashes:
             path = self.root / "objects" / digest[:2] / digest
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,10 +86,21 @@ class LocalResourcePreflightTests(unittest.TestCase):
         report = module.run_preflight(self.root, self.db, version=module.FINAL_RESOURCE_VERSION)
         self.assertTrue(report["ready"])
         self.assertEqual(report["failures"], [])
+        self.assertEqual(report["schema"], 2)
         self.assertEqual(report["manifest"]["quick_check"], ["ok"])
         self.assertEqual(report["manifest"]["rows"], 2)
         self.assertEqual(report["manifest"]["unique_hashes"], 2)
         self.assertEqual(report["wire_manifests_present"], 2)
+        self.assertEqual(
+            report["wire_chain"],
+            {
+                "index_parsed": True,
+                "android_wire_md5_matches_index": True,
+                "android_wire_decodes": True,
+                "decoded_is_sqlite": True,
+                "decoded_matches_manifest_db": True,
+            },
+        )
         self.assertEqual(report["objects"]["present"], 2)
         self.assertEqual(report["objects"]["missing"], 0)
 
@@ -74,6 +117,38 @@ class LocalResourcePreflightTests(unittest.TestCase):
         serialized = repr(report)
         self.assertNotIn(missing_digest, serialized)
         self.assertNotIn("all_dbmanifest", serialized)
+
+    def test_wire_android_md5_mismatch_is_rejected(self) -> None:
+        path = self.root / "manifests" / "Android_AHigh_SHigh"
+        path.write_bytes(path.read_bytes() + b"corrupt")
+        report = module.run_preflight(self.root, self.db, version=module.FINAL_RESOURCE_VERSION)
+        self.assertFalse(report["ready"])
+        self.assertIn("wire_android_manifest_md5_mismatch", report["failures"])
+        self.assertTrue(report["wire_chain"]["index_parsed"])
+        self.assertFalse(report["wire_chain"]["android_wire_md5_matches_index"])
+
+    def test_wire_decoded_database_mismatch_is_rejected(self) -> None:
+        other_db = Path(self.temp.name) / "other.db"
+        with sqlite3.connect(other_db) as connection:
+            connection.execute("CREATE TABLE manifests (name TEXT, hash TEXT)")
+            connection.execute(
+                "INSERT INTO manifests(name, hash) VALUES (?, ?)",
+                ("different", self.hashes[0]),
+            )
+            connection.commit()
+        compressed = wrap_lz4(other_db.read_bytes())
+        wire = self.root / "manifests"
+        (wire / "Android_AHigh_SHigh").write_bytes(compressed)
+        (wire / "all_dbmanifest").write_text(
+            f"Android_AHigh_SHigh,{hashlib.md5(compressed).hexdigest()},{len(compressed)}\n",
+            encoding="utf-8",
+        )
+
+        report = module.run_preflight(self.root, self.db, version=module.FINAL_RESOURCE_VERSION)
+        self.assertFalse(report["ready"])
+        self.assertIn("wire_manifest_db_mismatch", report["failures"])
+        self.assertTrue(report["wire_chain"]["decoded_is_sqlite"])
+        self.assertFalse(report["wire_chain"]["decoded_matches_manifest_db"])
 
     def test_wrong_version_and_invalid_hash_are_rejected(self) -> None:
         with sqlite3.connect(self.db) as connection:
