@@ -157,6 +157,65 @@ This means a TLS logcat error can explain why the server saw no request, but it
 cannot advance `phase`, fabricate resource traffic, change
 `comparison.common_prefix_events`, or become an HTTP `first_failure`.
 
+## Deterministic next-gate triage
+
+After producing the schema-4 analyzer report, classify the first actionable
+runtime gate with the separate strict post-processor:
+
+```powershell
+python .\scripts\triage-runtime-report.py `
+  .\work\runtime-starter-report.json `
+  -o .\work\runtime-starter-triage.json
+```
+
+The triage output is schema **1**. It deliberately does **not** copy the analyzer
+report wholesale. It validates the expected sanitized report shape and emits only
+an allow-listed summary for each run:
+
+```text
+classification
+next_gate
+reason
+server_phase
+first_server_failure
+first_device_failure_category
+visible_home_proven
+```
+
+This keeps the existing sharing boundary intact even if an arbitrary field is
+injected into an input JSON file. `visible_home_proven` is always `false`; no
+HTTP/resource/device-category combination is allowed to fabricate a visual Home
+observation.
+
+Representative classifications include:
+
+```text
+pre_http_tls_failure
+pre_http_dns_failure
+pre_http_tunnel_failure
+stalled_after_214_before_resource
+resource_route_unresolved
+resource_response_failure
+stalled_after_resource_plane
+load_index_response_failure
+load_index_reached_visual_gate
+post_load_index_server_gap
+post_load_index_observed_visual_gate
+client_failure_after_load_index
+```
+
+The classifier is progress-aware. A recoverable earlier 404 does not override a
+later successful `/load/index`. Conversely, a failing `/load/index` remains a
+server-contract gate, and the first failure after `/load/index` is classified as a
+post-index compatibility gap. For native 214, absence of an immediate second
+`/load/check` is explicitly not treated as a failure.
+
+The triage file is intended to answer “which layer is next?” after a single real
+device capture. It still cannot diagnose details that were intentionally removed
+from sanitized evidence; for example, `resource_route_unresolved` tells you to
+identify the missing URL family from private local evidence rather than exposing a
+resource filename or hash in the shareable report.
+
 ## Phase semantics
 
 Hard server-observation phases remain:
@@ -237,6 +296,10 @@ python .\scripts\analyze-runtime-events.py `
 
 HTTP/resource `comparison` remains based only on server-event signatures; device
 summaries are attached per run for diagnosis.
+
+Run `triage-runtime-report.py` on the resulting differential report as well. Each
+run is classified independently; the original analyzer `comparison` remains the
+authority for the first cross-run HTTP signature divergence.
 
 ## Starter/empty/strict differential
 
