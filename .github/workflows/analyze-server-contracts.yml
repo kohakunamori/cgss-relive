@@ -121,8 +121,8 @@ jobs:
           python - <<'PY'
           import json
           d=json.load(open('reports/common-apitype-native.json'))
-          assert d['schema']==1
-          print(json.dumps({'type_block':d['type_block'],'methods':d['methods'],'direct_callers':d['direct_callers'][:80]},indent=2))
+          assert d['schema']==2
+          print(json.dumps({'type_block':d['type_block'],'methods':d['methods'],'exact_bl_xref_count':d['exact_bl_xref_count'],'direct_callers':d['direct_callers'][:80],'unmapped_bl_xrefs':d['unmapped_bl_xrefs']},indent=2))
           PY
 
       - name: Build normal NetworkTask inventory
