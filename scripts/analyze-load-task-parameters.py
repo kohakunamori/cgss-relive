@@ -2,11 +2,11 @@
 """Bounded clean-room analysis of final LoadTask ``load_state`` / ``next_api``.
 
 Those names are present in the IL2CPP metadata-derived dump but are not guaranteed
-to exist as managed string literals. This pass therefore treats dump.cs field
-metadata as the primary evidence, optionally records whether a matching string
-literal exists, and tracks direct field reads from the LoadTask.SetParameter
-argument object by offset. It emits only the two target declarations and tiny
-instruction contexts.
+to exist as managed string literals. This pass treats dump.cs field metadata as
+the primary evidence, records string-literal presence separately, and tracks
+memory reads from the LoadTask.SetParameter argument object by field offset. It
+emits only the two target declarations, aggregate argument offsets, and tiny
+contexts around matching target-offset reads.
 """
 from __future__ import annotations
 
@@ -17,15 +17,17 @@ from pathlib import Path
 from typing import Any
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from capstone.arm64 import ARM64_INS_ADD, ARM64_INS_LDR, ARM64_INS_MOV, ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
+from capstone.arm64 import ARM64_INS_ADD, ARM64_INS_MOV, ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
 from elftools.elf.elffile import ELFFile
 
 SET_PARAMETER_START = 0x04877A14
 TARGET_VALUES = ("load_state", "next_api")
 MAX_FUNCTION_SIZE = 0x4000
 CONTEXT_RADIUS = 5
+MAX_ARGUMENT_OFFSETS = 96
 _TYPE_RE = re.compile(r"^\s*(?:public|private|internal|protected)?\s*(?:sealed\s+|abstract\s+|static\s+)?(?:class|struct)\s+([^\s:{]+)")
 _OFFSET_RE = re.compile(r"//\s*0x([0-9A-Fa-f]+)\s*$")
+_RVA_RE = re.compile(r"//\s*RVA:\s*0x([0-9A-Fa-f]+)")
 
 
 class BinaryView:
@@ -68,18 +70,24 @@ def as_int(value: Any) -> int:
     raise TypeError(value)
 
 
-def next_function_start(path: Path, address: int) -> int:
+def load_script(path: Path) -> tuple[list[int], dict[int, str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     starts: set[int] = set()
+    methods: dict[int, str] = {}
     for item in data.get("ScriptMethod", []):
         value = as_int(item.get("Address", 0))
         if value > 0:
             starts.add(value)
+            methods.setdefault(value, str(item.get("Name", "")))
     for value in data.get("Addresses", []):
         parsed = as_int(value)
         if parsed > 0:
             starts.add(parsed)
-    later = sorted(value for value in starts if value > address)
+    return sorted(starts), methods
+
+
+def next_function_start(starts: list[int], address: int) -> int:
+    later = [value for value in starts if value > address]
     if not later or later[0] - address > MAX_FUNCTION_SIZE:
         raise RuntimeError(f"could not safely bound function after 0x{address:X}")
     return later[0]
@@ -117,6 +125,17 @@ def find_target_declarations(path: Path) -> list[dict[str, Any]]:
     return matches
 
 
+def find_method_signature(path: Path, rva: int) -> str | None:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for index, line in enumerate(lines):
+        match = _RVA_RE.search(line)
+        if not match or int(match.group(1), 16) != rva:
+            continue
+        if index + 1 < len(lines):
+            return lines[index + 1].strip()
+    return None
+
+
 def md() -> Cs:
     dis = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
     dis.detail = True
@@ -130,31 +149,50 @@ def canonical_pointer_register(dis: Cs, reg_id: int) -> str:
     return name
 
 
-def scan_argument_field_reads(view: BinaryView, start: int, end: int, offsets: dict[int, list[str]]) -> list[dict[str, Any]]:
+def is_memory_load(ins: Any) -> bool:
+    mnemonic = ins.mnemonic.lower()
+    return mnemonic.startswith(("ldr", "ldur", "ldp"))
+
+
+def scan_argument_memory_reads(
+    view: BinaryView,
+    start: int,
+    end: int,
+    target_offsets: dict[int, list[str]],
+) -> tuple[list[int], list[dict[str, Any]]]:
     dis = md()
     instructions = list(dis.disasm(view.read(start, end - start), start))
     aliases = {"x1"}
-    hits: list[dict[str, Any]] = []
+    observed_offsets: set[int] = set()
+    target_hits: list[dict[str, Any]] = []
+
     for index, ins in enumerate(instructions):
         ops = ins.operands
-        if ins.id == ARM64_INS_LDR and len(ops) >= 2 and ops[1].type == ARM64_OP_MEM:
-            mem = ops[1].mem
-            base = canonical_pointer_register(dis, int(mem.base))
-            displacement = int(mem.disp)
-            if base in aliases and displacement in offsets:
-                lo = max(0, index - CONTEXT_RADIUS)
-                hi = min(len(instructions), index + CONTEXT_RADIUS + 1)
-                hits.append(
-                    {
-                        "site": ins.address,
-                        "offset": displacement,
-                        "targets": sorted(offsets[displacement]),
-                        "context": [
-                            f"0x{item.address:X}: {item.mnemonic} {item.op_str}"
-                            for item in instructions[lo:hi]
-                        ],
-                    }
-                )
+        if is_memory_load(ins):
+            for operand in ops:
+                if operand.type != ARM64_OP_MEM:
+                    continue
+                mem = operand.mem
+                base = canonical_pointer_register(dis, int(mem.base))
+                if base not in aliases:
+                    continue
+                displacement = int(mem.disp)
+                observed_offsets.add(displacement)
+                if displacement in target_offsets:
+                    lo = max(0, index - CONTEXT_RADIUS)
+                    hi = min(len(instructions), index + CONTEXT_RADIUS + 1)
+                    target_hits.append(
+                        {
+                            "site": ins.address,
+                            "mnemonic": ins.mnemonic,
+                            "offset": displacement,
+                            "targets": sorted(target_offsets[displacement]),
+                            "context": [
+                                f"0x{item.address:X}: {item.mnemonic} {item.op_str}"
+                                for item in instructions[lo:hi]
+                            ],
+                        }
+                    )
 
         if ins.id in {ARM64_INS_MOV, ARM64_INS_ADD} and len(ops) >= 2:
             if ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_REG:
@@ -169,9 +207,12 @@ def scan_argument_field_reads(view: BinaryView, start: int, end: int, offsets: d
                     aliases.discard(destination)
         elif ops and ops[0].type == ARM64_OP_REG:
             destination = canonical_pointer_register(dis, int(ops[0].reg))
-            if destination in aliases and destination != "x1" and ins.id != ARM64_INS_LDR:
+            if destination in aliases and destination != "x1" and not is_memory_load(ins):
                 aliases.discard(destination)
-    return hits
+
+    if len(observed_offsets) > MAX_ARGUMENT_OFFSETS:
+        raise RuntimeError("unexpectedly many parameter-object memory offsets")
+    return sorted(observed_offsets), target_hits
 
 
 def main() -> int:
@@ -194,15 +235,18 @@ def main() -> int:
         if "LoadTaskParam" in owner and isinstance(offset, int):
             param_offsets.setdefault(offset, []).append(str(item["target"]))
 
-    set_parameter_end = next_function_start(args.script_json, SET_PARAMETER_START)
+    starts, methods = load_script(args.script_json)
+    set_parameter_end = next_function_start(starts, SET_PARAMETER_START)
     view = BinaryView(args.lib)
     try:
-        reads = scan_argument_field_reads(view, SET_PARAMETER_START, set_parameter_end, param_offsets)
+        offsets, reads = scan_argument_memory_reads(
+            view, SET_PARAMETER_START, set_parameter_end, param_offsets
+        )
     finally:
         view.close()
 
     report = {
-        "schema": 2,
+        "schema": 3,
         "targets": list(TARGET_VALUES),
         "string_literal_present": target_string_literals(args.stringliteral_json),
         "dump_declarations": declarations,
@@ -212,7 +256,10 @@ def main() -> int:
         "set_parameter": {
             "start": SET_PARAMETER_START,
             "end": set_parameter_end,
-            "field_reads": reads,
+            "resolved_name": methods.get(SET_PARAMETER_START),
+            "dump_signature": find_method_signature(args.dump_cs, SET_PARAMETER_START),
+            "argument_memory_offsets": [f"0x{offset:X}" for offset in offsets],
+            "target_field_reads": reads,
             "observed_targets": sorted(
                 {target for hit in reads for target in hit["targets"]}
             ),
@@ -228,6 +275,8 @@ def main() -> int:
             {
                 "string_literal_present": report["string_literal_present"],
                 "load_task_param_offsets": report["load_task_param_offsets"],
+                "set_parameter_signature": report["set_parameter"]["dump_signature"],
+                "argument_memory_offsets": report["set_parameter"]["argument_memory_offsets"],
                 "set_parameter_observed_targets": report["set_parameter"]["observed_targets"],
             },
             sort_keys=True,
