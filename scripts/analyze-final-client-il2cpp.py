@@ -5,7 +5,7 @@ import argparse
 import bisect
 import json
 import re
-from collections import deque
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -134,12 +134,7 @@ def disasm_function(view: BinaryView, address: int, starts: list[int]):
     return list(make_disassembler().disasm(view.read(start, end - start), start))
 
 
-def direct_calls(
-    view: BinaryView,
-    address: int,
-    starts: list[int],
-    by_addr: dict[int, Method],
-) -> list[dict[str, Any]]:
+def direct_calls(view: BinaryView, address: int, starts: list[int], by_addr: dict[int, Method]) -> list[dict[str, Any]]:
     calls = []
     for ins in disasm_function(view, address, starts):
         if ins.id == ARM64_INS_BL and ins.operands and ins.operands[0].type == ARM64_OP_IMM:
@@ -160,31 +155,47 @@ def infer_w1(context: Iterable[Any]) -> int | None:
     return None
 
 
+def decode_bl_target(pc: int, word: int) -> int | None:
+    # ARM64 BL has opcode 100101b in bits 31..26, followed by signed imm26 << 2.
+    if word & 0xFC000000 != 0x94000000:
+        return None
+    imm26 = word & 0x03FFFFFF
+    if imm26 & 0x02000000:
+        imm26 -= 1 << 26
+    return pc + (imm26 << 2)
+
+
+def local_context(view: BinaryView, site: int, before: int = 8):
+    start = max(0, site - before * 4)
+    blob = view.read(start, (before + 1) * 4)
+    return list(make_disassembler().disasm(blob, start))
+
+
 def build_caller_index(
     view: BinaryView,
     targets: set[int],
     by_addr: dict[int, Method],
     method_starts: list[int],
 ) -> dict[int, list[dict[str, Any]]]:
-    """Scan executable ranges once and retain only calls to targeted RVAs."""
+    """Find direct callers with raw ARM64 BL decoding, disassembling only matches."""
     found: dict[int, list[dict[str, Any]]] = {target: [] for target in targets}
-    md = make_disassembler()
     for base, blob in view.exec_ranges():
-        history: deque[Any] = deque(maxlen=8)
-        for ins in md.disasm(blob, base):
-            if ins.id == ARM64_INS_BL and ins.operands and ins.operands[0].type == ARM64_OP_IMM:
-                target = int(ins.operands[0].imm)
-                if target in targets:
-                    parent = method_at(ins.address, by_addr, method_starts)
-                    context = list(history) + [ins]
-                    found[target].append({
-                        "site": ins.address,
-                        "parent": parent.name if parent else None,
-                        "parent_rva": parent.address if parent else None,
-                        "inferred_w1": infer_w1(history),
-                        "context": [f"0x{x.address:X}: {x.mnemonic} {x.op_str}" for x in context],
-                    })
-            history.append(ins)
+        usable = len(blob) - (len(blob) % 4)
+        for offset, (word,) in enumerate(struct.iter_unpack("<I", memoryview(blob)[:usable])):
+            site = base + offset * 4
+            target = decode_bl_target(site, word)
+            if target not in targets:
+                continue
+            parent = method_at(site, by_addr, method_starts)
+            context = local_context(view, site)
+            previous = [ins for ins in context if ins.address < site]
+            found[target].append({
+                "site": site,
+                "parent": parent.name if parent else None,
+                "parent_rva": parent.address if parent else None,
+                "inferred_w1": infer_w1(previous),
+                "context": [f"0x{ins.address:X}: {ins.mnemonic} {ins.op_str}" for ins in context],
+            })
     return found
 
 
@@ -203,10 +214,7 @@ def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
             continue
         values: dict[str, int] = {}
         for line in body.splitlines():
-            value_match = re.search(
-                r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\s*[,;]?",
-                line,
-            )
+            value_match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\s*[,;]?", line)
             if value_match:
                 values[value_match.group(1)] = int(value_match.group(2), 0)
         if 6 in values.values() or 7 in values.values():
@@ -242,15 +250,12 @@ def main() -> int:
         change_calls = known["Stage.SceneManager.ChangeView"]["callers"]
         interesting_edges: dict[str, Any] = {}
         for label, record in known.items():
-            edges = [
-                edge for edge in record["calls"]
-                if edge["name"] and any(key in edge["name"] for key in INTEREST)
-            ]
+            edges = [edge for edge in record["calls"] if edge["name"] and any(key in edge["name"] for key in INTEREST)]
             if edges:
                 interesting_edges[label] = edges
 
         report = {
-            "schema": 2,
+            "schema": 3,
             "method_count": len(methods),
             "known": known,
             "change_view_callsites": change_calls,
