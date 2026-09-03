@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from server.minimal_profile import (
+    COMPLETED_TUTORIAL_FLAG,
+    COMPLETED_TUTORIAL_LOCAL_STEP,
     FINAL_UNIT_SLOT_COUNT,
     HOME_CANDIDATE_EMPTY_LIST_SECTIONS,
     REQUIRED_COMMON_DEFINE_FIELDS,
@@ -29,7 +31,9 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(data["user_info"]["viewer_id"], 123)
         self.assertEqual(data["user_info"]["name"], "Relive")
         self.assertEqual(data["user_info"]["stamina_heal_time"], 456)
-        self.assertEqual(data["user_info"]["tutorial_flag"], 100)
+        self.assertEqual(COMPLETED_TUTORIAL_FLAG, 100)
+        self.assertEqual(COMPLETED_TUTORIAL_LOCAL_STEP, 1000)
+        self.assertEqual(data["user_info"]["tutorial_flag"], COMPLETED_TUTORIAL_FLAG)
         self.assertNotIn("unit_slot", data["user_info"])
         self.assertNotIn("user_card_list", data)
         self.assertNotIn("user_unit_list", data)
@@ -40,6 +44,7 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(validate_home_candidate_profile(data), [])
         self.assertEqual(validate_minimal_profile(data), [])
         self.assertEqual(data["user_info"]["viewer_id"], 321)
+        self.assertEqual(data["user_info"]["tutorial_flag"], COMPLETED_TUTORIAL_FLAG)
         self.assertNotIn("unit_slot", data["user_info"])
         for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
             self.assertEqual(data[section], [])
@@ -57,6 +62,11 @@ class MinimalProfileTests(unittest.TestCase):
                 "music_list.normal",
             ],
         )
+
+    def test_home_candidate_validator_rejects_noncompleted_tutorial_flag(self) -> None:
+        data = build_home_candidate_load_index_data(now=1)
+        data["user_info"]["tutorial_flag"] = 90
+        self.assertIn("user_info.tutorial_flag", validate_home_candidate_profile(data))
 
     def test_starter_visible_profile_populates_work_card_and_final_unit_contract(self) -> None:
         data = build_starter_visible_load_index_data(viewer_id=9, producer_name="Starter", now=10)
