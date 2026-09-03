@@ -9,6 +9,12 @@ The HTTP front end accepts URL families reconstructed from the final Android
 manifest SQLite database. Verified bootstrap manifests may be placed under
 ``<root>/manifests/``.
 
+Final 10133800 evidence matters for filename lookup: 12,317 manifest names contain
+``/`` and basename collisions exist, including collisions that map to different
+hashes. Therefore filename requests are resolved by exact *longest relative-path
+suffix* matching against ``manifests.name``; a basename is only used when that
+basename itself is an exact manifest name. No basename alias table is fabricated.
+
 When ``--event-log`` is enabled, the server emits only sanitized resource-plane
 events. It never records a resource filename, object hash, query string, account
 identifier, or request body. Routes are reduced to categories such as
@@ -27,7 +33,7 @@ import sqlite3
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Mapping, Type
+from typing import Iterable, Mapping, Type
 from urllib.parse import unquote, urlsplit
 
 from .safe_events import SafeEventLog, build_event
@@ -54,7 +60,7 @@ def object_path(root: Path, digest: str) -> Path:
 
 
 def load_manifest_name_index(path: Path) -> dict[str, str]:
-    """Load ``name -> compressed md5`` from a final manifest SQLite database."""
+    """Load exact ``manifests.name -> compressed md5`` mappings read-only."""
     uri = f"file:{Path(path).resolve().as_posix()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
         rows = conn.execute("SELECT name, hash FROM manifests").fetchall()
@@ -62,22 +68,46 @@ def load_manifest_name_index(path: Path) -> dict[str, str]:
     for name, digest in rows:
         if not isinstance(name, str) or not isinstance(digest, str) or not _HEX32_RE.fullmatch(digest):
             raise ValueError("manifest contains an invalid name/hash row")
-        previous = index.setdefault(name, digest.lower())
-        if previous != digest.lower():
-            raise ValueError(f"manifest name maps to multiple hashes: {name}")
+        normalized_name = name.replace("\\", "/")
+        normalized_digest = digest.lower()
+        previous = index.setdefault(normalized_name, normalized_digest)
+        if previous != normalized_digest:
+            raise ValueError("one normalized manifest name maps to multiple hashes")
     return index
+
+
+def _manifest_name_candidates(parts: list[str]) -> Iterable[str]:
+    """Yield exact manifest-name candidates, longest relative suffix first.
+
+    Client URL tails contain transport prefixes that are not necessarily part of
+    ``manifests.name`` (for example ``Android/``, ``Common/``, ``Master/`` or
+    ``manifest/``). Conversely, final manifest names themselves can contain
+    multiple path components. Progressive suffixes preserve the longest actual
+    relative name before ever considering a shorter basename.
+    """
+    for start in range(len(parts)):
+        candidate = "/".join(parts[start:])
+        if not candidate:
+            continue
+        yield candidate
+        if candidate.endswith(".lz4"):
+            stripped = candidate[:-4]
+            if stripped:
+                yield stripped
 
 
 def _digest_from_tail(tail: str, manifest_index: Mapping[str, str] | None) -> str | None:
     parts = [unquote(part) for part in tail.split("/") if part]
     if not parts:
         return None
-    leaf = parts[-1]
-    candidates = [leaf]
-    if leaf.endswith(".lz4"):
-        candidates.append(leaf[:-4])
 
-    for candidate in candidates:
+    # Hash-addressed routes are recognized only from the final URL leaf. Keep the
+    # historical prefix consistency check for explicit <hh>/<md5> forms.
+    leaf = parts[-1]
+    direct_candidates = [leaf]
+    if leaf.endswith(".lz4"):
+        direct_candidates.append(leaf[:-4])
+    for candidate in direct_candidates:
         if _HEX32_RE.fullmatch(candidate):
             digest = candidate.lower()
             if (
@@ -91,7 +121,12 @@ def _digest_from_tail(tail: str, manifest_index: Mapping[str, str] | None) -> st
 
     if manifest_index is None:
         return None
-    for candidate in candidates:
+
+    # Final 10133800 has path-shaped names and conflicting basenames. Never build
+    # basename aliases. Match exact DB keys from the longest suffix of the client
+    # tail to the shortest; this strips transport-only leading directories while
+    # preserving a path-shaped manifest name when one exists.
+    for candidate in _manifest_name_candidates(parts):
         digest = manifest_index.get(candidate)
         if digest is not None and _HEX32_RE.fullmatch(digest):
             return digest.lower()
@@ -193,7 +228,7 @@ def make_handler(
     sanitized_event_log = event_log
 
     class CGSSResourceHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive-resource/0.4"
+        server_version = "cgss-relive-resource/0.5"
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
