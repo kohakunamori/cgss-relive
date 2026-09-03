@@ -28,11 +28,13 @@ For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 Current bounded Home static analysis also shows that `Stage.Home.Start` and
 `StartViewProcess` do not directly launch a Home API task. Startup first enters
 local/resource-facing helpers such as `PreDownloadList`, card/unit preparation,
-banner WorkData and popup checks. Therefore do not add speculative post-Home API
-responses before the original client proves one is requested.
+banner WorkData and popup checks. The corrected starter creates its owned card in
+`cs_gacha_data_cenere -> WorkCardData.AddCardData`, keeps `user_card_list=[]`, and
+keeps `user_chara_list=[]`; the latter is proven empty-array safe and has no
+bounded Home startup `WorkCharaData` consumer.
 
 The remaining decisive uncertainty is original-client runtime acceptance of the
-local TLS/resource stack and synthetic starter-visible `/load/index` state.
+local TLS/resource stack and reduced starter-visible `/load/index` state.
 
 ## 1. Install dependencies
 
@@ -42,7 +44,8 @@ python -m pip install -r .\server\requirements.txt
 
 ## 2. Preflight the frozen local resource set
 
-Do this before starting any server or launching the client:
+The preferred stack supervisor runs this automatically, but it is useful to run
+it explicitly before the first device session:
 
 ```powershell
 python .\scripts\preflight-local-resources.py `
@@ -52,7 +55,7 @@ python .\scripts\preflight-local-resources.py `
   -o .\work\resource-preflight.json
 ```
 
-The final acceptance invariants are:
+Final invariants:
 
 ```text
 manifest rows   220837
@@ -61,8 +64,8 @@ wire manifests  2
 ```
 
 The command also checks SQLite `quick_check`, complete object presence and
-zero-length objects. Its output contains only counts/status/failure codes; it does
-not print resource names or hashes. **Do not continue to the rooted run unless it
+zero-length objects. Output contains only counts/status/failure codes; it does not
+print resource names or hashes. **Do not continue to the rooted run unless it
 returns exit code 0 / `ready: true`.**
 
 ## 3. Generate one disposable multi-SAN certificate
@@ -108,15 +111,54 @@ Make both original names resolve to device loopback:
 Keep the original names intact so HTTP Host, TLS SNI and certificate SAN checks
 remain realistic.
 
-## 6. Start plain local backends
+## 6. Preferred: start the whole local stack under one supervisor
 
-TLS terminates only at `server.tls_mux`; the API and resource backends stay on
-loopback plain HTTP. This avoids two competing TLS listeners while preserving the
-original external HTTPS semantics.
+Use the foreground supervisor for the first real-device experiment:
+
+```powershell
+python .\scripts\run-rooted-local-stack.py `
+  --resource-root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db `
+  --cert .\work\tls\server.chain.pem `
+  --key .\work\tls\server.key.pem `
+  --api-map .\work\final_map.json `
+  --viewer-id 1 `
+  --producer-name "Relive Producer"
+```
+
+It performs these gates in order:
+
+```text
+full 10133800 preflight
+  -> control API 127.0.0.1:8080
+  -> control /healthz == 200
+  -> resource backend 127.0.0.1:8081
+  -> resource /healthz == 200
+  -> multi-SAN TLS host mux 127.0.0.1:8445
+  -> foreground monitoring
+```
+
+If any child exits unexpectedly, the supervisor terminates the whole stack and
+returns failure instead of leaving a misleading partial test environment.
+
+Default behavior is native resource-version negotiation. Do not pass
+`--accept-old-resource-version` on the primary run. That flag remains an explicit
+diagnostic differential only.
+
+The supervisor writes the same sanitized evidence streams used by the manual
+setup:
+
+```text
+work/runtime-starter-control.jsonl
+work/runtime-starter-resource.jsonl
+```
+
+## 7. Manual three-process mode — diagnostic fallback
+
+Use this only when isolating one backend/mux problem. The normal first run should
+use the supervisor above.
 
 ### Control API backend — port 8080
-
-Use starter-visible first:
 
 ```powershell
 python -m server.http_server `
@@ -129,12 +171,7 @@ python -m server.http_server `
   --api-map .\work\final_map.json
 ```
 
-`--api-map` only annotates sanitized unknown-route evidence. It does not invent a
-response.
-
 ### Frozen resource backend — port 8081
-
-Start this **before launching native 214 mode**:
 
 ```powershell
 python -m server.resource_server `
@@ -166,7 +203,7 @@ resource-cache/10133800/manifests/all_dbmanifest
 resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-## 7. Start the built-in single-port TLS Host mux — port 8445
+### TLS Host mux — port 8445
 
 ```powershell
 python -m server.tls_mux `
@@ -188,19 +225,18 @@ storages.game.starlight-stage.jp
   -> http://127.0.0.1:8081
 ```
 
-It does not log request paths, headers, bodies or query strings. Sanitized runtime
-evidence remains in the two backend JSONL files.
-
-Unknown Host is rejected with 421. Request bodies are forwarded opaquely. The
-current mux accepts GET/HEAD/POST and Content-Length request bodies; unexpected
-chunked request upload is rejected explicitly rather than guessed.
+It does not log request paths, headers, bodies or query strings. Unknown Host is
+rejected with 421. Request bodies are forwarded opaquely.
 
 ## 8. Use exactly one `adb reverse` for device HTTPS 443
 
 Point the device's only loopback 443 listener at mux port 8445:
 
 ```powershell
-.\scripts\prepare-device-tunnel.ps1 -HostPort 8445 -RequireRoot
+.\scripts\prepare-device-tunnel.ps1 `
+  -DevicePort 443 `
+  -HostPort 8445 `
+  -RequireRoot
 ```
 
 Conceptually:
@@ -301,26 +337,19 @@ No second `/load/check` is needed for that timeline to be valid.
 
 ## 11. Diagnostic direct-success differential
 
-Only if native mode fails before useful resource evidence, restart the API backend
+Only if native mode fails before useful resource evidence, rerun the supervisor
 with:
 
 ```text
 --accept-old-resource-version
 ```
 
-while keeping the same starter-visible profile. This returns success to old
-10133000 while still supplying `required_res_ver=10133800`. It is a diagnostic
-branch, not the protocol-default model.
+or, in manual mode, add that flag only to `server.http_server`. It returns
+success to old 10133000 while still supplying `required_res_ver=10133800`. This is
+a diagnostic branch, not the protocol-default model.
 
-Compare equivalent runs, for example:
-
-```powershell
-python .\scripts\analyze-runtime-events.py `
-  --merge-run native=.\work\runtime-native-control.jsonl `
-  --merge-run native=.\work\runtime-native-resource.jsonl `
-  --merge-run direct=.\work\runtime-direct-control.jsonl `
-  --merge-run direct=.\work\runtime-direct-resource.jsonl
-```
+Compare equivalent runs with `scripts/analyze-runtime-events.py` after preserving
+their two sanitized streams under distinct filenames.
 
 ## Acceptance questions, in order
 
@@ -330,7 +359,7 @@ python .\scripts\analyze-runtime-events.py `
 4. Are resource requests served successfully, or which sanitized category first
    returns 404/416?
 5. Does the client subsequently reach `/load/index`?
-6. Does starter-visible `/load/index` lead to a later client action?
+6. Does the reduced starter-visible `/load/index` lead to a later client action?
 7. Does the device visibly render Home or Login Bonus followed by Home?
 8. What is the first unsupported post-Home endpoint or local-state dependency?
 
@@ -352,7 +381,7 @@ reachability.
 
 ### TLS error before HTTP
 
-Check system-root visibility and that `server.cert.pem` contains both original
+Check system-root visibility and that the leaf certificate contains both original
 DNS SANs. Keep original Host/SNI. Do not patch the APK before collecting the exact
 failure.
 
@@ -381,9 +410,10 @@ missing archive object.
 
 Do not add hundreds of optional fields. `LoadTask.Parse` is guard-heavy and a
 provided parent can make child reads hard. Current Home static analysis favors
-keeping optional C-class sections omitted unless a runtime blocker proves they
-are needed. Use the starter/empty/strict differential only after identifying the
-first real blocker.
+keeping optional sections empty/omitted unless a runtime blocker proves they are
+needed. In particular, do not re-add `user_chara_list` state merely because card
+100001 maps to chara 101; Home startup currently gets its character identity from
+WorkCardData.
 
 ### Known final endpoint returns 404 after Home
 
