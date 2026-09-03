@@ -1,7 +1,7 @@
 param(
     [string]$Serial,
     [int]$DevicePort = 443,
-    [int]$HostPort = 8443,
+    [int]$HostPort = 8445,
     [switch]$Remove,
     [switch]$RequireRoot
 )
@@ -51,5 +51,7 @@ if ($LASTEXITCODE -ne 0 -or $listed -notmatch [regex]::Escape("tcp:$DevicePort t
 
 Write-Host "ADB reverse ready: device 127.0.0.1:$DevicePort -> host 127.0.0.1:$HostPort"
 Write-Host "Root available: $hasRoot"
-Write-Host 'The CGSS API hostname must still resolve to 127.0.0.1 on the device.'
-Write-Host 'For HTTPS, the test CA must be trusted as a SYSTEM CA on the rooted device.'
+Write-Host 'Both original hostnames must resolve to 127.0.0.1 on the device:'
+Write-Host '  apis.game.starlight-stage.jp'
+Write-Host '  storages.game.starlight-stage.jp'
+Write-Host 'For HTTPS, the generated test CA must be trusted as a SYSTEM CA on the rooted device.'
