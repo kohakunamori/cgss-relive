@@ -6,11 +6,13 @@ param(
     [int]$ExpectedVersionCode = 438,
     [int]$WaitForProcessSeconds = 120,
     [string]$Python = 'python',
+    [string]$CaCert = '.\work\tls\ca.cert.pem',
     [string]$RawPath,
     [string]$SanitizedPath,
     [switch]$ClearBuffer,
     [switch]$Launch,
-    [switch]$PreserveProcess
+    [switch]$PreserveProcess,
+    [switch]$SkipDevicePreflight
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +35,7 @@ if (-not $SanitizedPath) {
 $RawPath = [System.IO.Path]::GetFullPath($RawPath)
 $SanitizedPath = [System.IO.Path]::GetFullPath($SanitizedPath)
 $Sanitizer = Join-Path $RepoRoot 'scripts/sanitize-device-logcat.py'
+$DevicePreflight = Join-Path $RepoRoot 'scripts/check-rooted-device.ps1'
 
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($RawPath)) | Out-Null
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($SanitizedPath)) | Out-Null
@@ -56,6 +59,25 @@ function Invoke-AdbCapture {
 $state = Invoke-AdbCapture -Arguments @('get-state') -AllowFailure
 if ($state.ExitCode -ne 0 -or $state.Text -ne 'device') {
     throw 'ADB target is not in device state'
+}
+
+if ($Launch -and -not $SkipDevicePreflight) {
+    $preflightArgs = @(
+        '-Package', $Package,
+        '-ExpectedActivity', $Activity,
+        '-ExpectedVersionName', $ExpectedVersionName,
+        '-ExpectedVersionCode', $ExpectedVersionCode,
+        '-DevicePort', 443,
+        '-HostPort', 8445,
+        '-CaCert', $CaCert
+    )
+    if ($Serial) {
+        $preflightArgs = @('-Serial', $Serial) + $preflightArgs
+    }
+    & $DevicePreflight @preflightArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Read-only rooted-device preflight failed; exact launch was not attempted'
+    }
 }
 
 if ($Launch) {
