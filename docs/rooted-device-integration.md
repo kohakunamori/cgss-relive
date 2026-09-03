@@ -25,6 +25,12 @@ For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 - `/load/title` is not a hard Home prerequisite;
 - `data.isS3=false` selects `storages.game.starlight-stage.jp`.
 
+Current bounded Home static analysis also shows that `Stage.Home.Start` and
+`StartViewProcess` do not directly launch a Home API task. Startup first enters
+local/resource-facing helpers such as `PreDownloadList`, card/unit preparation,
+banner WorkData and popup checks. Therefore do not add speculative post-Home API
+responses before the original client proves one is requested.
+
 The remaining decisive uncertainty is original-client runtime acceptance of the
 local TLS/resource stack and synthetic starter-visible `/load/index` state.
 
@@ -34,7 +40,32 @@ local TLS/resource stack and synthetic starter-visible `/load/index` state.
 python -m pip install -r .\server\requirements.txt
 ```
 
-## 2. Generate one disposable multi-SAN certificate
+## 2. Preflight the frozen local resource set
+
+Do this before starting any server or launching the client:
+
+```powershell
+python .\scripts\preflight-local-resources.py `
+  --version 10133800 `
+  --root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db `
+  -o .\work\resource-preflight.json
+```
+
+The final acceptance invariants are:
+
+```text
+manifest rows   220837
+unique hashes   220803
+wire manifests  2
+```
+
+The command also checks SQLite `quick_check`, complete object presence and
+zero-length objects. Its output contains only counts/status/failure codes; it does
+not print resource names or hashes. **Do not continue to the rooted run unless it
+returns exit code 0 / `ready: true`.**
+
+## 3. Generate one disposable multi-SAN certificate
 
 The built-in TLS mux serves both original HTTPS hostnames on one device-facing
 port. Generate one leaf containing both SANs:
@@ -56,7 +87,7 @@ work/tls/server.key.pem
 
 Never commit private keys.
 
-## 3. Trust the CA as an Android system CA
+## 4. Trust the CA as an Android system CA
 
 Use the rooted device/root manager's supported system-CA mechanism. Android
 14+/Conscrypt/APEX layouts differ across Magisk, KernelSU and ROMs, so this repo
@@ -65,7 +96,7 @@ does not automate that persistent system mutation.
 Acceptance condition: the CGSS process trusts `ca.cert.pem` through the system
 trust domain. Installing it only as a user CA is not sufficient evidence.
 
-## 4. Redirect both original hostnames on device
+## 5. Redirect both original hostnames on device
 
 Make both original names resolve to device loopback:
 
@@ -77,7 +108,7 @@ Make both original names resolve to device loopback:
 Keep the original names intact so HTTP Host, TLS SNI and certificate SAN checks
 remain realistic.
 
-## 5. Start plain local backends
+## 6. Start plain local backends
 
 TLS terminates only at `server.tls_mux`; the API and resource backends stay on
 loopback plain HTTP. This avoids two competing TLS listeners while preserving the
@@ -128,14 +159,14 @@ The resource log contains only category/status evidence:
 
 Resource filename/hash/query is never logged and `/healthz` is excluded.
 
-Verified local bootstrap wire manifests, when required, live outside Git under:
+Verified local bootstrap wire manifests live outside Git under:
 
 ```text
 resource-cache/10133800/manifests/all_dbmanifest
 resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-## 6. Start the built-in single-port TLS Host mux — port 8445
+## 7. Start the built-in single-port TLS Host mux — port 8445
 
 ```powershell
 python -m server.tls_mux `
@@ -147,7 +178,7 @@ python -m server.tls_mux `
   --resource-backend 127.0.0.1:8081
 ```
 
-The mux dispatches only by the original Host header:
+The mux dispatches only by original Host:
 
 ```text
 apis.game.starlight-stage.jp
@@ -164,7 +195,7 @@ Unknown Host is rejected with 421. Request bodies are forwarded opaquely. The
 current mux accepts GET/HEAD/POST and Content-Length request bodies; unexpected
 chunked request upload is rejected explicitly rather than guessed.
 
-## 7. Use exactly one `adb reverse` for device HTTPS 443
+## 8. Use exactly one `adb reverse` for device HTTPS 443
 
 Point the device's only loopback 443 listener at mux port 8445:
 
@@ -197,7 +228,7 @@ Remove the mapping with:
 .\scripts\prepare-device-tunnel.ps1 -Remove
 ```
 
-## 8. Native `/load/check` behavior — primary experiment
+## 9. Native `/load/check` behavior — primary experiment
 
 Incoming final-binary default:
 
@@ -233,9 +264,9 @@ Expected statically closed continuation:
 A later second `/load/check` is possible for an independent path, but is not a
 required link and must not be used as the 214 acceptance criterion.
 
-## 9. Analyze one merged control/resource timeline
+## 10. Analyze one merged control/resource timeline
 
-The analyzer can merge independent sanitized files by their numeric event time:
+The analyzer can merge independent sanitized files by numeric event time:
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
@@ -268,7 +299,7 @@ A healthy native timeline may be as simple as:
 
 No second `/load/check` is needed for that timeline to be valid.
 
-## 10. Diagnostic direct-success differential
+## 11. Diagnostic direct-success differential
 
 Only if native mode fails before useful resource evidence, restart the API backend
 with:
@@ -293,19 +324,26 @@ python .\scripts\analyze-runtime-events.py `
 
 ## Acceptance questions, in order
 
-1. Does TLS complete and does `/load/check` reach the control backend?
-2. After native 214, does any `@resource/*` request appear?
-3. Are resource requests served successfully, or which sanitized category first
+1. Did local resource preflight return `ready: true`?
+2. Does TLS complete and does `/load/check` reach the control backend?
+3. After native 214, does any `@resource/*` request appear?
+4. Are resource requests served successfully, or which sanitized category first
    returns 404/416?
-4. Does the client subsequently reach `/load/index`?
-5. Does starter-visible `/load/index` lead to a later client action?
-6. Does the device visibly render Home or Login Bonus followed by Home?
-7. What is the first unsupported post-Home endpoint or local-state dependency?
+5. Does the client subsequently reach `/load/index`?
+6. Does starter-visible `/load/index` lead to a later client action?
+7. Does the device visibly render Home or Login Bonus followed by Home?
+8. What is the first unsupported post-Home endpoint or local-state dependency?
 
 Static `Home=6` / `Login_Bonus=7` is already confirmed. Runtime is validating that
 the local stack reaches/renders those views, not rediscovering their numeric IDs.
 
 ## Failure classification
+
+### Preflight not ready
+
+Do not launch the original client yet. Fix the reported local-cache invariant
+first; a runtime 404 caused by an incomplete archive is not useful protocol
+evidence.
 
 ### No control request
 
@@ -335,14 +373,17 @@ these checks.
 
 The client reached the resource plane. Investigate URL-builder coverage,
 manifest-name resolution, local object/wire-manifest presence and frozen version.
-The sanitized JSONL deliberately hides the raw path; use a local private debug
-capture only when necessary and never commit it.
+Because preflight already established local completeness, a post-preflight 404 is
+stronger evidence of an unsupported client URL shape rather than a casually
+missing archive object.
 
 ### `/load/index` arrives, then stalls
 
 Do not add hundreds of optional fields. `LoadTask.Parse` is guard-heavy and a
-provided parent can make child reads hard. Use the starter/empty/strict
-differential only after identifying the first real blocker.
+provided parent can make child reads hard. Current Home static analysis favors
+keeping optional C-class sections omitted unless a runtime blocker proves they
+are needed. Use the starter/empty/strict differential only after identifying the
+first real blocker.
 
 ### Known final endpoint returns 404 after Home
 
