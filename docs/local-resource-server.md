@@ -22,7 +22,7 @@ Examples include:
 /dl/resources/[Low|High/]Movie/<file-or-hash>
 /dl/<ver>/Generic/Blob/<file-or-hash>
 /dl/<ver>/Generic/Master/<file-or-hash>
-/dl/resources/Generic/<hh>/<hash>
+resource/hush Generic forms
 ```
 
 Important builder facts:
@@ -35,14 +35,37 @@ Important builder facts:
 - `.lz4` belongs to compressed builder forms rather than defining a different
   archive identity.
 
-## Filename index
+## Exact filename index — path-shaped names matter
 
-Filename-addressed storages requests require the locally preserved final manifest
-SQLite database. The DB is opened read-only and only the filename/hash mapping is
-loaded. Without it, hash-addressed forms still work and unresolved filename forms
-return 404 rather than being guessed.
+Filename-addressed storages requests require the preserved final manifest SQLite
+DB. Final `manifests.name` cannot be reduced to basename safely. Aggregate final
+10133800 facts are:
 
-Expected local DB path in the rooted integration examples:
+```text
+rows                          220837
+names containing '/'           12317
+unique basenames              220652
+basename collision groups        137
+basename hash-conflict groups    130
+```
+
+The server therefore loads **exact normalized manifest names only**. For a URL
+tail it tries relative suffixes longest-first; `.lz4` stripping is performed at
+the same suffix depth. It never creates fuzzy basename aliases.
+
+The real final DB is exercised by `scripts/verify-final-manifest-resolution.py`.
+Current closed aggregate result:
+
+```text
+resolved          220837 / 220837
+unresolved             0
+hash mismatches         0
+unknown category        0
+```
+
+This includes all 12317 path-shaped names.
+
+Expected uncommitted DB path:
 
 ```text
 work/resources/manifest_10133800.db
@@ -57,14 +80,14 @@ resource-cache/10133800/manifests/all_dbmanifest
 resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-They are exposed only as version-scoped manifest requests. Nothing is synthesized
-and no proprietary body is committed.
+Both are exposed only through version-scoped `/dl/10133800/manifests/...` routes.
+They are served as exact bytes with `Cache-Control: no-cache`; they are not
+content-addressed objects and do not receive an ETag. GET and HEAD are covered by
+HTTP regression tests.
 
-## Preflight the complete local cache first
+## Fast rooted-device preflight — schema 3
 
-Before launching the original client, validate that the local directory is the
-complete frozen final set rather than discovering a missing object during
-bootstrap:
+Before launching the original client:
 
 ```powershell
 python .\scripts\preflight-local-resources.py `
@@ -74,7 +97,7 @@ python .\scripts\preflight-local-resources.py `
   -o .\work\resource-preflight.json
 ```
 
-The final invariants are:
+Frozen invariants:
 
 ```text
 manifest rows   220837
@@ -82,24 +105,59 @@ unique hashes   220803
 wire manifests  2
 ```
 
-The preflight checks:
+Schema 3 checks:
 
-- resource version is exactly `10133800`;
-- manifest SQLite `PRAGMA quick_check` is `ok`;
-- row and unique-hash counts match the frozen final manifest;
-- both bootstrap wire manifests exist;
-- every unique manifest hash has a corresponding
-  `objects/<hh>/<hash>` regular file;
-- no expected object is zero length.
+- exact resource version;
+- manifest SQLite `PRAGMA quick_check`;
+- frozen row and unique-hash counts;
+- all 220803 expected object files present and non-zero;
+- `all_dbmanifest` parses the expected Android-manifest MD5;
+- local `Android_AHigh_SHigh` compressed bytes match that MD5;
+- its CGSS 16-byte wrapper/raw LZ4 payload decodes;
+- decoded bytes are SQLite;
+- decoded SQLite bytes are identical to the supplied manifest DB;
+- `master.mdb` has a valid manifest entry;
+- the content-addressed master object exists;
+- the master's actual MD5 matches its manifest digest.
 
-Its JSON output contains only counts/status/failure codes. It never emits resource
-filenames, hashes, manifest rows, or object bytes. Exit code `0` means ready;
-exit code `2` means the local cache is not ready for acceptance testing.
+Output contains only counts, booleans and failure codes. Exit code `0` means
+ready; exit code `2` means the local cache is not ready.
+
+The fast preflight intentionally does **not** hash every 220803 object on every
+server start. Admission/download tooling already validates MD5, and rehashing the
+entire archive would make normal iteration unnecessarily expensive.
+
+## Optional full archive MD5 audit
+
+When archive bytes may have been changed after admission, after copying the cache
+to new storage, or before a preservation milestone, run the full audit explicitly:
+
+```powershell
+python .\scripts\audit-local-resource-objects.py `
+  --root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db `
+  -o .\work\resource-object-audit.json
+```
+
+It computes MD5 once for every **unique** manifest hash and reports only aggregate
+counts:
+
+```text
+manifest_unique
+checked
+missing
+unreadable
+mismatched
+invalid_manifest_hashes
+```
+
+No resource filename, digest or path is written to its report. This is a
+heavyweight integrity audit, not a prerequisite for every rooted-device launch.
 
 ## Preferred rooted-device backend mode
 
-The recommended native topology terminates HTTPS in `server.tls_mux`, so the
-resource backend itself remains plain loopback HTTP:
+The recommended topology terminates HTTPS in `server.tls_mux`, so the resource
+backend itself remains loopback HTTP:
 
 ```powershell
 python -m server.resource_server `
@@ -111,19 +169,17 @@ python -m server.resource_server `
   --event-log .\work\runtime-starter-resource.jsonl
 ```
 
-The mux then routes the original HTTPS Host
-`storages.game.starlight-stage.jp` to this backend. See
-`docs/rooted-device-integration.md`.
+The mux routes `storages.game.starlight-stage.jp` to this backend. The normal
+first run should use `scripts/run-rooted-local-stack.py`, which runs the fast
+preflight and verifies the TLS mux before declaring readiness.
 
-Standalone TLS remains supported for isolated tests by passing `--cert` and
-`--key`, but it is no longer the preferred two-host rooted layout because one
-`adb reverse tcp:443` cannot target two independent host TLS listeners.
+Standalone TLS remains supported for isolated backend tests, but one device port
+443 should not be mapped to two independent host listeners.
 
 ## Sanitized event log
 
-`--event-log` is specifically for integration evidence. Requested filename,
-MD5/hash, path tail and query string are discarded before logging. Only synthetic
-route category + HTTP status are retained:
+`--event-log` never records requested filename, MD5/hash, path tail or query. It
+retains only category + HTTP status:
 
 ```text
 @resource/manifest
@@ -134,18 +190,11 @@ route category + HTTP status are retained:
 @resource/unresolved
 ```
 
-`/healthz` is not logged, so monitoring cannot create a false
+`/healthz` is excluded so monitoring cannot create a false
 `resource_plane_observed` phase.
 
-Control/resource logs can later be merged safely by event timestamp:
-
-```powershell
-python .\scripts\analyze-runtime-events.py `
-  --merge-run starter=.\work\runtime-starter-control.jsonl `
-  --merge-run starter=.\work\runtime-starter-resource.jsonl
-```
-
-This avoids concurrent writes from two server processes to one evidence file.
+Control/resource logs can be merged by timestamp with
+`scripts/analyze-runtime-events.py`.
 
 ## HTTP behavior
 
@@ -155,22 +204,20 @@ The server is read-only and supports:
 - `HEAD`;
 - one `Range: bytes=...` range;
 - immutable ETag/cache headers for content-addressed objects;
-- version-scoped bootstrap manifests;
-- optional TLS;
+- exact version-scoped bootstrap manifests;
+- optional standalone TLS;
 - optional sanitized resource-plane event logging.
 
-Invalid URL families, wrong frozen versions, unknown filenames and missing
+Invalid URL families, wrong frozen versions, unknown exact filenames and missing
 objects return 404. Unsatisfiable ranges return 416.
 
 ## Native bootstrap role
 
-The static final-client parent continuation is closed:
-
 ```text
 /load/check 10133000
 -> 214 + required_res_ver=10133800
--> client persists RES_VER=10133800
--> SetupNetwork becomes ready
+-> Savedata RES_VER=10133800
+-> SetupNetwork ready
 -> ResourcesManager.GameInitialize resumes
 -> AssetManager.InitializeManifest
 -> DownloadOrLoadForInitialize
@@ -180,17 +227,8 @@ The static final-client parent continuation is closed:
 -> /load/index
 ```
 
-Therefore preflight, start, and route the resource backend **before** launching
-the native 214 run. Do not wait for an automatic second `/load/check`; it is not
-a required link.
+Start and route the resource backend before launching the native 214 run. Do not
+wait for an automatic second `/load/check`; it is not a required link.
 
-A successful `@resource/*` event after 214 is direct runtime evidence that the
-client entered the statically expected resource initialization stage.
-
-## Integrity boundary
-
-`archive-resources.py` verifies compressed MD5 before atomically admitting an
-object into the archive. The normal serving hot path therefore does not rehash
-every object request. The preflight checks complete presence and frozen-manifest
-identity; if archive bytes may have been modified after admission, rerun the
-archive verifier rather than treating existence alone as cryptographic proof.
+A successful sanitized `@resource/*` event after 214 is direct runtime evidence
+that the original client entered the statically expected resource stage.
