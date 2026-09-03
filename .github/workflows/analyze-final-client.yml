@@ -12,6 +12,7 @@ on:
       - 'scripts/analyze-home-state-dependencies.py'
       - 'scripts/analyze-tutorial-flag.py'
       - 'scripts/find-exact-stringliteral.py'
+      - 'scripts/find-literal-xrefs-in-function.py'
 
 permissions:
   contents: read
@@ -130,6 +131,17 @@ jobs:
             --input work/dump/stringliteral.json \
             --target user_chara_list \
             --output reports/user-chara-literal.json
+          python scripts/find-literal-xrefs-in-function.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --target 0x85C61F8 \
+            --expect-site 0x4859298 \
+            --output reports/unit-slot-literal-xref.json
+          python scripts/find-literal-xrefs-in-function.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --target 0x85C6820 \
+            --output reports/user-chara-literal-xref.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
