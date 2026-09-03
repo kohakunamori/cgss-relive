@@ -94,7 +94,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check capstone pyelftools
+          python -m pip install --disable-pip-version-check numpy capstone pyelftools
           python scripts/analyze-final-client-il2cpp.py \
             --lib work/libil2cpp.so \
             --dump-cs work/dump/dump.cs \
