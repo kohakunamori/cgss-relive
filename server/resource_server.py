@@ -1,31 +1,44 @@
-"""Read-only HTTP/TLS server for the frozen CGSS content-addressed resource archive.
+"""Read-only HTTP/TLS server for a frozen CGSS resource archive.
 
-The server intentionally exposes only final resource object URLs of the form::
-
-    /dl/resources/<Category>/<hh>/<md5>
-
-and maps them to the preservation archive layout::
+The archive itself stays content-addressed::
 
     <root>/objects/<hh>/<md5>
 
-It does not synthesize manifest/bootstrap responses.  Redirecting the production
-asset hostname should remain a runtime-driven integration step.
+while the HTTP front end accepts the URL families reconstructed from the final
+Android 11.6.3 client.  Hash-addressed requests can be resolved without a
+manifest database.  Filename-addressed storage URLs require an optional local
+final manifest SQLite database; that database remains uncommitted/proprietary.
+
+Verified bootstrap manifest files may optionally be placed under::
+
+    <root>/manifests/<filename>
+
+and are exposed as ``/dl/<version>/manifests/<filename>`` only for the configured
+frozen resource version.
 """
 from __future__ import annotations
 
 import argparse
 import re
+import sqlite3
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Type
-from urllib.parse import urlsplit
+from typing import Mapping, Type
+from urllib.parse import unquote, urlsplit
 
 RESOURCE_CATEGORIES = ("AssetBundles", "Sound", "Movie", "Generic")
-_RESOURCE_ROUTE_RE = re.compile(
-    r"^/dl/resources/(AssetBundles|Sound|Movie|Generic)/([0-9A-Fa-f]{2})/([0-9A-Fa-f]{32})$"
-)
+_HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 _COPY_CHUNK_SIZE = 1024 * 1024
+
+# Final-client URL families reconstructed from CustomPreference/AssetHandle.
+# The path matcher is deliberately structural rather than a single CDN layout.
+_RESOURCE_PATH_RE = re.compile(
+    r"^/dl/(?:(?P<version>[0-9]+)/)?(?P<resources>resources/)?"
+    r"(?:(?P<quality>Low|High)/)?"
+    r"(?P<category>AssetBundles|Sound|Movie|Generic)/(?P<tail>.+)$"
+)
+_MANIFEST_PATH_RE = re.compile(r"^/dl/(?P<version>[0-9]+)/manifests/(?P<name>[^/]+)$")
 
 
 class RangeNotSatisfiable(ValueError):
@@ -37,25 +50,101 @@ def object_path(root: Path, digest: str) -> Path:
     return root / "objects" / digest[:2] / digest
 
 
-def resolve_resource_request(root: Path, request_path: str) -> tuple[Path, str] | None:
-    """Resolve one canonical CGSS resource URL to its local archive object."""
+def load_manifest_name_index(path: Path) -> dict[str, str]:
+    """Load ``name -> compressed md5`` from a final manifest SQLite database."""
+    uri = f"file:{Path(path).resolve().as_posix()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        rows = conn.execute("SELECT name, hash FROM manifests").fetchall()
+    index: dict[str, str] = {}
+    for name, digest in rows:
+        if not isinstance(name, str) or not isinstance(digest, str) or not _HEX32_RE.fullmatch(digest):
+            raise ValueError("manifest contains an invalid name/hash row")
+        previous = index.setdefault(name, digest.lower())
+        if previous != digest.lower():
+            raise ValueError(f"manifest name maps to multiple hashes: {name}")
+    return index
+
+
+def _digest_from_tail(tail: str, manifest_index: Mapping[str, str] | None) -> str | None:
+    """Resolve a BuildURL tail to a compressed archive digest.
+
+    Final CDN forms may contain ``<prefix>/<hash>``.  Storage forms may use a
+    bare hash or a manifest filename; compressed filename forms may append
+    ``.lz4``.  Filename resolution is intentionally unavailable without a local
+    manifest index.
+    """
+    parts = [unquote(part) for part in tail.split("/") if part]
+    if not parts:
+        return None
+    leaf = parts[-1]
+    candidates = [leaf]
+    if leaf.endswith(".lz4"):
+        candidates.append(leaf[:-4])
+
+    for candidate in candidates:
+        if _HEX32_RE.fullmatch(candidate):
+            digest = candidate.lower()
+            if len(parts) >= 2 and _HEX32_RE.fullmatch(parts[-2]) is None and re.fullmatch(r"[0-9A-Fa-f]{2}", parts[-2]):
+                if parts[-2].lower() != digest[:2]:
+                    return None
+            return digest
+
+    if manifest_index is None:
+        return None
+    for candidate in candidates:
+        digest = manifest_index.get(candidate)
+        if digest is not None and _HEX32_RE.fullmatch(digest):
+            return digest.lower()
+    return None
+
+
+def resolve_resource_request(
+    root: Path,
+    request_path: str,
+    *,
+    version: str = "10133800",
+    manifest_index: Mapping[str, str] | None = None,
+) -> tuple[Path, str | None] | None:
+    """Resolve one statically-supported final-client resource URL."""
     path = urlsplit(request_path).path
-    match = _RESOURCE_ROUTE_RE.fullmatch(path)
+
+    manifest_match = _MANIFEST_PATH_RE.fullmatch(path)
+    if manifest_match is not None:
+        if manifest_match.group("version") != str(version):
+            return None
+        name = unquote(manifest_match.group("name"))
+        if name in {".", ".."} or "/" in name or "\\" in name:
+            return None
+        candidate = root / "manifests" / name
+        return candidate, None
+
+    match = _RESOURCE_PATH_RE.fullmatch(path)
     if match is None:
         return None
-    _category, prefix, digest = match.groups()
-    digest = digest.lower()
-    if prefix.lower() != digest[:2]:
+    request_version = match.group("version")
+    uses_resources = match.group("resources") is not None
+    category = match.group("category")
+
+    # Versioned regular forms must match the frozen archive.  The final client's
+    # Movie and hush/resource forms intentionally omit a version segment.
+    if request_version is not None and request_version != str(version):
+        return None
+    if request_version is None and not uses_resources:
+        return None
+
+    # Statistically impossible combinations are rejected rather than silently
+    # broadening the server into an arbitrary file oracle.
+    if category == "Movie" and request_version is not None:
+        return None
+
+    digest = _digest_from_tail(match.group("tail"), manifest_index)
+    if digest is None:
         return None
     return object_path(root, digest), digest
 
 
 def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
-    """Parse a single RFC 7233-style ``bytes`` range.
-
-    Returns an inclusive ``(start, end)`` pair, ``None`` for no range, and raises
-    :class:`RangeNotSatisfiable` for malformed, multiple, or out-of-bounds ranges.
-    """
+    """Parse a single RFC 7233-style ``bytes`` range."""
     if value is None:
         return None
     if size <= 0 or not value.startswith("bytes="):
@@ -86,11 +175,18 @@ def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
         raise RangeNotSatisfiable(value) from exc
 
 
-def make_handler(root: Path) -> Type[BaseHTTPRequestHandler]:
+def make_handler(
+    root: Path,
+    *,
+    version: str = "10133800",
+    manifest_index: Mapping[str, str] | None = None,
+) -> Type[BaseHTTPRequestHandler]:
     archive_root = Path(root)
+    frozen_version = str(version)
+    name_index = dict(manifest_index or {})
 
     class CGSSResourceHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive-resource/0.1"
+        server_version = "cgss-relive-resource/0.2"
         protocol_version = "HTTP/1.1"
 
         def _send_plain(self, status: int, body: bytes) -> None:
@@ -104,7 +200,12 @@ def make_handler(root: Path) -> Type[BaseHTTPRequestHandler]:
             self.close_connection = True
 
         def _serve_resource(self, *, send_body: bool) -> None:
-            resolved = resolve_resource_request(archive_root, self.path)
+            resolved = resolve_resource_request(
+                archive_root,
+                self.path,
+                version=frozen_version,
+                manifest_index=name_index,
+            )
             if resolved is None:
                 self._send_plain(404, b"not found\n")
                 return
@@ -138,8 +239,11 @@ def make_handler(root: Path) -> Type[BaseHTTPRequestHandler]:
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("ETag", f'"{digest}"')
-            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            if digest is not None:
+                self.send_header("ETag", f'"{digest}"')
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            else:
+                self.send_header("Cache-Control", "no-cache")
             if byte_range is not None:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Connection", "close")
@@ -172,21 +276,37 @@ def make_handler(root: Path) -> Type[BaseHTTPRequestHandler]:
     return CGSSResourceHandler
 
 
-def create_server(host: str, port: int, *, root: Path) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(Path(root)))
+def create_server(
+    host: str,
+    port: int,
+    *,
+    root: Path,
+    version: str = "10133800",
+    manifest_index: Mapping[str, str] | None = None,
+) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(
+        (host, port),
+        make_handler(Path(root), version=version, manifest_index=manifest_index),
+    )
     server.daemon_threads = True
     return server
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Serve archived CGSS resource objects read-only")
+    parser = argparse.ArgumentParser(description="Serve archived CGSS resources read-only")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8081)
+    parser.add_argument("--version", default="10133800")
     parser.add_argument(
         "--root",
         type=Path,
         default=Path("resource-cache/10133800"),
-        help="archive root containing objects/<hh>/<md5>",
+        help="archive root containing objects/<hh>/<md5> and optional manifests/",
+    )
+    parser.add_argument(
+        "--manifest-db",
+        type=Path,
+        help="optional final manifest SQLite DB for filename-addressed storages URLs; keep it uncommitted",
     )
     parser.add_argument("--cert", help="PEM certificate chain for HTTPS")
     parser.add_argument("--key", help="PEM private key for HTTPS")
@@ -194,8 +314,20 @@ def main() -> int:
 
     if bool(args.cert) != bool(args.key):
         parser.error("--cert and --key must be supplied together")
+    manifest_index = None
+    if args.manifest_db:
+        try:
+            manifest_index = load_manifest_name_index(args.manifest_db)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            parser.error(f"failed to load --manifest-db: {exc}")
 
-    httpd = create_server(args.host, args.port, root=args.root)
+    httpd = create_server(
+        args.host,
+        args.port,
+        root=args.root,
+        version=args.version,
+        manifest_index=manifest_index,
+    )
     scheme = "http"
     if args.cert and args.key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -206,6 +338,9 @@ def main() -> int:
     bound_host, bound_port = httpd.server_address[:2]
     print(f"cgss-relive resource archive listening on {scheme}://{bound_host}:{bound_port}")
     print(f"archive root: {args.root}")
+    print(f"frozen resource version: {args.version}")
+    if args.manifest_db:
+        print(f"filename index: {args.manifest_db}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
