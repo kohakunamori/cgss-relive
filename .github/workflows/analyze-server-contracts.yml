@@ -11,6 +11,7 @@ on:
       - 'scripts/analyze-api-type-enums.py'
       - 'scripts/analyze-task-api-keys.py'
       - 'scripts/analyze-networktask-api-field.py'
+      - 'scripts/analyze-arcade-convert-type.py'
 
 permissions:
   contents: read
@@ -157,6 +158,7 @@ jobs:
           d = json.loads(Path('reports/networktask-api-field.json').read_text())
           assert d['schema'] == 1
           assert len(d['network_task']['field_at_offset']) == 1
+          assert d['network_task']['typed_api_field'] is True
           print(json.dumps({
               'field_at_0x50': d['network_task']['field_at_offset'][0],
               'typed_api_field': d['network_task']['typed_api_field'],
@@ -166,6 +168,32 @@ jobs:
               'anchored_expected_value_seen': d['anchored_expected_value_seen'],
               'anchored_expected_value_missing': d['anchored_expected_value_missing'],
               'anchored_mismatches': d['anchored_mismatches'],
+          }, indent=2))
+          PY
+
+      - name: Close Arcade ConvertType bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-arcade-convert-type.py \
+            --lib work/libil2cpp.so \
+            --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json \
+            --output reports/arcade-convert-type.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d = json.loads(Path('reports/arcade-convert-type.json').read_text())
+          assert d['schema'] == 1
+          assert d['target_rva'] == 0x4769CB0
+          assert len(d['constructors']) == 5
+          assert all(len(row['convert_calls']) == 1 for row in d['constructors'])
+          print(json.dumps({
+              'target': d['target'],
+              'target_rva': hex(d['target_rva']),
+              'signature': d['dump_signature'],
+              'constructors': d['constructors'],
+              'instructions': d['instructions'],
           }, indent=2))
           PY
 
