@@ -93,13 +93,17 @@ jobs:
           import json
           from pathlib import Path
           d = json.loads(Path('reports/api-type-enums.json').read_text())
+          assert d['schema'] == 2
           assert len(d['a_candidates']) == 1
-          assert len(d['b_candidates']) == 1
+          assert d['a_cctor']['rva'] == 0x4271C3C
+          assert d['b_cctor']['rva'] == 0x4DC8490
           print(json.dumps({
               'a_enum': d['a_candidates'][0]['full_name'],
               'a_entries': d['a_candidates'][0]['entry_count'],
-              'b_enum': d['b_candidates'][0]['full_name'],
-              'b_entries': d['b_candidates'][0]['entry_count'],
+              'a_cctor': hex(d['a_cctor']['rva']),
+              'b_cctor': hex(d['b_cctor']['rva']),
+              'b_exact_enum_candidates': len(d['b_exact_candidates']),
+              'b_superset_enum_candidates': len(d['b_superset_candidates']),
               'related_method_count': len(d['related_methods']),
               'api_shaped_literal_count': d['api_shaped_literal_count'],
           }, indent=2))
