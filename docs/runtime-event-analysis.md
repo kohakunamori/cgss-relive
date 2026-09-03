@@ -1,12 +1,12 @@
 # Sanitized runtime event analysis
 
-Both compatibility servers can emit deliberately sanitized JSONL traces.
+The compatibility stack emits deliberately sanitized control/resource JSONL.
 `scripts/analyze-runtime-events.py` validates those traces, merges independent
-control/resource streams when requested, and produces a deterministic report for
-final 11.6.3 integration.
+server streams, optionally attaches strict category-only device logcat evidence,
+and produces a deterministic final-11.6.3 integration report.
 
-Unknown fields, non-allow-listed headers and unknown synthetic resource routes
-are rejected rather than copied into reports.
+Unknown fields, non-allow-listed headers, unknown synthetic resource routes and
+non-whitelisted device fields are rejected rather than copied into reports.
 
 ## Evidence language
 
@@ -15,12 +15,11 @@ Final static analysis proves:
 - result code 214 persists `required_res_ver`;
 - 214 does **not** automatically resend `/load/check` in the same network
   coroutine;
-- the parent `GameInitialize` coroutine subsequently resumes into
+- parent `GameInitialize` subsequently resumes into
   `AssetManager.InitializeManifest -> DownloadOrLoadForInitialize`;
-- after successful `/load/index`, the static tail maps to `Home=6` or
-  `Login_Bonus=7`.
+- successful `/load/index` has a static tail to `Home=6` or `Login_Bonus=7`.
 
-The analyzer therefore records observations rather than inventing a retry:
+The analyzer records observations rather than inventing a retry:
 
 ```text
 server_returned_214
@@ -34,40 +33,27 @@ server_returned_success_for_10133800
 observed_followup_request_after_10133800_success
 ```
 
-Report schema is `3`.
+Report schema is now **4**.
 
-## Control-server log
+## Preferred runtime capture topology
 
-```powershell
-python -m server.http_server `
-  --host 127.0.0.1 `
-  --port 8443 `
-  --cert .\work\tls\server.chain.pem `
-  --key .\work\tls\server.key.pem `
-  --experimental-starter-load-index `
-  --viewer-id 1 `
-  --producer-name "Relive Producer" `
-  --event-log .\work\runtime-starter-control.jsonl `
-  --api-map .\work\final_map.json
+Use `scripts/run-rooted-local-stack.py` rather than two standalone TLS servers.
+It owns:
+
+```text
+API backend       127.0.0.1:8080
+resource backend  127.0.0.1:8081
+TLS Host mux      127.0.0.1:8445
 ```
 
-## Resource-server log
+The two backend logs remain independent:
 
-For the native 214 path, run the resource server before launching the client:
-
-```powershell
-python -m server.resource_server `
-  --host 127.0.0.1 `
-  --port 8444 `
-  --version 10133800 `
-  --root .\resource-cache\10133800 `
-  --manifest-db .\work\resources\manifest_10133800.db `
-  --cert .\work\tls\resource.chain.pem `
-  --key .\work\tls\resource.key.pem `
-  --event-log .\work\runtime-starter-resource.jsonl
+```text
+work/runtime-starter-control.jsonl
+work/runtime-starter-resource.jsonl
 ```
 
-Resource paths are reduced before logging to exactly these categories:
+Resource paths are reduced before logging to exactly:
 
 ```text
 @resource/manifest
@@ -79,38 +65,101 @@ Resource paths are reduced before logging to exactly these categories:
 ```
 
 Filename, object hash and query string never enter the sanitized event. `/healthz`
-is deliberately excluded so monitoring cannot fake resource progress.
+is excluded so monitoring cannot fake resource progress.
 
-## Merge independent logs into one run
+## Capture package-scoped device logcat privately
 
-This is preferred over having two processes append to one JSONL file:
+For pre-HTTP TLS failures, crashes, ANRs and transport failures, run in another
+PowerShell before launching the game:
+
+```powershell
+.\scripts\capture-device-logcat.ps1
+```
+
+It waits for `jp.co.bandainamcoent.BNEI0242` to appear, captures only that PID with
+`logcat -v epoch`, and does **not** print raw messages to the terminal.
+
+Raw capture goes under gitignored/private work state:
+
+```text
+work/private/cgss-logcat-<timestamp>.txt
+```
+
+On capture completion it runs `scripts/sanitize-device-logcat.py` and produces:
+
+```text
+work/runtime-device-<timestamp>.jsonl
+```
+
+The sanitized device event schema contains exactly:
+
+```text
+schema
+time
+source = device_logcat
+category
+severity
+```
+
+No tag, PID/TID, message text, URL, hostname, exception text, certificate details,
+SID, UDID or matched substring is copied.
+
+Allowed diagnostic categories are:
+
+```text
+process_crash
+anr
+tls_certificate_error
+tls_handshake_error
+dns_error
+connection_refused
+network_unreachable
+network_timeout
+http_error
+unity_web_request_error
+process_exit
+```
+
+**Never share the raw `work/private/...` capture.** Share only the sanitized JSONL
+when needed.
+
+## Merge control/resource streams and attach device diagnostics
+
+Typical starter report:
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
   --merge-run starter=.\work\runtime-starter-control.jsonl `
   --merge-run starter=.\work\runtime-starter-resource.jsonl `
+  --device-log starter=.\work\runtime-device-20260903-120000.jsonl `
   -o .\work\runtime-starter-report.json
 ```
 
-Repeated `--merge-run` entries with the same label are loaded independently and
-sorted by numeric event `time`. Every event in a merged run must have a timestamp;
-otherwise the analyzer rejects the merge instead of guessing chronology.
+Repeated `--merge-run` entries with the same label are sorted by numeric event
+`time`. Every server event in a merged run must have a timestamp.
 
-A valid native timeline can therefore look like:
+`--device-log` must target an existing run label. Device events are deliberately
+**not inserted into the HTTP/resource sequence**. Instead the run gains:
 
 ```text
-/load/check              result_code=214
-@resource/manifest       200
-@resource/AssetBundles   206
-/load/index              200
+device_diagnostics.events
+device_diagnostics.categories
+device_diagnostics.severities
+device_diagnostics.first_event
+device_diagnostics.first_failure
+device_diagnostics.has_tls_error
+device_diagnostics.has_process_crash
+device_diagnostics.has_anr
+device_diagnostics.has_network_error
 ```
 
-This is stronger evidence than waiting for a second `/load/check`, which is not a
-required static link.
+This means a TLS logcat error can explain why the server saw no request, but it
+cannot advance `phase`, fabricate resource traffic, change
+`comparison.common_prefix_events`, or become an HTTP `first_failure`.
 
 ## Phase semantics
 
-The hard-mainline phases are:
+Hard server-observation phases remain:
 
 ```text
 no_http_request
@@ -126,77 +175,79 @@ load_index_reached
 post_load_index_observed
 ```
 
-Not every run visits every phase. `/load/title` is reported in `reached` but does
-not advance the hard phase because TitleTask is a separate user-driven branch.
+`/load/title` is reported in `reached` but does not advance the hard mainline
+phase.
 
 `resource_plane_observed` means a sanitized `@resource/*` request was seen.
 `resource_plane_served` requires at least one non-`unresolved` resource event with
 HTTP status below 400.
+
+A valid native server timeline can be:
+
+```text
+/load/check             result_code=214
+@resource/manifest      200
+@resource/Generic       200/206
+/load/index             200
+```
+
+No second `/load/check` is required.
 
 ## What the report proves
 
 A 214 event proves only what the server returned. A later resource event proves
 the client advanced into the statically expected resource stage. `/load/index`
 proves it advanced beyond that stage. A later event after `/load/index` is further
-acceptance evidence, but visible Home must still be observed on the original
-client/runtime.
+acceptance evidence, but visible Home still requires original-client observation.
 
-No HTTP event alone proves or disproves a TLS failure before the server. Use ADB
-logcat and the routing checks in `rooted-device-integration.md` for pre-HTTP
-failures.
+A device `tls_certificate_error` with `no_http_request` is useful evidence that
+the failure happened before the local HTTP backend. Conversely, a clean device
+diagnostic section does not prove TLS success; absence of a classified log line is
+not proof of absence.
 
 ## Native-vs-direct-success differential
 
-Default native mode for old 10133000 returns:
+Native old-10133000 behavior:
 
 ```text
 214 + required_res_ver=10133800
 ```
 
-The diagnostic server flag:
+Diagnostic only:
 
 ```text
 --accept-old-resource-version
 ```
 
-returns success while still supplying the required final version. Run equivalent
-clean states and compare them only when native mode fails to produce useful
+Compare equivalent clean states only when native mode fails to produce useful
 resource evidence.
 
-Example comparison using merged native logs plus a direct control log:
+Example:
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
   --merge-run native=.\work\runtime-native-control.jsonl `
   --merge-run native=.\work\runtime-native-resource.jsonl `
-  direct=.\work\runtime-direct-control.jsonl `
+  --device-log native=.\work\runtime-native-device.jsonl `
+  --merge-run direct=.\work\runtime-direct-control.jsonl `
+  --merge-run direct=.\work\runtime-direct-resource.jsonl `
+  --device-log direct=.\work\runtime-direct-device.jsonl `
   -o .\work\runtime-resource-policy-diff.json
 ```
 
-If native reaches `resource_plane_served` but not `/load/index`, focus on resource
-completion. If direct reaches `/load/index` while native never reaches the
-resource plane, focus on the native version/resource continuation or routing.
+HTTP/resource `comparison` remains based only on server-event signatures; device
+summaries are attached per run for diagnosis.
 
 ## Starter/empty/strict differential
 
-Only if the starter-visible profile reaches `/load/index` but fails around Home,
-repeat equivalent clean states with empty/strict profiles:
-
-```powershell
-python .\scripts\analyze-runtime-events.py `
-  starter=.\work\runtime-starter.jsonl `
-  empty=.\work\runtime-empty.jsonl `
-  strict=.\work\runtime-strict.jsonl `
-  -o .\work\runtime-profile-differential.json
-```
-
-`comparison.common_prefix_events` and `comparison.divergence_event_index` identify
-the first differing sanitized signature. This is triage evidence, not permission
-to add arbitrary `/load/index` fields.
+Only if the starter profile reaches `/load/index` but fails around Home, repeat
+equivalent clean states with empty/strict profiles. Use the server sequence
+comparison to identify the first differing observable action; do not infer missing
+JSON fields from device categories alone.
 
 ## Sharing boundary
 
-Shareable traces must remain in the strict sanitized schema. Never commit or
+Shareable traces must remain in the strict sanitized schemas. Never commit or
 share UDID, SID, USER-ID, PARAM, decoded viewer/account values, decoded bodies,
-resource filenames/hashes, production credentials, or raw sensitive packet
+resource filenames/hashes, production credentials, raw logcat, or raw packet
 captures.
