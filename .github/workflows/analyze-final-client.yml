@@ -9,6 +9,7 @@ on:
       - 'scripts/analyze-bootstrap-continuations.py'
       - 'scripts/analyze-home-entrypoints.py'
       - 'scripts/analyze-home-immediate-helpers.py'
+      - 'scripts/analyze-home-state-dependencies.py'
 
 permissions:
   contents: read
@@ -114,6 +115,10 @@ jobs:
             --lib work/libil2cpp.so \
             --script-json work/dump/script.json \
             --output reports/home-immediate-helpers.json
+          python scripts/analyze-home-state-dependencies.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --output reports/home-state-dependencies.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
