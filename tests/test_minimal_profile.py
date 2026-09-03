@@ -11,6 +11,7 @@ from server.minimal_profile import (
     STARTER_CHARA_ID,
     STARTER_SERIAL_ID,
     STARTER_UNIT_ID,
+    STARTER_UNIT_SLOT,
     build_home_candidate_load_index_data,
     build_minimal_load_index_data,
     build_starter_visible_load_index_data,
@@ -38,26 +39,24 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(validate_home_candidate_profile(data), [])
         self.assertEqual(validate_minimal_profile(data), [])
         self.assertEqual(data["user_info"]["viewer_id"], 321)
-        self.assertEqual(data["user_info"]["unit_slot"], 1)
+        self.assertNotIn("unit_slot", data["user_info"])
         for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
             self.assertEqual(data[section], [])
         self.assertEqual(data["music_list"], {"normal": []})
 
-    def test_home_candidate_validator_rejects_dependencies_and_wrong_shapes(self) -> None:
+    def test_home_candidate_validator_rejects_wrong_shapes(self) -> None:
         data = build_home_candidate_load_index_data(now=1)
-        del data["user_info"]["unit_slot"]
         data[HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0]] = {}
         data["music_list"] = {"normal": {}}
         self.assertEqual(
             validate_home_candidate_profile(data),
             [
-                "user_info.unit_slot",
                 HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0],
                 "music_list.normal",
             ],
         )
 
-    def test_starter_visible_profile_has_final_unit_id_and_five_slots(self) -> None:
+    def test_starter_visible_profile_has_final_unit_contract_and_five_slots(self) -> None:
         data = build_starter_visible_load_index_data(viewer_id=9, producer_name="Starter", now=10)
         self.assertEqual(validate_starter_visible_profile(data), [])
         self.assertEqual(validate_home_candidate_profile(data), [])
@@ -71,6 +70,7 @@ class MinimalProfileTests(unittest.TestCase):
 
         self.assertEqual(len(data["user_unit_list"]), 1)
         unit = data["user_unit_list"][0]
+        self.assertEqual(unit["unit_slot"], STARTER_UNIT_SLOT)
         self.assertEqual(unit["unit_id"], STARTER_UNIT_ID)
         self.assertEqual(unit["serial_id_0"], STARTER_SERIAL_ID)
         self.assertEqual(
@@ -85,12 +85,14 @@ class MinimalProfileTests(unittest.TestCase):
     def test_starter_visible_validator_rejects_broken_references(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
         data["user_card_list"][0]["card_id"] = 999999
+        data["user_unit_list"][0]["unit_slot"] = 2
         data["user_unit_list"][0]["unit_id"] = 2
         data["user_unit_list"][0]["serial_id_0"] = 2
         data["user_chara_list"][0]["chara_id"] = 999
         data["user_info"]["leader_serial_id"] = 2
         errors = validate_starter_visible_profile(data)
         self.assertIn("user_card_list[0].card_id", errors)
+        self.assertIn("user_unit_list[0].unit_slot", errors)
         self.assertIn("user_unit_list[0].unit_id", errors)
         self.assertIn("user_unit_list[0].serial_id_0", errors)
         self.assertIn("user_chara_list[0].chara_id", errors)
@@ -100,6 +102,11 @@ class MinimalProfileTests(unittest.TestCase):
         data = build_starter_visible_load_index_data(now=1)
         del data["user_unit_list"][0]["unit_id"]
         self.assertIn("user_unit_list[0].unit_id", validate_starter_visible_profile(data))
+
+    def test_starter_visible_validator_requires_unit_slot_field(self) -> None:
+        data = build_starter_visible_load_index_data(now=1)
+        del data["user_unit_list"][0]["unit_slot"]
+        self.assertIn("user_unit_list[0].unit_slot", validate_starter_visible_profile(data))
 
     def test_validator_reports_removed_fields(self) -> None:
         data = build_minimal_load_index_data(now=1)

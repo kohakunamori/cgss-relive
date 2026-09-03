@@ -60,11 +60,6 @@ HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "master_plus_live_list",
 )
 
-# Both final user-unit parsing passes independently ContainsKey-guard
-# user_unit_list. Once the section exists, they read user_info.unit_slot before
-# iterating items, so an explicitly empty list still needs this field.
-HOME_CANDIDATE_USER_INFO_FIELDS = ("unit_slot",)
-
 STARTER_CARD_REQUIRED_FIELDS = (
     "serial_id",
     "card_id",
@@ -76,10 +71,12 @@ STARTER_CARD_REQUIRED_FIELDS = (
 )
 
 FINAL_UNIT_SLOT_COUNT = 5
-# The first final unit pass reads name + serial_id_0..4. A later independent
-# unit pass directly reads unit_id and name before traversing the same five
-# serial slots, making unit_id mandatory whenever the list is non-empty.
+# The primary final unit pass hard-reads unit_slot (1-based) and name. A later
+# independent pass hard-reads unit_id and name. The formatted serial_id_0..4
+# slots are presence/default safe, but the synthetic starter keeps all five
+# explicit for deterministic local state.
 STARTER_UNIT_REQUIRED_FIELDS = (
+    "unit_slot",
     "unit_id",
     "name",
     *(f"serial_id_{index}" for index in range(FINAL_UNIT_SLOT_COUNT)),
@@ -88,8 +85,7 @@ STARTER_CHARA_REQUIRED_FIELDS = ("chara_id", "fan")
 
 # Card/chara identity is independently verified against final 10133800 master.
 # Ownership serial, user unit id, slot selection and progress are synthetic
-# local state. Historical response structure also uses 1-based unit_id values;
-# no historical account payload is copied into the profile.
+# local state. No historical account payload is copied into the profile.
 STARTER_CARD_ID = 100001
 STARTER_CHARA_ID = 101
 STARTER_SERIAL_ID = 1
@@ -151,7 +147,6 @@ def build_home_candidate_load_index_data(
         producer_name=producer_name,
         now=now,
     )
-    data["user_info"]["unit_slot"] = STARTER_UNIT_SLOT
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         data[section] = []
     data["music_list"] = {"normal": []}
@@ -183,6 +178,7 @@ def build_starter_visible_load_index_data(
     ]
     data["user_unit_list"] = [
         {
+            "unit_slot": STARTER_UNIT_SLOT,
             "unit_id": STARTER_UNIT_ID,
             "name": "Relive Unit",
             "serial_id_0": STARTER_SERIAL_ID,
@@ -225,11 +221,6 @@ def validate_minimal_profile(data: dict[str, Any]) -> list[str]:
 def validate_home_candidate_profile(data: dict[str, Any]) -> list[str]:
     """Validate additional statically-proven Home-candidate container shapes."""
     errors = validate_minimal_profile(data)
-    user = data.get("user_info")
-    if isinstance(user, dict):
-        for name in HOME_CANDIDATE_USER_INFO_FIELDS:
-            if name not in user:
-                errors.append(f"user_info.{name}")
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         if not isinstance(data.get(section), list):
             errors.append(section)
@@ -268,6 +259,8 @@ def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
     else:
         errors.extend(_missing_item_fields(units[0], STARTER_UNIT_REQUIRED_FIELDS, "user_unit_list[0]"))
         if isinstance(units[0], dict):
+            if units[0].get("unit_slot") != STARTER_UNIT_SLOT:
+                errors.append("user_unit_list[0].unit_slot")
             if units[0].get("unit_id") != STARTER_UNIT_ID:
                 errors.append("user_unit_list[0].unit_id")
             if units[0].get("serial_id_0") != STARTER_SERIAL_ID:
@@ -286,8 +279,6 @@ def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
 
     user = data.get("user_info")
     if isinstance(user, dict):
-        if user.get("unit_slot") != STARTER_UNIT_SLOT:
-            errors.append("user_info.unit_slot")
         leader = user.get("leader_serial_id")
         if leader is not None and leader != STARTER_SERIAL_ID:
             errors.append("user_info.leader_serial_id")
