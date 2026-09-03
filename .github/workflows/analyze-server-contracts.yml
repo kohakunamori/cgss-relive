@@ -10,6 +10,7 @@ on:
       - 'scripts/analyze-server-contracts.py'
       - 'scripts/analyze-api-type-enums.py'
       - 'scripts/analyze-task-api-keys.py'
+      - 'scripts/analyze-networktask-api-field.py'
 
 permissions:
   contents: read
@@ -136,6 +137,35 @@ jobs:
               'request_role_method_count': d['request_role_method_count'],
               'response_role_method_count': d['response_role_method_count'],
               'tasks_with_contract_literals': d['tasks_with_contract_literals'],
+          }, indent=2))
+          PY
+
+      - name: Prove NetworkTask API-key field semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-networktask-api-field.py \
+            --lib work/libil2cpp.so \
+            --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json \
+            --inventory reports/server-contract-inventory.json \
+            --api-type-enums reports/api-type-enums.json \
+            --output reports/networktask-api-field.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d = json.loads(Path('reports/networktask-api-field.json').read_text())
+          assert d['schema'] == 1
+          assert len(d['network_task']['field_at_offset']) == 1
+          print(json.dumps({
+              'field_at_0x50': d['network_task']['field_at_offset'][0],
+              'typed_api_field': d['network_task']['typed_api_field'],
+              'networktask_access_methods': [m['member'] for m in d['network_task']['field_access_methods']],
+              'anchor_count': d['anchor_count'],
+              'anchored_with_constant_write': d['anchored_with_constant_write'],
+              'anchored_expected_value_seen': d['anchored_expected_value_seen'],
+              'anchored_expected_value_missing': d['anchored_expected_value_missing'],
+              'anchored_mismatches': d['anchored_mismatches'],
           }, indent=2))
           PY
 
