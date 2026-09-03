@@ -9,22 +9,20 @@ only for reversible DNS/hosts and system-CA integration.
 For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 
 - API traffic uses `UnityWebRequest`;
-- no managed `CertificateHandler` subclass / `ValidateCertificate` override is
-  proven on the API path;
+- no managed `CertificateHandler` / `ValidateCertificate` override is proven on
+  the API path;
 - no managed/Java pinning implementation is wired into the proven API path;
-- targetSdk is modern, so a user CA alone is not a reliable trust path;
 - `Stage.LoadTask.Parse` is RVA `0x04850a94`;
 - result code 214 persists `required_res_ver=10133800` into Savedata `RES_VER` and
   does **not** automatically resend `/load/check` in the same network coroutine;
-- the parent coroutine continuation is now closed: after setup becomes ready,
-  `ResourcesManager.GameInitialize` resumes into
+- the parent continuation resumes into
   `AssetManager.InitializeManifest -> DownloadOrLoadForInitialize` before
   BootMain reaches `/load/index`;
 - final `StageSceneDefine.eViewId` maps `Home=6`, `Login_Bonus=7`,
   `Asset_Download=8`;
-- successful `/load/index` parsing reaches `BootMain.ChangeView`, which selects
+- successful `/load/index` parsing reaches `BootMain.ChangeView`, selecting
   `Home(6)` when no login bonus exists and `Login_Bonus(7)` otherwise;
-- `/load/title` is a Title/user-driven branch, not a hard Home prerequisite;
+- `/load/title` is not a hard Home prerequisite;
 - `data.isS3=false` selects `storages.game.starlight-stage.jp`.
 
 The remaining decisive uncertainty is original-client runtime acceptance of the
@@ -36,98 +34,63 @@ local TLS/resource stack and synthetic starter-visible `/load/index` state.
 python -m pip install -r .\server\requirements.txt
 ```
 
-## 2. Generate disposable TLS material
+## 2. Generate one disposable multi-SAN certificate
+
+The built-in TLS mux serves both original HTTPS hostnames on one device-facing
+port. Generate one leaf containing both SANs:
 
 ```powershell
-python .\scripts\make-test-tls-cert.py
+python .\scripts\make-test-tls-cert.py `
+  --hostname apis.game.starlight-stage.jp `
+  --hostname storages.game.starlight-stage.jp
 ```
 
-Default output is under gitignored `work/tls/`.
-
-The control certificate needs SAN:
+Default output is under gitignored `work/tls/`:
 
 ```text
-apis.game.starlight-stage.jp
+work/tls/ca.cert.pem
+work/tls/ca.key.pem
+work/tls/server.chain.pem
+work/tls/server.key.pem
 ```
 
-The resource certificate needs SAN:
-
-```text
-storages.game.starlight-stage.jp
-```
-
-A single certificate may cover both only if both SANs are actually present.
 Never commit private keys.
 
-## 3. Trust the CA as a system CA
+## 3. Trust the CA as an Android system CA
 
 Use the rooted device/root manager's supported system-CA mechanism. Android
 14+/Conscrypt/APEX layouts differ across Magisk, KernelSU and ROMs, so this repo
-does not automate the system mutation.
+does not automate that persistent system mutation.
 
-Acceptance condition: the CGSS process trusts the disposable CA through the
-system trust domain. Merely installing it as a user certificate is insufficient.
+Acceptance condition: the CGSS process trusts `ca.cert.pem` through the system
+trust domain. Installing it only as a user CA is not sufficient evidence.
 
-## 4. Redirect both original hostnames for the native run
+## 4. Redirect both original hostnames on device
 
-For the primary native-214 test, make these mappings effective on device:
+Make both original names resolve to device loopback:
 
 ```text
 127.0.0.1 apis.game.starlight-stage.jp
 127.0.0.1 storages.game.starlight-stage.jp
 ```
 
-Keep the original names so Host, TLS SNI and SAN semantics remain intact.
+Keep the original names intact so HTTP Host, TLS SNI and certificate SAN checks
+remain realistic.
 
-For the diagnostic `--accept-old-resource-version` run, the resource redirect may
-be omitted if the purpose is strictly to test whether bypassing the native 214
-branch reaches BootMain sooner.
+## 5. Start plain local backends
 
-## 5. Bridge device ports to host servers
+TLS terminates only at `server.tls_mux`; the API and resource backends stay on
+loopback plain HTTP. This avoids two competing TLS listeners while preserving the
+original external HTTPS semantics.
 
-The existing helper prepares the API 443 reverse to host 8443:
-
-```powershell
-.\scripts\prepare-device-tunnel.ps1 -HostPort 8443 -RequireRoot
-```
-
-Conceptually:
-
-```text
-CGSS https://apis.game.starlight-stage.jp:443
-  -> device 127.0.0.1:443
-  -> adb reverse
-  -> host API TLS server :8443
-```
-
-The resource hostname also uses HTTPS 443. If both hostnames resolve to the same
-device loopback address, a single device port cannot distinguish SNI targets by
-TCP port. Use one of these integration layouts:
-
-1. preferred: a local TLS/SNI reverse proxy on host/device-facing 443 that routes
-   `apis.game...` to API :8443 and `storages.game...` to resource :8444;
-2. use distinct loopback aliases/IPs plus root iptables/nft redirects per target;
-3. run a unified front proxy that terminates a certificate covering both SANs and
-   dispatches by SNI/Host.
-
-Do not attempt to bind two independent `adb reverse tcp:443` mappings at once.
-
-Remove the API helper mapping with:
-
-```powershell
-.\scripts\prepare-device-tunnel.ps1 -Remove
-```
-
-## 6. Start the control server with starter-visible state
+### Control API backend — port 8080
 
 Use starter-visible first:
 
 ```powershell
 python -m server.http_server `
   --host 127.0.0.1 `
-  --port 8443 `
-  --cert .\work\tls\server.chain.pem `
-  --key .\work\tls\server.key.pem `
+  --port 8080 `
   --experimental-starter-load-index `
   --viewer-id 1 `
   --producer-name "Relive Producer" `
@@ -135,30 +98,24 @@ python -m server.http_server `
   --api-map .\work\final_map.json
 ```
 
-`--api-map` only annotates sanitized unknown-route events; it never invents a
+`--api-map` only annotates sanitized unknown-route evidence. It does not invent a
 response.
 
-The event log excludes UDID, SID, USER-ID, PARAM, viewer-id values and decoded
-request/response values.
+### Frozen resource backend — port 8081
 
-## 7. Start the frozen resource server before launching native mode
-
-Do **not** wait for a second `/load/check`. The static parent continuation says
-resource initialization is the expected next stage after the native 214.
+Start this **before launching native 214 mode**:
 
 ```powershell
 python -m server.resource_server `
   --host 127.0.0.1 `
-  --port 8444 `
+  --port 8081 `
   --version 10133800 `
   --root .\resource-cache\10133800 `
   --manifest-db .\work\resources\manifest_10133800.db `
-  --cert .\work\tls\resource.chain.pem `
-  --key .\work\tls\resource.key.pem `
   --event-log .\work\runtime-starter-resource.jsonl
 ```
 
-The resource event log contains only category/status evidence:
+The resource log contains only category/status evidence:
 
 ```text
 @resource/manifest
@@ -169,17 +126,76 @@ The resource event log contains only category/status evidence:
 @resource/unresolved
 ```
 
-It never contains resource filenames, hashes or query strings. `/healthz` is
-explicitly excluded from runtime evidence.
+Resource filename/hash/query is never logged and `/healthz` is excluded.
 
-Place verified local bootstrap wire manifests, when required, under:
+Verified local bootstrap wire manifests, when required, live outside Git under:
 
 ```text
 resource-cache/10133800/manifests/all_dbmanifest
 resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-No proprietary manifest/database/resource body belongs in Git.
+## 6. Start the built-in single-port TLS Host mux — port 8445
+
+```powershell
+python -m server.tls_mux `
+  --host 127.0.0.1 `
+  --port 8445 `
+  --cert .\work\tls\server.chain.pem `
+  --key .\work\tls\server.key.pem `
+  --api-backend 127.0.0.1:8080 `
+  --resource-backend 127.0.0.1:8081
+```
+
+The mux dispatches only by the original Host header:
+
+```text
+apis.game.starlight-stage.jp
+  -> http://127.0.0.1:8080
+
+storages.game.starlight-stage.jp
+  -> http://127.0.0.1:8081
+```
+
+It does not log request paths, headers, bodies or query strings. Sanitized runtime
+evidence remains in the two backend JSONL files.
+
+Unknown Host is rejected with 421. Request bodies are forwarded opaquely. The
+current mux accepts GET/HEAD/POST and Content-Length request bodies; unexpected
+chunked request upload is rejected explicitly rather than guessed.
+
+## 7. Use exactly one `adb reverse` for device HTTPS 443
+
+Point the device's only loopback 443 listener at mux port 8445:
+
+```powershell
+.\scripts\prepare-device-tunnel.ps1 -HostPort 8445 -RequireRoot
+```
+
+Conceptually:
+
+```text
+CGSS https://apis.game.starlight-stage.jp:443
+CGSS https://storages.game.starlight-stage.jp:443
+                |
+                v
+      device 127.0.0.1:443
+                |
+          adb reverse
+                |
+                v
+     host TLS mux 127.0.0.1:8445
+          /                   \
+ API backend :8080      resource backend :8081
+```
+
+Do not create two competing `adb reverse tcp:443` mappings.
+
+Remove the mapping with:
+
+```powershell
+.\scripts\prepare-device-tunnel.ps1 -Remove
+```
 
 ## 8. Native `/load/check` behavior — primary experiment
 
@@ -197,7 +213,7 @@ required_res_ver = 10133800
 data.isS3 = false
 ```
 
-Expected static continuation:
+Expected statically closed continuation:
 
 ```text
 /load/check 214
@@ -214,35 +230,24 @@ Expected static continuation:
 -> Home(6) or Login_Bonus(7)
 ```
 
-A second `/load/check` may occur for some independent reason, but it is not a
-required link and must not be used as the acceptance criterion for 214.
+A later second `/load/check` is possible for an independent path, but is not a
+required link and must not be used as the 214 acceptance criterion.
 
-## 9. Diagnostic direct-success differential
+## 9. Analyze one merged control/resource timeline
 
-Only if native mode stalls before useful resource evidence, compare:
+The analyzer can merge independent sanitized files by their numeric event time:
 
 ```powershell
-python -m server.http_server `
-  --host 127.0.0.1 `
-  --port 8443 `
-  --cert .\work\tls\server.chain.pem `
-  --key .\work\tls\server.key.pem `
-  --accept-old-resource-version `
-  --experimental-starter-load-index `
-  --viewer-id 1 `
-  --producer-name "Relive Producer" `
-  --event-log .\work\runtime-direct-control.jsonl
+python .\scripts\analyze-runtime-events.py `
+  --merge-run starter=.\work\runtime-starter-control.jsonl `
+  --merge-run starter=.\work\runtime-starter-resource.jsonl `
+  -o .\work\runtime-starter-report.json
 ```
 
-This returns success to old 10133000 while still supplying
-`required_res_ver=10133800`. It is a diagnostic branch, not the native protocol
-model.
+Repeated `--merge-run` with the same label forms one deterministic run. Missing
+timestamps are rejected rather than ordered heuristically.
 
-## 10. Analyze the run
-
-The runtime analyzer schema is 3 and understands sanitized resource routes.
-When control/resource logs are combined into one time-ordered timeline, the key
-phases are:
+Important hard-mainline phases include:
 
 ```text
 resource_version_214_responded
@@ -252,70 +257,95 @@ load_index_reached
 post_load_index_observed
 ```
 
-Until the analyzer's merge mode is available, either write both sanitized
-servers to one dedicated runtime JSONL on a filesystem where append semantics are
-reliable, or analyze the two logs separately and use their timestamps to order
-evidence. Do not concatenate unsanitized web-server logs.
+A healthy native timeline may be as simple as:
 
-Typical single-log command:
+```text
+/load/check             214
+@resource/manifest      200
+@resource/AssetBundles  200/206
+/load/index             200
+```
+
+No second `/load/check` is needed for that timeline to be valid.
+
+## 10. Diagnostic direct-success differential
+
+Only if native mode fails before useful resource evidence, restart the API backend
+with:
+
+```text
+--accept-old-resource-version
+```
+
+while keeping the same starter-visible profile. This returns success to old
+10133000 while still supplying `required_res_ver=10133800`. It is a diagnostic
+branch, not the protocol-default model.
+
+Compare equivalent runs, for example:
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
-  starter=.\work\runtime-starter.jsonl
+  --merge-run native=.\work\runtime-native-control.jsonl `
+  --merge-run native=.\work\runtime-native-resource.jsonl `
+  --merge-run direct=.\work\runtime-direct-control.jsonl `
+  --merge-run direct=.\work\runtime-direct-resource.jsonl
 ```
-
-If starter-visible reaches `/load/index` but then fails, use empty/strict profiles
-only as controlled differentials.
 
 ## Acceptance questions, in order
 
-1. Does TLS complete and does `/load/check` reach the control server?
+1. Does TLS complete and does `/load/check` reach the control backend?
 2. After native 214, does any `@resource/*` request appear?
-3. Are resource requests served successfully, or what sanitized category first
+3. Are resource requests served successfully, or which sanitized category first
    returns 404/416?
 4. Does the client subsequently reach `/load/index`?
-5. Does the starter-visible `/load/index` response lead to a later client action?
+5. Does starter-visible `/load/index` lead to a later client action?
 6. Does the device visibly render Home or Login Bonus followed by Home?
 7. What is the first unsupported post-Home endpoint or local-state dependency?
 
-Static mapping `Home=6` / `Login_Bonus=7` is already confirmed. The runtime test
-is validating that the local stack reaches/renders those views, not rediscovering
-what the numeric IDs mean.
+Static `Home=6` / `Login_Bonus=7` is already confirmed. Runtime is validating that
+the local stack reaches/renders those views, not rediscovering their numeric IDs.
 
 ## Failure classification
 
 ### No control request
 
-Check hostname resolution, IPv6, reverse/proxy routing and app process network
+Check hosts/DNS, IPv6, `adb reverse`, mux process and app process network
 reachability.
 
 ### TLS error before HTTP
 
-Check system-root visibility, certificate dates/SAN, SNI and original Host. Do not
-patch the APK before collecting the exact failure.
+Check system-root visibility and that `server.cert.pem` contains both original
+DNS SANs. Keep original Host/SNI. Do not patch the APK before collecting the exact
+failure.
+
+### Mux 421
+
+The client used a hostname not in the two-host allow-list. Capture only the
+minimum local/private evidence necessary to identify that hostname; do not add a
+wildcard route blindly.
 
 ### 214 returned, no resource event
 
-This is now a narrow blocker. The static continuation says setup should finish and
-`GameInitialize` should enter `InitializeManifest`. Check resource-host routing,
-TLS/SNI for `storages.game...`, local Savedata transition and logcat. Compare the
-direct-success differential only after those are checked.
+Static continuation says setup should finish and `GameInitialize` should enter
+`InitializeManifest`. Check the storages hosts mapping, mux routing, resource
+backend health, Savedata transition and logcat. Use direct-success only after
+these checks.
 
 ### `@resource/unresolved` or resource 404
 
 The client reached the resource plane. Investigate URL-builder coverage,
 manifest-name resolution, local object/wire-manifest presence and frozen version.
-The sanitized JSONL intentionally does not reveal the raw path; use a local
-private/debug capture only when necessary and never commit it.
+The sanitized JSONL deliberately hides the raw path; use a local private debug
+capture only when necessary and never commit it.
 
-### `/load/index` arrives, then stall/error
+### `/load/index` arrives, then stalls
 
-Do not add hundreds of optional fields. `LoadTask.Parse` is guard-heavy; a
-provided parent can make child reads hard. Compare starter/empty/strict only after
-identifying the first real blocker.
+Do not add hundreds of optional fields. `LoadTask.Parse` is guard-heavy and a
+provided parent can make child reads hard. Use the starter/empty/strict
+differential only after identifying the first real blocker.
 
 ### Known final endpoint returns 404 after Home
 
 Use `api_candidates` to identify its final Task/Parse implementation and restore
-only the parser-safe minimum shape. Never return arbitrary empty success merely
-because an endpoint name is known.
+only the parser-safe minimum. Never return arbitrary empty success merely because
+an endpoint name is known.
