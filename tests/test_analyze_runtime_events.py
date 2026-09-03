@@ -25,8 +25,9 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
         result: int | None = 1,
         required_res_ver: str | None = None,
         error: str | None = None,
+        timestamp: float = 1.0,
     ):
-        value = {"time": 1.0, "route": route, "status": status}
+        value = {"time": timestamp, "route": route, "status": status}
         if res_ver is not None:
             value["headers"] = {"APP-VER": "11.6.3", "RES-VER": res_ver}
         if result is not None or required_res_ver is not None:
@@ -113,6 +114,35 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
             report["resource_plane"]["routes"],
             ["@resource/AssetBundles", "@resource/manifest"],
         )
+
+    def test_merge_event_streams_orders_control_and_resource_by_time(self) -> None:
+        control = [
+            self.event(
+                "/load/check",
+                res_ver="10133000",
+                result=214,
+                required_res_ver="10133800",
+                timestamp=10.0,
+            ),
+            self.event("/load/index", timestamp=30.0),
+        ]
+        resource = [
+            self.event("@resource/manifest", result=None, timestamp=20.0),
+            self.event("@resource/AssetBundles", status=206, result=None, timestamp=21.0),
+        ]
+        merged = module.merge_event_streams([control, resource])
+        self.assertEqual(
+            [event["route"] for event in merged],
+            ["/load/check", "@resource/manifest", "@resource/AssetBundles", "/load/index"],
+        )
+        report = module.analyze_events(merged)
+        self.assertEqual(report["phase"], "load_index_reached")
+        self.assertTrue(report["resource_negotiation"]["observed_resource_request_after_214"])
+
+    def test_merge_event_streams_requires_timestamp(self) -> None:
+        event = {"route": "@resource/manifest", "status": 200}
+        with self.assertRaises(module.UnsafeEventLog):
+            module.merge_event_streams([[event]])
 
     def test_direct_success_is_reported_separately_from_final_version_success(self) -> None:
         events = [
