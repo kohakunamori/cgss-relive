@@ -143,10 +143,12 @@ class ResourceHTTPServerTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(self._events()[-1]["route"], "@resource/Generic")
 
-    def test_healthz(self) -> None:
+    def test_healthz_is_not_runtime_evidence(self) -> None:
+        before = len(self._events())
         status, _, body = self._request("GET", "/healthz")
         self.assertEqual(status, 200)
         self.assertEqual(body, b"ok\n")
+        self.assertEqual(len(self._events()), before)
 
 
 if __name__ == "__main__":
