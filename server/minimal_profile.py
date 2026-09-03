@@ -13,6 +13,11 @@ merge block from the separate seven-hard-field container whose literal key is
 The starter card therefore lives in that latter container; ``user_card_list``
 remains empty to avoid a speculative duplicate insertion.
 
+The final ``Stage.BaseTask.setupTutorial`` gate is also statically closed:
+response ``tutorial_flag=100`` maps to local ``TutorialData.step=1000`` and saves
+that completed state. If local step is already 1000 the client internally forces
+the logical flag to 100 before the same mapping.
+
 No profile contains captured account data. Runtime acceptance by the original
 client remains a separate integration criterion.
 """
@@ -53,6 +58,13 @@ REQUIRED_USER_INFO_FIELDS = (
     "last_payment_date",
     "stamina_heal_time",
 )
+
+# Exact final-client setupTutorial mapping at RVA 0x476E1E4:
+#   logical flag == 100 -> TutorialData.set_step(1000) -> Save().
+# If the local step is already 1000, setupTutorial substitutes logical flag 100
+# regardless of the response value, preserving the completed state.
+COMPLETED_TUTORIAL_FLAG = 100
+COMPLETED_TUTORIAL_LOCAL_STEP = 1000
 
 HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "user_card_list",
@@ -121,7 +133,7 @@ def build_minimal_load_index_data(
             "room_lvup_jewel": 1,
         },
         "user_info": {
-            "tutorial_flag": 100,
+            "tutorial_flag": COMPLETED_TUTORIAL_FLAG,
             "viewer_id": int(viewer_id),
             "name": str(producer_name),
             "comment": "",
@@ -232,6 +244,9 @@ def validate_minimal_profile(data: dict[str, Any]) -> list[str]:
 def validate_home_candidate_profile(data: dict[str, Any]) -> list[str]:
     """Validate additional statically-proven Home-candidate container shapes."""
     errors = validate_minimal_profile(data)
+    user = data.get("user_info")
+    if isinstance(user, dict) and user.get("tutorial_flag") != COMPLETED_TUTORIAL_FLAG:
+        errors.append("user_info.tutorial_flag")
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         if not isinstance(data.get(section), list):
             errors.append(section)
