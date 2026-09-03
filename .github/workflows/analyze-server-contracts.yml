@@ -10,6 +10,7 @@ on:
       - 'scripts/analyze-api-type-enums.py'
       - 'scripts/analyze-task-api-keys.py'
       - 'scripts/analyze-networktask-api-field.py'
+      - 'scripts/analyze-task-set-type-callsites.py'
       - 'scripts/analyze-arcade-convert-type.py'
       - 'scripts/discover-networktask-roots.py'
       - 'scripts/discover-common-apitype-consumers.py'
@@ -121,12 +122,7 @@ jobs:
           print(json.dumps({
             'consumer_type_count': d['consumer_type_count'],
             'consumers': [
-              {
-                'type': r['type'], 'base': r['base'],
-                'matches': r['matches'],
-                'matched_script_methods': r['matched_script_methods'],
-                'owner_method_sample': r['owner_method_sample'][:12],
-              }
+              {'type':r['type'],'base':r['base'],'matches':r['matches'],'matched_script_methods':r['matched_script_methods'],'owner_method_sample':r['owner_method_sample'][:12]}
               for r in d['consumers'][:30]
             ],
           },indent=2))
@@ -164,6 +160,25 @@ jobs:
           print(json.dumps({'field':d['network_task']['field_at_offset'][0],'anchor_count':d['anchor_count'],'expected_seen':d['anchored_expected_value_seen'],'expected_missing':d['anchored_expected_value_missing']},indent=2))
           PY
 
+      - name: Recover caller-assigned NetworkTask keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-task-set-type-callsites.py \
+            --lib work/libil2cpp.so --script-json work/dump/script.json \
+            --inventory reports/server-contract-inventory.json \
+            --output reports/task-set-type-callsites.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/task-set-type-callsites.json'))
+          assert d['schema']==1
+          print(json.dumps({
+            'setter':d['setter'], 'setter_rva':hex(d['setter_rva']),
+            'observation_count':d['observation_count'], 'key_count':d['key_count'],
+            'observations':d['observations'][:80],
+          },indent=2))
+          PY
+
       - name: Close Arcade ConvertType bridge
         shell: bash
         run: |
@@ -189,12 +204,13 @@ jobs:
             --api-map work/api-map-11.6.3.json \
             --field-report reports/networktask-api-field.json \
             --arcade-report reports/arcade-convert-type.json \
+            --set-type-report reports/task-set-type-callsites.json \
             --output reports/endpoint-contracts.json \
             --markdown-output reports/endpoint-contracts.md
           python - <<'PY'
           import json
           d=json.load(open('reports/endpoint-contracts.json'))
-          assert d['schema']==1
+          assert d['schema']==2
           print(json.dumps(d['summary'],indent=2))
           PY
 
