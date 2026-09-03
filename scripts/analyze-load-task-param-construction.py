@@ -111,16 +111,19 @@ def type_header(line: str) -> dict[str, Any] | None:
     match = _TYPE_RE.match(line)
     if not match:
         return None
-    tail = line[match.end() :]
+    # Strip the trailing Il2CppDumper comment *before* looking for a base-class
+    # colon. Otherwise ``// TypeDefIndex: 123`` is falsely parsed as inheritance.
+    tail = line[match.end() :].split("//", 1)[0]
     bases: list[str] = []
     if ":" in tail:
-        raw = tail.split(":", 1)[1].split("//", 1)[0].split("{", 1)[0].strip()
+        raw = tail.split(":", 1)[1].split("{", 1)[0].strip()
         if raw:
-            bases = [raw]
+            bases = [part.strip() for part in raw.split(",") if part.strip()]
     return {"name": match.group(1), "declaration": line.strip(), "bases": bases}
 
 
-def find_type_block(lines: list[str], wanted: str) -> tuple[int, int, dict[str, Any]]:
+def find_type_blocks(lines: list[str], wanted: str) -> list[tuple[int, int, dict[str, Any]]]:
+    blocks: list[tuple[int, int, dict[str, Any]]] = []
     for index, line in enumerate(lines):
         header = type_header(line)
         if header is None or str(header["name"]).rsplit(".", 1)[-1] != wanted:
@@ -130,12 +133,15 @@ def find_type_block(lines: list[str], wanted: str) -> tuple[int, int, dict[str, 
             if type_header(lines[cursor]) is not None:
                 end = cursor
                 break
-        return index, end, header
-    raise RuntimeError(f"dump.cs did not contain type {wanted}")
+        blocks.append((index, end, header))
+    if not blocks:
+        raise RuntimeError(f"dump.cs did not contain type {wanted}")
+    return blocks
 
 
-def summarize_type(lines: list[str], wanted: str) -> dict[str, Any]:
-    start, end, header = find_type_block(lines, wanted)
+def summarize_type_block(
+    lines: list[str], wanted: str, start: int, end: int, header: dict[str, Any]
+) -> dict[str, Any]:
     fields: list[dict[str, Any]] = []
     methods: list[dict[str, Any]] = []
     for index in range(start + 1, end):
@@ -170,6 +176,40 @@ def summarize_type(lines: list[str], wanted: str) -> dict[str, Any]:
         "selected_fields": fields,
         "constructors": methods,
     }
+
+
+def summarize_type(
+    lines: list[str],
+    wanted: str,
+    *,
+    method_names: dict[int, str] | None = None,
+    constructor_name: str | None = None,
+) -> dict[str, Any]:
+    candidates = [
+        summarize_type_block(lines, wanted, start, end, header)
+        for start, end, header in find_type_blocks(lines, wanted)
+    ]
+    if constructor_name is not None:
+        if method_names is None:
+            raise RuntimeError("constructor disambiguation requires script method names")
+        matches = [
+            candidate
+            for candidate in candidates
+            if any(
+                method_names.get(int(ctor["rva"])) == constructor_name
+                for ctor in candidate["constructors"]
+            )
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one {wanted} block owning {constructor_name}, found {len(matches)}"
+            )
+        return matches[0]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"type name {wanted} is ambiguous ({len(candidates)} blocks); explicit disambiguation required"
+        )
+    return candidates[0]
 
 
 def memory_access_kind(mnemonic: str) -> str | None:
@@ -293,12 +333,33 @@ def main() -> int:
     args = parser.parse_args()
 
     lines = args.dump_cs.read_text(encoding="utf-8", errors="replace").splitlines()
-    load_param = summarize_type(lines, "LoadTaskParam")
-    base_param = summarize_type(lines, "BaseParam")
-    post_params = summarize_type(lines, "PostParams")
-    network_task = summarize_type(lines, "NetworkTask")
-
     starts, method_names = load_script(args.script_json)
+
+    load_param = summarize_type(
+        lines,
+        "LoadTaskParam",
+        method_names=method_names,
+        constructor_name="Stage.LoadTaskParam$$.ctor",
+    )
+    base_param = summarize_type(
+        lines,
+        "BaseParam",
+        method_names=method_names,
+        constructor_name="Stage.BaseParam$$.ctor",
+    )
+    post_params = summarize_type(
+        lines,
+        "PostParams",
+        method_names=method_names,
+        constructor_name="PostParams$$.ctor",
+    )
+    network_task = summarize_type(
+        lines,
+        "NetworkTask",
+        method_names=method_names,
+        constructor_name="NetworkTask$$.ctor",
+    )
+
     end = next_function_start(starts, SET_PARAMETER_START)
     ctor_rvas = {int(item["rva"]) for item in load_param["constructors"]}
 
@@ -315,7 +376,7 @@ def main() -> int:
         view.close()
 
     report = {
-        "schema": 2,
+        "schema": 3,
         "load_task_param": load_param,
         "base_param": base_param,
         "post_params": post_params,
@@ -337,6 +398,8 @@ def main() -> int:
             {
                 "load_task_param_bases": load_param["bases"],
                 "base_param_bases": base_param["bases"],
+                "post_params_bases": post_params["bases"],
+                "network_task_bases": network_task["bases"],
                 "load_task_param_ctor_rvas": sorted(ctor_rvas),
                 "target_offset_access_count": len(set_parameter["target_offset_accesses"]),
                 "params_assignment_count": len(set_parameter["params_assignment_sites"]),
