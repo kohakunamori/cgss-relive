@@ -12,6 +12,7 @@ on:
       - 'scripts/analyze-networktask-api-field.py'
       - 'scripts/analyze-arcade-convert-type.py'
       - 'scripts/discover-networktask-roots.py'
+      - 'scripts/discover-common-apitype-consumers.py'
       - 'scripts/materialize-api-map.py'
       - 'scripts/build-endpoint-contracts.py'
       - 'scripts/validate-api-map.py'
@@ -106,6 +107,31 @@ jobs:
           print(json.dumps({'root_candidates':r['candidates'][:12]},indent=2))
           PY
 
+      - name: Discover Common.ApiType consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/discover-common-apitype-consumers.py \
+            --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --output reports/common-apitype-consumers.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/common-apitype-consumers.json'))
+          assert d['schema']==1
+          print(json.dumps({
+            'consumer_type_count': d['consumer_type_count'],
+            'consumers': [
+              {
+                'type': r['type'], 'base': r['base'],
+                'matches': r['matches'],
+                'matched_script_methods': r['matched_script_methods'],
+                'owner_method_sample': r['owner_method_sample'][:12],
+              }
+              for r in d['consumers'][:30]
+            ],
+          },indent=2))
+          PY
+
       - name: Build normal NetworkTask inventory
         shell: bash
         run: |
@@ -148,8 +174,10 @@ jobs:
           python - <<'PY'
           import json
           d=json.load(open('reports/arcade-convert-type.json'))
-          assert d['schema']==2 and d['target_rva']==0x4769CC0
-          assert {r['convert_input_key'] for r in d['constructors']}=={352,353,354,355,356}
+          assert d['schema']==3 and d['target_rva']==0x4769CC0
+          assert len(d['constructors'])==9
+          assert {r['convert_input_key'] for r in d['constructors']}==set(range(352,361))
+          assert all(r['convert_input_key']==r['expected_api_key'] for r in d['constructors'])
           print(json.dumps({'convert_type':d['dump_signature'],'constructors':d['constructors']},indent=2))
           PY
 
