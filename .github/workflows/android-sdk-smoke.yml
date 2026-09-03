@@ -79,7 +79,7 @@ jobs:
           command -v zipalign
           apksigner version
 
-      - name: Download exact final specimen and select base APK
+      - name: Download and verify exact final specimen
         shell: bash
         run: |
           set -euo pipefail
@@ -91,21 +91,42 @@ jobs:
           unzip -q work/final.xapk -d work/xapk
 
           BASE_APK=''
+          ARM_APK=''
+          META_APK=''
+          APK_COUNT=0
           while IFS= read -r -d '' apk; do
+            APK_COUNT=$((APK_COUNT + 1))
             first_line="$(aapt dump badging "$apk" | head -1)"
+            entries="$(unzip -Z1 "$apk")"
+
             if [[ "$first_line" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]] && [[ "$first_line" != *" split='"* ]]; then
               BASE_APK="$apk"
-              break
+            fi
+            if grep -qx 'lib/arm64-v8a/libil2cpp.so' <<<"$entries"; then
+              ARM_APK="$apk"
+            fi
+            if grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat' <<<"$entries"; then
+              META_APK="$apk"
             fi
           done < <(find work/xapk -type f -name '*.apk' -print0)
 
-          if [[ -z "$BASE_APK" ]]; then
-            echo 'Base APK was not found in exact final XAPK' >&2
-            exit 1
-          fi
+          test "$APK_COUNT" -gt 1
+          test -n "$BASE_APK"
+          test -n "$ARM_APK"
+          test -n "$META_APK"
+
+          ARM_HASH="$(unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so | sha256sum | awk '{print $1}')"
+          META_HASH="$(unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat | sha256sum | awk '{print $1}')"
+          test "$ARM_HASH" = '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+          test "$META_HASH" = '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
 
           echo "BASE_APK=$BASE_APK" >> "$GITHUB_ENV"
+          echo "ARM_APK=$ARM_APK" >> "$GITHUB_ENV"
+          echo "META_APK=$META_APK" >> "$GITHUB_ENV"
+          echo "SOURCE_APK_COUNT=$APK_COUNT" >> "$GITHUB_ENV"
           aapt dump badging "$BASE_APK" | head -1
+          echo "source_apk_count=$APK_COUNT"
+          echo "frozen arm64 IL2CPP and metadata hashes verified"
 
       - name: Rebuild base APK with Apktool 2.12.1
         shell: bash
@@ -119,11 +140,12 @@ jobs:
           java -jar work/apktool.jar b work/decompiled -o work/rebuilt-unsigned.apk
           test -s work/rebuilt-unsigned.apk
 
-      - name: Align, sign, and verify rebuilt APK
+      - name: Sign complete split install set and verify payload integrity
         shell: bash
         run: |
           set -euo pipefail
-          zipalign -f 4 work/rebuilt-unsigned.apk work/rebuilt-aligned.apk
+          mkdir -p work/aligned work/install-set
+
           keytool -genkeypair \
             -keystore work/ci-signing.jks \
             -storepass changeit \
@@ -134,19 +156,86 @@ jobs:
             -keysize 2048 \
             -validity 1 \
             -noprompt
-          apksigner sign \
-            --ks work/ci-signing.jks \
-            --ks-pass pass:changeit \
-            --key-pass pass:changeit \
-            --out work/rebuilt-signed.apk \
-            work/rebuilt-aligned.apk
-          apksigner verify --verbose work/rebuilt-signed.apk
 
-          badging="$(aapt dump badging work/rebuilt-signed.apk | head -1)"
-          echo "$badging"
-          [[ "$badging" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]]
-          [[ "$badging" == *"versionCode='438'"* ]]
-          [[ "$badging" == *"versionName='11.6.3'"* ]]
+          sign_apk() {
+            local input="$1"
+            local output="$2"
+            local aligned="$3"
+            zipalign -f 4 "$input" "$aligned"
+            apksigner sign \
+              --ks work/ci-signing.jks \
+              --ks-pass pass:changeit \
+              --key-pass pass:changeit \
+              --out "$output" \
+              "$aligned"
+            apksigner verify --verbose "$output"
+          }
+
+          sign_apk \
+            work/rebuilt-unsigned.apk \
+            work/install-set/base.apk \
+            work/aligned/base.apk
+
+          while IFS= read -r -d '' apk; do
+            if [[ "$apk" == "$BASE_APK" ]]; then
+              continue
+            fi
+            name="$(basename "$apk")"
+            sign_apk \
+              "$apk" \
+              "work/install-set/$name" \
+              "work/aligned/$name"
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+
+          SIGNED_APK_COUNT="$(find work/install-set -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          test "$SIGNED_APK_COUNT" -eq "$SOURCE_APK_COUNT"
+
+          BASE_BADGING="$(aapt dump badging work/install-set/base.apk | head -1)"
+          echo "$BASE_BADGING"
+          [[ "$BASE_BADGING" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]]
+          [[ "$BASE_BADGING" == *"versionCode='438'"* ]]
+          [[ "$BASE_BADGING" == *"versionName='11.6.3'"* ]]
+
+          while IFS= read -r -d '' signed; do
+            badging="$(aapt dump badging "$signed" | head -1)"
+            [[ "$badging" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]]
+            [[ "$badging" == *"versionCode='438'"* ]]
+            [[ "$badging" == *"versionName='11.6.3'"* ]]
+          done < <(find work/install-set -maxdepth 1 -type f -name '*.apk' -print0)
+
+          signed_for_source() {
+            local source="$1"
+            if [[ "$source" == "$BASE_APK" ]]; then
+              printf '%s\n' 'work/install-set/base.apk'
+            else
+              printf 'work/install-set/%s\n' "$(basename "$source")"
+            fi
+          }
+
+          SIGNED_ARM_APK="$(signed_for_source "$ARM_APK")"
+          SIGNED_META_APK="$(signed_for_source "$META_APK")"
+          test -s "$SIGNED_ARM_APK"
+          test -s "$SIGNED_META_APK"
+
+          ARM_HASH_AFTER="$(unzip -p "$SIGNED_ARM_APK" lib/arm64-v8a/libil2cpp.so | sha256sum | awk '{print $1}')"
+          META_HASH_AFTER="$(unzip -p "$SIGNED_META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat | sha256sum | awk '{print $1}')"
+          test "$ARM_HASH_AFTER" = '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+          test "$META_HASH_AFTER" = '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
+
+          CERT_DIGEST=''
+          while IFS= read -r -d '' signed; do
+            digest="$(apksigner verify --print-certs "$signed" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1)"
+            test -n "$digest"
+            if [[ -z "$CERT_DIGEST" ]]; then
+              CERT_DIGEST="$digest"
+            else
+              test "$digest" = "$CERT_DIGEST"
+            fi
+          done < <(find work/install-set -maxdepth 1 -type f -name '*.apk' -print0)
+
+          echo "signed_apk_count=$SIGNED_APK_COUNT"
+          echo "all split APKs share one CI signer"
+          echo "frozen arm64 IL2CPP and metadata hashes preserved after rebuild/signing"
 
       - name: Enforce no proprietary artifact escape
         if: always()
@@ -155,4 +244,4 @@ jobs:
           set -euo pipefail
           rm -rf work
           test ! -e work/final.xapk
-          test ! -e work/rebuilt-signed.apk
+          test ! -d work/install-set
