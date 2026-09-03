@@ -8,6 +8,7 @@ on:
     paths:
       - '.github/workflows/analyze-server-contracts.yml'
       - 'scripts/analyze-server-contracts.py'
+      - 'scripts/analyze-api-type-enums.py'
 
 permissions:
   contents: read
@@ -77,6 +78,31 @@ jobs:
           test -s work/dump/dump.cs
           test -s work/dump/script.json
           test -s work/dump/stringliteral.json
+
+      - name: Discover exact ApiType enum surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-api-type-enums.py \
+            --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --output reports/api-type-enums.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d = json.loads(Path('reports/api-type-enums.json').read_text())
+          assert len(d['a_candidates']) == 1
+          assert len(d['b_candidates']) == 1
+          print(json.dumps({
+              'a_enum': d['a_candidates'][0]['full_name'],
+              'a_entries': d['a_candidates'][0]['entry_count'],
+              'b_enum': d['b_candidates'][0]['full_name'],
+              'b_entries': d['b_candidates'][0]['entry_count'],
+              'related_method_count': len(d['related_methods']),
+              'api_shaped_literal_count': d['api_shaped_literal_count'],
+          }, indent=2))
+          PY
 
       - name: Build sanitized server-facing inventory
         shell: bash
