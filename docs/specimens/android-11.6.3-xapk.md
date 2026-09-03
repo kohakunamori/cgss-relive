@@ -1,6 +1,8 @@
 # Android specimen: CGSS 11.6.3 XAPK
 
-This document records reproducible facts obtained from a locally supplied XAPK specimen. Original APK/XAPK binaries and extracted proprietary game binaries are intentionally **not** committed.
+This document records reproducible facts obtained from the exact final XAPK
+specimen. Original APK/XAPK binaries and extracted proprietary game binaries are
+intentionally **not** committed.
 
 ## Identity
 
@@ -9,9 +11,16 @@ This document records reproducible facts obtained from a locally supplied XAPK s
 | Package | `jp.co.bandainamcoent.BNEI0242` |
 | App version | `11.6.3` |
 | versionCode | `438` |
+| Launchable activity | `jp.co.cygames.stage.StageUnityPlayerActivity` |
 | minSdk | `26` |
 | targetSdk | `35` |
 | XAPK SHA-256 | `609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d` |
+
+The launchable activity is not guessed from Unity conventions. The exact
+hash-verified XAPK GitHub Actions pass scans its APK splits with Android `aapt dump
+badging`, accepts only the expected package/version identity, and requires exactly
+one distinct MAIN/LAUNCHER activity. The verified result has one matching split
+APK and one launchable activity.
 
 ### APK splits
 
@@ -30,7 +39,11 @@ All three APK splits contain the same APK Signature Scheme v2 signer certificate
 - serial: `4CC13C7A`
 - validity observed in certificate: 2010-10-22 through 2038-03-09
 
-The matching signer across base and ABI splits plus the Bandai Namco certificate identity is a strong provenance signal for the contained APK set. The fingerprint has not yet been independently compared with a separately acquired official-store copy, so it should not be described as independently authenticated solely from this report.
+The matching signer across base and ABI splits plus the Bandai Namco certificate
+identity is a strong provenance signal for the contained APK set. The fingerprint
+has not been independently compared with a separately acquired official-store
+copy, so it should not be described as independently authenticated solely from
+this report.
 
 ## Unity / IL2CPP
 
@@ -58,11 +71,16 @@ The specimen is unambiguously IL2CPP.
 | `globalgamemanagers` | `d5ffd4617d8c7e838057d4ba5a3fdbe6b625f8b6c4d051d559554bfdcfb66288` |
 | `ScriptingAssemblies.json` | `67387ee14514c5ec0b331ab036ce1f70c78fb32c9a6d0d29fd6217be4048563f` |
 
-The arm64 split contains a ~142 MB `libil2cpp.so` and a ~25 MB `libunity.so`; the base APK contains `assets/bin/Data/Managed/Metadata/global-metadata.dat` and Unity bootstrap metadata.
+The arm64 split contains a ~142 MB `libil2cpp.so` and a ~25 MB `libunity.so`;
+the base APK contains
+`assets/bin/Data/Managed/Metadata/global-metadata.dat` and Unity bootstrap
+metadata.
 
 ## Current-client network surface
 
-The following are present as managed string literals in the **11.6.3** IL2CPP metadata, so they are current-client evidence rather than assumptions copied from older tools.
+The following are present as managed string literals in the **11.6.3** IL2CPP
+metadata, so they are current-client evidence rather than assumptions copied from
+older tools.
 
 ### Hosts
 
@@ -93,7 +111,10 @@ Confirmed current literals include:
 - `PROCESSOR-TYPE`
 - `RETRY-FLAG`
 
-`MessagePack.*` types and the CGSS AES/cryptography classes are also present in the current metadata. This confirms that the historical CGSS MessagePack/AES-oriented transport family remains relevant, but it does **not** by itself prove that every historical key derivation, IV construction or request-integrity formula is unchanged. Those details must be verified through current native call-site analysis and/or sanitized dynamic fixtures.
+`MessagePack.*` types and the CGSS AES/cryptography classes are also present in
+the current metadata. Subsequent final-client analysis has already closed the
+current MessagePack/AES request/response envelope; this vocabulary section is
+kept as specimen evidence, not as an open crypto task.
 
 ### Core request/crypto classes
 
@@ -134,15 +155,14 @@ Current metadata resolves the following high-value classes and method surfaces:
 - `Cute.BootNetwork`
   - including `SetupNetworkCertification`
 - `Cute.Header`
-  - fields include `result_code`, `viewer_id`, `udid`, `sid`, `required_res_ver`, `download_list`, `download_url`, `servertime`
+  - fields include `result_code`, `viewer_id`, `udid`, `sid`,
+    `required_res_ver`, `download_list`, `download_url`, `servertime`
 - `Cute.CustomPreference`
   - application, stream/concert, resource, manifest, blob and master URL builders
 
-These names give deterministic xref targets for native analysis of `libil2cpp.so`.
-
 ## Startup/API path evidence
 
-The final-client metadata contains the historical startup paths themselves, including:
+The final-client metadata contains the startup paths themselves, including:
 
 - `load/check`
 - `load/index`
@@ -153,9 +173,12 @@ The final-client metadata contains the historical startup paths themselves, incl
 - `home/update`
 - `profile/get_profile`
 
-It also contains large sets of live/story/friend/room/gacha/event endpoints including `live/start`, `live/end` and `story/start`.
+It also contains large sets of live/story/friend/room/gacha/event endpoints
+including `live/start`, `live/end` and `story/start`.
 
-The first compatibility-server milestone should therefore remain `load/check` plus the smallest cold-launch chain needed to reach title/home; broad gameplay endpoint implementation should wait until the observed startup contract is encoded as fixtures/tests.
+Current clean-room work has already reduced the hard bootstrap to `/load/check`,
+resource initialization and `/load/index`; later endpoint restoration remains
+runtime/blocker driven.
 
 ## Resource bootstrap evidence
 
@@ -169,7 +192,7 @@ Current 11.6.3 metadata contains:
 - `Generic/Master`
 - manifest SQL including resource-name -> hash lookups
 
-Most importantly, the APK contains the exact resource-version-like literal:
+The APK contains the exact resource-version-like literal:
 
 ```text
 10133000
@@ -177,14 +200,19 @@ Most importantly, the APK contains the exact resource-version-like literal:
 
 It does **not** contain `10133800` as a managed literal.
 
-Maintained 2026 community resource tooling separately identifies/uses `manifest_10133800.db` and implements the server resource-version -> `all_dbmanifest` -> `Android_AHigh_SHigh` -> manifest SQLite -> `master.mdb` chain. The working preservation hypothesis is therefore:
+The frozen preservation state is now independently verified as:
 
-1. **11.6.3 is the final application binary specimen.**
-2. Its bundled/default resource revision is **10133000**.
-3. Server-side data continued advancing after the binary release to **10133800**.
-4. A preserved compatibility server should reproduce version negotiation so 11.6.3 can be directed to the frozen final resource set rather than incorrectly pinning the archive to 10133000.
+```text
+binary/default RES_VER  10133000
+final resource revision 10133800
+manifest rows            220837
+unique hashes            220803
+```
 
-This relationship must be confirmed by executing the final resource bootstrap and by reproducing the decoded `load/check` response contract.
+The final-client 214 path persists server `required_res_ver=10133800`, after
+which the statically closed parent continuation proceeds into manifest/resource
+initialization. The local resource stack preserves the final
+`all_dbmanifest -> Android_AHigh_SHigh -> manifest SQLite -> master.mdb` chain.
 
 ## Reproduction helpers
 
@@ -197,14 +225,25 @@ python .\scripts\extract-analysis-targets.py .\work\apk\11.6.3-xapk -o .\work\ap
 python .\scripts\inspect-il2cpp-metadata.py .\work\apk\11.6.3-xapk\analysis-targets\assets\bin\Data\Managed\Metadata\global-metadata.dat -o .\work\apk\11.6.3-xapk\metadata-report.json
 ```
 
-Paths inside `analysis-targets` may differ depending on the extraction helper's source-preserving layout; use `analysis-targets.json` to locate the extracted metadata file.
+The repository's exact-specimen Actions workflow additionally verifies the
+frozen XAPK/libil2cpp/metadata hashes, extracts only a sanitized launchable
+activity identity, runs bounded targeted IL2CPP passes, deletes all raw specimen
+material, and uploads only sanitized derived reports.
 
-## M0 conclusion
+## Current preservation boundary
 
-M0 is satisfied for this specimen: the application version, APK split set, hashes, signer identity, exact Unity version, IL2CPP mode/version, ABI layout, current network host vocabulary and the primary reverse-engineering targets are all known.
+The old M0/M1/M2/M3 planning sequence is complete enough that it must not be used
+as a reason to restart solved research:
 
-Next work:
+- exact final application specimen identity: closed;
+- resource revision 10133800 freeze/bootstrap: closed;
+- current transport codec/version negotiation: closed;
+- `/load/index` parser/Home control-flow reduction: closed enough for a real
+  starter-profile experiment;
+- deterministic host stack/resource/TLS/device-preflight tooling: implemented.
 
-1. M1: freeze and verify resource revision 10133800.
-2. M2: resolve native xrefs for `Cute.NetworkTask`/crypto/version-check methods and produce sanitized `load/check` fixtures.
-3. M3: implement a clean-room local codec and the minimum title/bootstrap server only after the current envelope is proven.
+The decisive remaining acceptance milestone is **runtime**, not another specimen
+inventory pass: launch this untouched final application on the rooted test device,
+observe TLS acceptance, native 214 resource continuation, `/load/index`, and
+visible Home/Login Bonus -> Home. Static analysis and server-side success must not
+be reported as visible Home acceptance.
