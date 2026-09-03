@@ -5,11 +5,13 @@ on:
   push:
     paths:
       - .github/workflows/verify-final-resources.yml
+      - server/resource_server.py
       - scripts/fetch-resource-bootstrap.py
       - scripts/inspect-resource-manifest.py
       - scripts/inspect-master-db.py
       - scripts/probe-resource-categories.py
       - scripts/archive-resources.py
+      - scripts/verify-final-manifest-resolution.py
 
 permissions:
   contents: read
@@ -38,6 +40,12 @@ jobs:
             work/final-resource/manifest_10133800.db \
             --output work/final-resource/manifest-report.json \
             --unknown-examples 20
+
+      - name: Verify every final manifest name through local resolver
+        run: |
+          python scripts/verify-final-manifest-resolution.py \
+            work/final-resource/manifest_10133800.db \
+            --output work/final-resource/name-resolution-report.json
 
       - name: Build complete content-addressed archive plan
         run: |
@@ -98,6 +106,7 @@ jobs:
           root = Path('work/final-resource')
           bootstrap = json.loads((root / 'resource-bootstrap.json').read_text(encoding='utf-8'))
           manifest = json.loads((root / 'manifest-report.json').read_text(encoding='utf-8'))
+          resolution = json.loads((root / 'name-resolution-report.json').read_text(encoding='utf-8'))
           archive_plan = json.loads((root / 'archive-plan-report.json').read_text(encoding='utf-8'))
           probe = json.loads((root / 'category-probe.json').read_text(encoding='utf-8'))
           master = json.loads((root / 'master-report.json').read_text(encoding='utf-8'))
@@ -106,6 +115,13 @@ jobs:
           assert manifest['quick_check'] == ['ok']
           assert manifest['master_mdb']['hash'] == bootstrap['master']['expected_compressed_md5']
           assert manifest['unknown_category_examples'] == []
+          assert resolution['complete'] is True
+          assert resolution['rows'] == manifest['rows']
+          assert resolution['resolved'] == manifest['rows']
+          assert resolution['path_shaped_names'] == manifest['name_shape']['names_with_slash']
+          assert resolution['unresolved'] == 0
+          assert resolution['mismatched'] == 0
+          assert resolution['unknown_category'] == 0
           assert archive_plan['planned_unique_objects'] == manifest['unique_hashes']
           assert archive_plan['skipped_objects'] == 0
           assert master['quick_check'] == ['ok']
@@ -138,6 +154,8 @@ jobs:
           print('manifest_decoded_sha256:', bootstrap['manifest']['decoded_sha256'])
           print('manifest_rows:', manifest['rows'])
           print('manifest_unique_hashes:', manifest['unique_hashes'])
+          print('manifest_name_shape:', manifest['name_shape'])
+          print('manifest_name_resolution:', resolution)
           print('archive_plan:', archive_plan)
           print('manifest_category_counts:', manifest['category_counts'])
           print('manifest_declared_categories:', manifest.get('declared_category_counts', {}))
@@ -165,6 +183,7 @@ jobs:
           path: |
             work/final-resource/resource-bootstrap.json
             work/final-resource/manifest-report.json
+            work/final-resource/name-resolution-report.json
             work/final-resource/archive-plan-report.json
             work/final-resource/category-probe.json
             work/final-resource/master-report.json
