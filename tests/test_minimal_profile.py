@@ -12,6 +12,7 @@ from server.minimal_profile import (
     STARTER_SERIAL_ID,
     STARTER_UNIT_ID,
     STARTER_UNIT_SLOT,
+    STARTER_WORK_CARD_SECTION,
     build_home_candidate_load_index_data,
     build_minimal_load_index_data,
     build_starter_visible_load_index_data,
@@ -43,6 +44,7 @@ class MinimalProfileTests(unittest.TestCase):
         for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
             self.assertEqual(data[section], [])
         self.assertEqual(data["music_list"], {"normal": []})
+        self.assertNotIn(STARTER_WORK_CARD_SECTION, data)
 
     def test_home_candidate_validator_rejects_wrong_shapes(self) -> None:
         data = build_home_candidate_load_index_data(now=1)
@@ -56,13 +58,16 @@ class MinimalProfileTests(unittest.TestCase):
             ],
         )
 
-    def test_starter_visible_profile_has_final_unit_contract_and_five_slots(self) -> None:
+    def test_starter_visible_profile_populates_work_card_and_final_unit_contract(self) -> None:
         data = build_starter_visible_load_index_data(viewer_id=9, producer_name="Starter", now=10)
         self.assertEqual(validate_starter_visible_profile(data), [])
         self.assertEqual(validate_home_candidate_profile(data), [])
 
-        self.assertEqual(len(data["user_card_list"]), 1)
-        card = data["user_card_list"][0]
+        # user_card_list belongs to the separate guarded Cenere-merge path. The
+        # actual WorkCardData.AddCardData parser is the exact literal section.
+        self.assertEqual(data["user_card_list"], [])
+        self.assertEqual(len(data[STARTER_WORK_CARD_SECTION]), 1)
+        card = data[STARTER_WORK_CARD_SECTION][0]
         self.assertEqual(card["serial_id"], STARTER_SERIAL_ID)
         self.assertEqual(card["card_id"], STARTER_CARD_ID)
         self.assertNotIn("join_type", card)
@@ -84,19 +89,29 @@ class MinimalProfileTests(unittest.TestCase):
 
     def test_starter_visible_validator_rejects_broken_references(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
-        data["user_card_list"][0]["card_id"] = 999999
+        data[STARTER_WORK_CARD_SECTION][0]["card_id"] = 999999
         data["user_unit_list"][0]["unit_slot"] = 2
         data["user_unit_list"][0]["unit_id"] = 2
         data["user_unit_list"][0]["serial_id_0"] = 2
         data["user_chara_list"][0]["chara_id"] = 999
         data["user_info"]["leader_serial_id"] = 2
         errors = validate_starter_visible_profile(data)
-        self.assertIn("user_card_list[0].card_id", errors)
+        self.assertIn(f"{STARTER_WORK_CARD_SECTION}[0].card_id", errors)
         self.assertIn("user_unit_list[0].unit_slot", errors)
         self.assertIn("user_unit_list[0].unit_id", errors)
         self.assertIn("user_unit_list[0].serial_id_0", errors)
         self.assertIn("user_chara_list[0].chara_id", errors)
         self.assertIn("user_info.leader_serial_id", errors)
+
+    def test_starter_visible_validator_rejects_user_card_duplicate_path(self) -> None:
+        data = build_starter_visible_load_index_data(now=1)
+        data["user_card_list"] = [dict(data[STARTER_WORK_CARD_SECTION][0])]
+        self.assertIn("user_card_list", validate_starter_visible_profile(data))
+
+    def test_starter_visible_validator_requires_work_card_section(self) -> None:
+        data = build_starter_visible_load_index_data(now=1)
+        del data[STARTER_WORK_CARD_SECTION]
+        self.assertIn(f"{STARTER_WORK_CARD_SECTION}[1]", validate_starter_visible_profile(data))
 
     def test_starter_visible_validator_requires_unit_id_field(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
