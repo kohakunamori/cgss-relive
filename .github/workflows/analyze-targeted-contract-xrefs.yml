@@ -11,6 +11,7 @@ on:
       - 'scripts/analyze-arcade-convert-map.py'
       - 'scripts/resolve-arcade-convert-prefix.py'
       - 'scripts/analyze-dynamic-networktask-writers.py'
+      - 'scripts/resolve-dynamic-networktask-constants.py'
 
 permissions:
   contents: read
@@ -114,16 +115,19 @@ jobs:
           python scripts/analyze-dynamic-networktask-writers.py \
             --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
             --output reports/dynamic-networktask-writers.json
+          python scripts/resolve-dynamic-networktask-constants.py \
+            --lib work/libil2cpp.so --output reports/dynamic-networktask-constants.json
           python - <<'PY'
           import json
           d=json.load(open('reports/dynamic-networktask-writers.json'))
-          assert d['schema']==1
+          c=json.load(open('reports/dynamic-networktask-constants.json'))
+          assert d['schema']==1 and c['schema']==1
+          assert c['targets']['Stage.MemberEvolutionTask']['type_key_dword']==25
+          assert c['targets']['Stage.RoomSettingUpdateTask']['type_key_dword']==98
           print(json.dumps({
-            'types':d['types'],
-            'constructors':{k:{'rva':hex(v['rva']),'signature':v['signature'],'calls':v['calls'],'instructions':v['instructions']} for k,v in d['constructors'].items()},
+            'constructor_signatures':{k:v['signature'] for k,v in d['constructors'].items()},
             'caller_counts':{k:len(v) for k,v in d['callers'].items()},
-            'callers':d['callers'],
-            'unmapped':d['unmapped_xrefs'],
+            'constant_pool':c,
           },indent=2))
           PY
 
