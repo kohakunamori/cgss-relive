@@ -225,12 +225,21 @@ def classify_run(run: Mapping[str, Any]) -> dict[str, Any]:
             "visible_home_proven": False,
         }
 
-    # A failing /load/index response is a server contract failure, not a visual gate.
-    if first_failure is not None and first_failure.get("route") == "/load/index":
+    # A failing final /load/index attempt is a server contract failure, not a
+    # visual gate. If a later /load/index attempt exists, progress wins instead.
+    if (
+        first_failure is not None
+        and first_failure.get("route") == "/load/index"
+        and isinstance(first_failure.get("event_index"), int)
+        and (
+            last_load_index is None
+            or int(first_failure["event_index"]) >= last_load_index
+        )
+    ):
         return result(
             "load_index_response_failure",
             "fix_load_index_response",
-            "The client reached /load/index but the sanitized server trace records it as the first failing response.",
+            "The latest proven /load/index attempt is the first failing response and no later /load/index progress is present.",
         )
 
     # Once /load/index succeeded, only evidence after that point should decide the
