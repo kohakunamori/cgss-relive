@@ -93,6 +93,15 @@ class MinimalProfileTests(unittest.TestCase):
         )
         self.assertNotIn("viewer_id", unit)
 
+        # Exact final helper analysis proves all cosmetic families are guarded;
+        # whole-Parse pose_list xref count is zero. Keep the starter deliberately
+        # free of these fields instead of fabricating default business state.
+        self.assertNotIn("pose_list", unit)
+        for index in range(FINAL_UNIT_SLOT_COUNT):
+            self.assertNotIn(f"dress_type_{index}", unit)
+            self.assertNotIn(f"dress_2d_type_{index}", unit)
+            self.assertNotIn(f"dress_storage_id_{index}", unit)
+
         # Exact final parser proves user_chara_list [] is safe; bounded Home
         # startup has no WorkCharaData consumer, so do not fabricate a row.
         self.assertEqual(data["user_chara_list"], [])
@@ -136,6 +145,11 @@ class MinimalProfileTests(unittest.TestCase):
         data = build_starter_visible_load_index_data(now=1)
         del data["user_unit_list"][0]["unit_slot"]
         self.assertIn("user_unit_list[0].unit_slot", validate_starter_visible_profile(data))
+
+    def test_starter_visible_validator_requires_unit_name_field(self) -> None:
+        data = build_starter_visible_load_index_data(now=1)
+        del data["user_unit_list"][0]["name"]
+        self.assertIn("user_unit_list[0].name", validate_starter_visible_profile(data))
 
     def test_validator_reports_removed_fields(self) -> None:
         data = build_minimal_load_index_data(now=1)
