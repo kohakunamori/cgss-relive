@@ -38,21 +38,19 @@ Important builder facts:
 ## Filename index
 
 Filename-addressed storages requests require the locally preserved final manifest
-SQLite database:
+SQLite database. The DB is opened read-only and only the filename/hash mapping is
+loaded. Without it, hash-addressed forms still work and unresolved filename forms
+return 404 rather than being guessed.
 
-```powershell
-python -m server.resource_server `
-  --root .\resource-cache\10133800 `
-  --manifest-db .\work\resources\manifest_10133800.db
+Expected local DB path in the rooted integration examples:
+
+```text
+work/resources/manifest_10133800.db
 ```
-
-The DB is opened read-only; only `name, hash` from `manifests` is loaded. Without
-it, hash-addressed forms still work and unresolved filename forms return 404
-rather than being guessed.
 
 ## Bootstrap manifest wire objects
 
-Verified local copies, when needed, live outside Git under:
+Verified local copies live outside Git under:
 
 ```text
 resource-cache/10133800/manifests/all_dbmanifest
@@ -62,28 +60,68 @@ resource-cache/10133800/manifests/Android_AHigh_SHigh
 They are exposed only as version-scoped manifest requests. Nothing is synthesized
 and no proprietary body is committed.
 
-## Run with TLS and sanitized runtime evidence
+## Preflight the complete local cache first
 
-For the native final-client path:
+Before launching the original client, validate that the local directory is the
+complete frozen final set rather than discovering a missing object during
+bootstrap:
+
+```powershell
+python .\scripts\preflight-local-resources.py `
+  --version 10133800 `
+  --root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db `
+  -o .\work\resource-preflight.json
+```
+
+The final invariants are:
+
+```text
+manifest rows   220837
+unique hashes   220803
+wire manifests  2
+```
+
+The preflight checks:
+
+- resource version is exactly `10133800`;
+- manifest SQLite `PRAGMA quick_check` is `ok`;
+- row and unique-hash counts match the frozen final manifest;
+- both bootstrap wire manifests exist;
+- every unique manifest hash has a corresponding
+  `objects/<hh>/<hash>` regular file;
+- no expected object is zero length.
+
+Its JSON output contains only counts/status/failure codes. It never emits resource
+filenames, hashes, manifest rows, or object bytes. Exit code `0` means ready;
+exit code `2` means the local cache is not ready for acceptance testing.
+
+## Preferred rooted-device backend mode
+
+The recommended native topology terminates HTTPS in `server.tls_mux`, so the
+resource backend itself remains plain loopback HTTP:
 
 ```powershell
 python -m server.resource_server `
   --host 127.0.0.1 `
-  --port 8444 `
+  --port 8081 `
   --version 10133800 `
   --root .\resource-cache\10133800 `
   --manifest-db .\work\resources\manifest_10133800.db `
-  --cert .\work\tls\resource.chain.pem `
-  --key .\work\tls\resource.key.pem `
   --event-log .\work\runtime-starter-resource.jsonl
 ```
 
-The certificate SAN must match the original resource hostname being redirected.
-Do not assume the API certificate covers `storages.game.starlight-stage.jp`.
+The mux then routes the original HTTPS Host
+`storages.game.starlight-stage.jp` to this backend. See
+`docs/rooted-device-integration.md`.
+
+Standalone TLS remains supported for isolated tests by passing `--cert` and
+`--key`, but it is no longer the preferred two-host rooted layout because one
+`adb reverse tcp:443` cannot target two independent host TLS listeners.
 
 ## Sanitized event log
 
-`--event-log` is specifically for integration evidence. The requested filename,
+`--event-log` is specifically for integration evidence. Requested filename,
 MD5/hash, path tail and query string are discarded before logging. Only synthetic
 route category + HTTP status are retained:
 
@@ -96,7 +134,7 @@ route category + HTTP status are retained:
 @resource/unresolved
 ```
 
-`/healthz` is not logged at all, so monitoring cannot create a false
+`/healthz` is not logged, so monitoring cannot create a false
 `resource_plane_observed` phase.
 
 Control/resource logs can later be merged safely by event timestamp:
@@ -126,7 +164,7 @@ objects return 404. Unsatisfiable ranges return 416.
 
 ## Native bootstrap role
 
-The static final-client parent continuation is now closed:
+The static final-client parent continuation is closed:
 
 ```text
 /load/check 10133000
@@ -142,14 +180,17 @@ The static final-client parent continuation is now closed:
 -> /load/index
 ```
 
-Therefore start and route the resource server **before** launching the native 214
-run. Do not wait for an automatic second `/load/check`; it is not a required link.
+Therefore preflight, start, and route the resource backend **before** launching
+the native 214 run. Do not wait for an automatic second `/load/check`; it is not
+a required link.
 
-A successful `@resource/*` event after the 214 is direct runtime evidence that the
+A successful `@resource/*` event after 214 is direct runtime evidence that the
 client entered the statically expected resource initialization stage.
 
 ## Integrity boundary
 
 `archive-resources.py` verifies compressed MD5 before atomically admitting an
-object into the archive. The hot serving path does not rehash every request. If
-the archive may have changed, rerun the offline verifier before serving it.
+object into the archive. The normal serving hot path therefore does not rehash
+every object request. The preflight checks complete presence and frozen-manifest
+identity; if archive bytes may have been modified after admission, rerun the
+archive verifier rather than treating existence alone as cryptographic proof.
