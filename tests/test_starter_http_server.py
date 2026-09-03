@@ -8,7 +8,6 @@ from server import cgss_codec
 from server.http_server import create_server
 from server.minimal_profile import (
     STARTER_CARD_ID,
-    STARTER_CHARA_ID,
     STARTER_SERIAL_ID,
     STARTER_WORK_CARD_SECTION,
     build_starter_visible_load_index_data,
@@ -80,7 +79,7 @@ class StarterVisibleHTTPTests(unittest.TestCase):
                 STARTER_SERIAL_ID,
             )
             self.assertEqual(data["user_unit_list"][0]["serial_id_0"], STARTER_SERIAL_ID)
-            self.assertEqual(data["user_chara_list"][0]["chara_id"], STARTER_CHARA_ID)
+            self.assertEqual(data["user_chara_list"], [])
         finally:
             server.shutdown()
             server.server_close()
