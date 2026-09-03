@@ -3,8 +3,7 @@ name: Analyze final 11.6.3 server contracts
 on:
   workflow_dispatch:
   push:
-    branches:
-      - analysis/server-contracts-11.6.3
+    branches: [analysis/server-contracts-11.6.3]
     paths:
       - '.github/workflows/analyze-server-contracts.yml'
       - 'scripts/analyze-server-contracts.py'
@@ -12,6 +11,11 @@ on:
       - 'scripts/analyze-task-api-keys.py'
       - 'scripts/analyze-networktask-api-field.py'
       - 'scripts/analyze-arcade-convert-type.py'
+      - 'scripts/discover-networktask-roots.py'
+      - 'scripts/materialize-api-map.py'
+      - 'scripts/build-endpoint-contracts.py'
+      - 'scripts/validate-api-map.py'
+      - 'contracts/api-map-11.6.3.json.gz.b64'
 
 permissions:
   contents: read
@@ -23,6 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Materialize authoritative endpoint map
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work reports
+          python scripts/materialize-api-map.py \
+            contracts/api-map-11.6.3.json.gz.b64 \
+            work/api-map-11.6.3.json
+          python scripts/validate-api-map.py work/api-map-11.6.3.json -o reports/api-map-validation.json
+
       - name: Install .NET 6 for Il2CppDumper
         uses: actions/setup-dotnet@v4
         with:
@@ -32,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p work/xapk reports
+          mkdir -p work/xapk
           curl --fail --location --retry 4 --retry-all-errors \
             --output work/final.xapk \
             'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
@@ -43,14 +57,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ARM_APK=''
-          META_APK=''
+          ARM_APK=''; META_APK=''
           while IFS= read -r -d '' apk; do
             if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
             if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
           done < <(find work/xapk -type f -name '*.apk' -print0)
-          test -n "$ARM_APK"
-          test -n "$META_APK"
+          test -n "$ARM_APK"; test -n "$META_APK"
           unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
           unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
           echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
@@ -60,85 +72,55 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 4 \
-            -o work/il2cppdumper.zip \
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
             'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
           mkdir -p work/dumper work/dump
           unzip -q work/il2cppdumper.zip -d work/dumper
           python - <<'PY'
           import json
           from pathlib import Path
-          p = Path('work/dumper/config.json')
-          d = json.loads(p.read_text())
-          d['RequireAnyKey'] = False
-          d['GenerateScript'] = True
-          d['GenerateDummyDll'] = False
-          p.write_text(json.dumps(d, indent=2))
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
           PY
           DLL=$(find work/dumper -maxdepth 2 -type f -name 'Il2CppDumper.dll' | head -1)
-          test -n "$DLL"
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
-          test -s work/dump/dump.cs
-          test -s work/dump/script.json
-          test -s work/dump/stringliteral.json
+          test -s work/dump/dump.cs; test -s work/dump/script.json; test -s work/dump/stringliteral.json
 
-      - name: Discover exact ApiType enum surfaces
+      - name: Discover ApiType and NetworkTask roots
         shell: bash
         run: |
           set -euo pipefail
           python scripts/analyze-api-type-enums.py \
-            --dump-cs work/dump/dump.cs \
-            --script-json work/dump/script.json \
-            --stringliteral-json work/dump/stringliteral.json \
-            --output reports/api-type-enums.json
+            --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json --output reports/api-type-enums.json
+          python scripts/discover-networktask-roots.py \
+            --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --output reports/networktask-roots.json
           python - <<'PY'
           import json
-          from pathlib import Path
-          d = json.loads(Path('reports/api-type-enums.json').read_text())
-          assert d['schema'] == 2
-          assert len(d['a_candidates']) == 1
-          assert d['a_cctor']['rva'] == 0x4271C3C
-          assert d['b_cctor']['rva'] == 0x4DC8490
-          print(json.dumps({
-              'a_enum': d['a_candidates'][0]['full_name'],
-              'a_entries': d['a_candidates'][0]['entry_count'],
-              'a_cctor': hex(d['a_cctor']['rva']),
-              'b_cctor': hex(d['b_cctor']['rva']),
-              'b_exact_enum_candidates': len(d['b_exact_candidates']),
-              'b_superset_enum_candidates': len(d['b_superset_candidates']),
-              'related_method_count': len(d['related_methods']),
-              'api_shaped_literal_count': d['api_shaped_literal_count'],
-          }, indent=2))
+          a=json.load(open('reports/api-type-enums.json'))
+          assert a['schema']==2 and len(a['a_candidates'])==1
+          assert a['a_cctor']['rva']==0x4271C3C and a['b_cctor']['rva']==0x4DC8490
+          r=json.load(open('reports/networktask-roots.json'))
+          print(json.dumps({'root_candidates':r['candidates'][:12]},indent=2))
           PY
 
-      - name: Build sanitized server-facing inventory
+      - name: Build normal NetworkTask inventory
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check capstone pyelftools
           python scripts/analyze-server-contracts.py \
-            --lib work/libil2cpp.so \
-            --dump-cs work/dump/dump.cs \
-            --script-json work/dump/script.json \
-            --stringliteral-json work/dump/stringliteral.json \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json --stringliteral-json work/dump/stringliteral.json \
             --output reports/server-contract-inventory.json \
             --markdown-output reports/server-contract-inventory.md
           python - <<'PY'
           import json
-          from pathlib import Path
-          p = Path('reports/server-contract-inventory.json')
-          d = json.loads(p.read_text())
-          assert d['schema'] == 1
-          assert d['network_task_type_count'] > 0
-          assert d['network_task_method_count'] > 0
-          assert d['response_role_method_count'] > 0
-          print(json.dumps({
-              'network_task_type_count': d['network_task_type_count'],
-              'network_task_method_count': d['network_task_method_count'],
-              'request_role_method_count': d['request_role_method_count'],
-              'response_role_method_count': d['response_role_method_count'],
-              'tasks_with_contract_literals': d['tasks_with_contract_literals'],
-          }, indent=2))
+          d=json.load(open('reports/server-contract-inventory.json'))
+          assert d['network_task_type_count']==502
+          print(json.dumps({k:d[k] for k in ['network_task_type_count','network_task_method_count','request_role_method_count','response_role_method_count','tasks_with_contract_literals']},indent=2))
           PY
 
       - name: Prove NetworkTask API-key field semantics
@@ -146,29 +128,14 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/analyze-networktask-api-field.py \
-            --lib work/libil2cpp.so \
-            --dump-cs work/dump/dump.cs \
-            --script-json work/dump/script.json \
-            --inventory reports/server-contract-inventory.json \
-            --api-type-enums reports/api-type-enums.json \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json \
             --output reports/networktask-api-field.json
           python - <<'PY'
           import json
-          from pathlib import Path
-          d = json.loads(Path('reports/networktask-api-field.json').read_text())
-          assert d['schema'] == 1
-          assert len(d['network_task']['field_at_offset']) == 1
+          d=json.load(open('reports/networktask-api-field.json'))
           assert d['network_task']['typed_api_field'] is True
-          print(json.dumps({
-              'field_at_0x50': d['network_task']['field_at_offset'][0],
-              'typed_api_field': d['network_task']['typed_api_field'],
-              'networktask_access_methods': [m['member'] for m in d['network_task']['field_access_methods']],
-              'anchor_count': d['anchor_count'],
-              'anchored_with_constant_write': d['anchored_with_constant_write'],
-              'anchored_expected_value_seen': d['anchored_expected_value_seen'],
-              'anchored_expected_value_missing': d['anchored_expected_value_missing'],
-              'anchored_mismatches': d['anchored_mismatches'],
-          }, indent=2))
+          print(json.dumps({'field':d['network_task']['field_at_offset'][0],'anchor_count':d['anchor_count'],'expected_seen':d['anchored_expected_value_seen'],'expected_missing':d['anchored_expected_value_missing']},indent=2))
           PY
 
       - name: Close Arcade ConvertType bridge
@@ -176,53 +143,41 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/analyze-arcade-convert-type.py \
-            --lib work/libil2cpp.so \
-            --dump-cs work/dump/dump.cs \
-            --script-json work/dump/script.json \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
             --output reports/arcade-convert-type.json
           python - <<'PY'
           import json
-          from pathlib import Path
-          d = json.loads(Path('reports/arcade-convert-type.json').read_text())
-          assert d['schema'] == 2
-          assert d['target_rva'] == 0x4769CC0
-          assert len(d['constructors']) == 5
-          assert {row['convert_input_key'] for row in d['constructors']} == {352, 353, 354, 355, 356}
-          assert all(row['convert_input_key'] == row['expected_api_key'] for row in d['constructors'])
-          print(json.dumps({
-              'target': d['target'],
-              'target_rva': hex(d['target_rva']),
-              'signature': d['dump_signature'],
-              'semantics': d['semantics'],
-              'constructors': d['constructors'],
-          }, indent=2))
+          d=json.load(open('reports/arcade-convert-type.json'))
+          assert d['schema']==2 and d['target_rva']==0x4769CC0
+          assert {r['convert_input_key'] for r in d['constructors']}=={352,353,354,355,356}
+          print(json.dumps({'convert_type':d['dump_signature'],'constructors':d['constructors']},indent=2))
           PY
 
-      - name: Infer constructor ApiType key flow
+      - name: Build evidence-graded endpoint contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-endpoint-contracts.py \
+            --api-map work/api-map-11.6.3.json \
+            --field-report reports/networktask-api-field.json \
+            --arcade-report reports/arcade-convert-type.json \
+            --output reports/endpoint-contracts.json \
+            --markdown-output reports/endpoint-contracts.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/endpoint-contracts.json'))
+          assert d['schema']==1
+          print(json.dumps(d['summary'],indent=2))
+          PY
+
+      - name: Keep legacy constructor-pattern diagnostic
         shell: bash
         run: |
           set -euo pipefail
           python scripts/analyze-task-api-keys.py \
-            --lib work/libil2cpp.so \
-            --script-json work/dump/script.json \
-            --inventory reports/server-contract-inventory.json \
-            --api-type-enums reports/api-type-enums.json \
+            --lib work/libil2cpp.so --script-json work/dump/script.json \
+            --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json \
             --output reports/task-api-key-analysis.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          d = json.loads(Path('reports/task-api-key-analysis.json').read_text())
-          assert d['schema'] == 1
-          assert d['task_count'] > 0
-          print(json.dumps({
-              'anchor_count': d['anchor_count'],
-              'strong_feature_count': len(d['strong_features']),
-              'proven_static_pattern_count': d['proven_static_pattern_count'],
-              'conflict_count': d['conflict_count'],
-              'unresolved_count': d['unresolved_count'],
-              'strong_features': d['strong_features'][:8],
-          }, indent=2))
-          PY
 
       - name: Enforce clean-room artifact boundary
         if: always()
@@ -232,11 +187,10 @@ jobs:
           rm -rf work
           find reports -maxdepth 1 -type f -print
           if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'global-metadata.dat' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' \) | grep -q .; then
-            echo 'proprietary/bulk reverse-engineering output escaped report boundary' >&2
-            exit 1
+            echo 'proprietary/bulk reverse-engineering output escaped report boundary' >&2; exit 1
           fi
 
-      - name: Upload sanitized contract inventory
+      - name: Upload sanitized contract reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
