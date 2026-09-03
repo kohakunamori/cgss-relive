@@ -145,7 +145,7 @@ def main() -> int:
     arcade_report = json.loads(args.arcade_report.read_text(encoding="utf-8"))
     if not field_report.get("network_task", {}).get("typed_api_field"):
         raise RuntimeError("NetworkTask.type field has not been statically proven")
-    if arcade_report.get("schema") != 2:
+    if arcade_report.get("schema") not in {2, 3}:
         raise RuntimeError("Arcade ConvertType proof report schema mismatch")
 
     direct, converted_tasks = direct_bindings(field_report)
