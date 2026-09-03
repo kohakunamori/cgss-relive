@@ -21,15 +21,16 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_INS_BL, ARM64_OP_IMM
 from elftools.elf.elffile import ELFFile
 
-# CardDownloadList is overloaded. The startup call from PreDownloadList resolves
-# to the worker at 0x3EC0D70; the later 0x3ED57F4 method is only a tiny wrapper.
+# All targets are pinned to RVAs already established by the previous exact
+# specimen run. Several names are overloaded in script.json, so name-only
+# resolution is deliberately forbidden here.
 TARGET_SPECS = (
     ("Stage.Home$$CardDownloadList", 0x3EC0D70),
-    ("Stage.WorkDataUtil$$GetFavoriteUnitData", None),
-    ("Stage.PresentAllPopup$$GetAllPresentPopupItemList", None),
-    ("Stage.HomeCustomUtil$$SetBannerAssetList", None),
-    ("Stage.TempData.GenericSpPageTempData$$ExistsAnyLoginBonus", None),
-    ("Stage.DirectAndLimitedLoginBonusPopup$$GetDirectAndLimitedLoginBonusPopupAssetName", None),
+    ("Stage.WorkDataUtil$$GetFavoriteUnitData", 0x369782C),
+    ("Stage.PresentAllPopup$$GetAllPresentPopupItemList", 0x43C597C),
+    ("Stage.HomeCustomUtil$$SetBannerAssetList", 0x3EE49F0),
+    ("Stage.TempData.GenericSpPageTempData$$ExistsAnyLoginBonus", 0x363D17C),
+    ("Stage.DirectAndLimitedLoginBonusPopup$$GetDirectAndLimitedLoginBonusPopupAssetName", 0x3ED8D3C),
 )
 INITIAL_WINDOW = 0x240
 FULL_SCAN_MAX_SIZE = 0x5000
@@ -200,25 +201,21 @@ def conditional_branch_target(instruction: Any) -> int | None:
 
 def resolve_target(
     name: str,
-    requested_rva: int | None,
+    requested_rva: int,
     by_addr: dict[int, Method],
     by_name: dict[str, list[Method]],
 ) -> Method:
-    if requested_rva is not None:
-        method = by_addr.get(requested_rva)
-        if method is None:
-            raise RuntimeError(f"missing target RVA 0x{requested_rva:X} for {name}")
-        if method.name != name:
-            raise RuntimeError(
-                f"target RVA 0x{requested_rva:X} resolved to {method.name}, expected {name}"
-            )
-        return method
-    candidates = by_name.get(name, [])
-    if len(candidates) != 1:
+    method = by_addr.get(requested_rva)
+    if method is None:
+        raise RuntimeError(f"missing target RVA 0x{requested_rva:X} for {name}")
+    if method.name != name:
+        candidates = [candidate.address for candidate in by_name.get(name, [])]
+        rendered = ", ".join(f"0x{address:X}" for address in candidates) or "none"
         raise RuntimeError(
-            f"expected one method named {name}, found {len(candidates)}; pin an RVA"
+            f"target RVA 0x{requested_rva:X} resolved to {method.name}, expected {name}; "
+            f"same-name candidates: {rendered}"
         )
-    return candidates[0]
+    return method
 
 
 def guard_landings_for_state_calls(
@@ -345,7 +342,7 @@ def main() -> int:
     finally:
         view.close()
 
-    report = {"schema": 2, "target_count": len(analyses), "targets": analyses}
+    report = {"schema": 3, "target_count": len(analyses), "targets": analyses}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
