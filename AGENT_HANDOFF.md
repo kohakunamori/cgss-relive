@@ -48,6 +48,7 @@ analysis, deletes raw binaries and uploads only sanitized derived reports.
 docs/rooted-device-integration.md
 docs/load-check-11.6.3.md
 docs/load-index-11.6.3.md
+docs/load-task-param-11.6.3.md
 docs/runtime-event-analysis.md
 docs/local-resource-server.md
 docs/resource-bootstrap.md
@@ -322,6 +323,28 @@ user_chara_list = []
 
 Do not re-add it without runtime/consumer evidence.
 
+## `LoadTaskParam` — request-side, not response-side
+
+The remaining `load_state` / `next_api` ambiguity is now statically closed by the
+exact final specimen. Bounded exact run `33743831567` established:
+
+```text
+LoadTaskParam : BaseParam : PostParams
+NetworkTask.Params : PostParams @ +0x30
+LoadTaskParam.load_state @ +0x40
+LoadTaskParam.next_api   @ +0x50
+```
+
+`Stage.LoadTask.SetParameter @ 0x04877A14` constructs/initializes the parameter
+object through `Stage.BaseParam::.ctor`, writes `load_state` and `next_api` on the
+same `x20` object from local/task state, then stores that object into
+`NetworkTask.Params` at `this+0x30`.
+
+This corrects the older attempted model that treated `this+0x30` as a child-load
+site. It is a write/assignment site. These fields are outbound task/request
+parameter state and are **not** `/load/index` response requirements. Do not add
+either key to the starter response. See `docs/load-task-param-11.6.3.md`.
+
 ## `/load/index` -> Home — statically closed
 
 ```text
@@ -413,7 +436,7 @@ ADB commands.
 
 ## Runtime analyzer
 
-`scripts/analyze-runtime-events.py` schema 3. Important phases:
+`scripts/analyze-runtime-events.py` schema 4. Important phases:
 
 ```text
 resource_version_214_responded
@@ -434,8 +457,9 @@ Do not require a second `/load/check`.
 4. Run `scripts/prepare-device-tunnel.ps1 -RequireRoot`.
 5. Run `scripts/check-rooted-device.ps1`; require core `ready:true`.
 6. Launch untouched original 11.6.3.
-7. Preserve only sanitized control/resource logs and minimal relevant logcat.
-8. Analyze merged timeline.
+7. Keep raw process logcat only under private/gitignored work state; preserve
+   shareable sanitized control/resource/device JSONL.
+8. Analyze the merged timeline and inspect the actual screen state.
 
 Expected high-level progression:
 
@@ -449,7 +473,8 @@ Expected high-level progression:
 ## Remaining blockers
 
 Deterministic/static/server-side bootstrap work is now deliberately close to
-exhaustion. Decisive missing evidence is actual original-client runtime:
+exhaustion. `load_state` / `next_api` are no longer response blockers. Decisive
+missing evidence is actual original-client runtime:
 
 1. untouched 11.6.3 trusts the system-installed CA and reaches `/load/check`;
 2. native 214 produces real resource-plane traffic;
