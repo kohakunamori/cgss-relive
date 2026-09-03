@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install .NET 6 for Il2CppDumper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
       - name: Download and verify exact final XAPK
         shell: bash
         run: |
@@ -103,7 +108,7 @@ jobs:
           set -euo pipefail
           rm -rf work
           test ! -e work/final.xapk
-          find reports -type f -maxdepth 1 -print
+          find reports -maxdepth 1 -type f -print
           if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'global-metadata.dat' -o -name 'dump.cs' -o -name 'script.json' \) | grep -q .; then
             echo 'proprietary/bulk analysis output escaped report boundary' >&2
             exit 1
