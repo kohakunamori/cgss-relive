@@ -7,7 +7,8 @@ The supervisor is deliberately conservative:
 2. control and resource backends are started on loopback plain HTTP;
 3. both backend health endpoints must answer;
 4. the multi-SAN TLS mux is started on the single adb-reverse host port;
-5. both original Host routes must answer /healthz through TLS before readiness;
+5. both original Host routes must pass CA-chain + hostname/SAN TLS verification
+   and answer /healthz before readiness;
 6. any unexpected child exit tears down the whole stack.
 
 No request/body/resource identifiers are inspected by this helper. Runtime
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import socket
 import ssl
 import subprocess
 import sys
@@ -167,46 +169,60 @@ def wait_for_health(port: int, process: subprocess.Popen[bytes], *, timeout: flo
     )
 
 
+def probe_tls_route(
+    port: int,
+    original_host: str,
+    ca_cert: Path,
+    *,
+    timeout: float = 0.5,
+) -> int:
+    """Probe mux TLS using loopback TCP but original SNI/hostname semantics."""
+    context = ssl.create_default_context(cafile=str(ca_cert))
+    request = (
+        f"GET /healthz HTTP/1.1\r\n"
+        f"Host: {original_host}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii")
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as raw_socket:
+        with context.wrap_socket(raw_socket, server_hostname=original_host) as tls_socket:
+            tls_socket.settimeout(timeout)
+            tls_socket.sendall(request)
+            response = http.client.HTTPResponse(tls_socket)
+            response.begin()
+            response.read()
+            return int(response.status)
+
+
 def wait_for_tls_route(
     port: int,
     original_host: str,
+    ca_cert: Path,
     process: subprocess.Popen[bytes],
     *,
     timeout: float,
 ) -> None:
-    """Require one Host route to reach its backend through the local TLS mux.
+    """Require CA-valid TLS + SAN/SNI + Host dispatch through the local mux.
 
-    Certificate-chain verification is deliberately disabled for this *host-side*
-    readiness probe. Android system-CA/SAN trust remains a separate real-device
-    acceptance gate. This function proves only that the mux is listening, TLS
-    handshakes locally, Host dispatch works, and the selected backend is healthy.
+    This host-side check verifies that the generated leaf chains to the supplied
+    local CA and is valid for the exact original hostname. Android system-CA
+    installation remains a separate device-side acceptance gate.
     """
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
-    context = ssl._create_unverified_context()  # noqa: SLF001 - local readiness probe only
     while time.monotonic() < deadline:
         exit_code = process.poll()
         if exit_code is not None:
             raise RuntimeError(f"TLS mux exited before route check: rc={exit_code}")
-        connection = http.client.HTTPSConnection(
-            "127.0.0.1",
-            port,
-            timeout=0.5,
-            context=context,
-        )
         try:
-            connection.request("GET", "/healthz", headers={"Host": original_host})
-            response = connection.getresponse()
-            response.read()
-            if response.status == 200:
+            status = probe_tls_route(port, original_host, ca_cert, timeout=0.5)
+            if status == 200:
                 return
             last_error = RuntimeError(
-                f"TLS mux route {original_host} returned HTTP {response.status}"
+                f"TLS mux route {original_host} returned HTTP {status}"
             )
-        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+        except (OSError, ssl.SSLError, http.client.HTTPException, ValueError) as exc:
             last_error = exc
-        finally:
-            connection.close()
         time.sleep(POLL_INTERVAL_SECONDS)
     raise RuntimeError(
         f"TLS mux route check timed out for {original_host}: "
@@ -270,6 +286,12 @@ def main() -> int:
         default=repo_root / "work" / "tls" / "server.key.pem",
     )
     parser.add_argument(
+        "--ca-cert",
+        type=Path,
+        default=repo_root / "work" / "tls" / "ca.cert.pem",
+        help="local test CA used to verify mux chain and exact original-host SANs",
+    )
+    parser.add_argument(
         "--preflight-report",
         type=Path,
         default=repo_root / "work" / "resource-preflight.json",
@@ -302,6 +324,7 @@ def main() -> int:
         "manifest DB": args.manifest_db.resolve(),
         "certificate chain": args.cert.resolve(),
         "private key": args.key.resolve(),
+        "CA certificate": args.ca_cert.resolve(),
         "preflight report": args.preflight_report.resolve(),
         "control log": args.control_log.resolve(),
         "resource log": args.resource_log.resolve(),
@@ -311,6 +334,7 @@ def main() -> int:
     require_file(paths["manifest DB"], "manifest DB")
     require_file(paths["certificate chain"], "certificate chain")
     require_file(paths["private key"], "private key")
+    require_file(paths["CA certificate"], "CA certificate")
     if api_map is not None:
         require_file(api_map, "API map")
 
@@ -360,17 +384,19 @@ def main() -> int:
         wait_for_tls_route(
             args.tls_port,
             API_HOST,
+            paths["CA certificate"],
             mux[1],
             timeout=HEALTH_TIMEOUT_SECONDS,
         )
-        print(f"TLS mux route healthy: {API_HOST}")
+        print(f"TLS mux route healthy with CA/SAN verification: {API_HOST}")
         wait_for_tls_route(
             args.tls_port,
             RESOURCE_HOST,
+            paths["CA certificate"],
             mux[1],
             timeout=HEALTH_TIMEOUT_SECONDS,
         )
-        print(f"TLS mux route healthy: {RESOURCE_HOST}")
+        print(f"TLS mux route healthy with CA/SAN verification: {RESOURCE_HOST}")
 
         print(f"rooted-device stack ready: adb reverse tcp:443 -> host tcp:{args.tls_port}")
         print("press Ctrl+C to stop all local stack processes")
