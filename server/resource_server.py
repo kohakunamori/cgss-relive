@@ -1,20 +1,18 @@
 """Read-only HTTP/TLS server for a frozen CGSS resource archive.
 
-The archive itself stays content-addressed::
+The archive remains content-addressed::
 
     <root>/objects/<hh>/<md5>
 
-while the HTTP front end accepts the URL families reconstructed from the final
-Android 11.6.3 client.  Hash-addressed requests can be resolved without a
-manifest database.  Filename-addressed storage URLs require an optional local
-final manifest SQLite database; that database remains uncommitted/proprietary.
+The HTTP front end accepts URL families reconstructed from the final Android
+11.6.3 client. Filename-addressed storage URLs require an optional local final
+manifest SQLite database. Verified bootstrap manifests may be placed under
+``<root>/manifests/``.
 
-Verified bootstrap manifest files may optionally be placed under::
-
-    <root>/manifests/<filename>
-
-and are exposed as ``/dl/<version>/manifests/<filename>`` only for the configured
-frozen resource version.
+When ``--event-log`` is enabled, the server emits only sanitized resource-plane
+events. It never records a resource filename, object hash, query string, account
+identifier, or request body. Routes are reduced to categories such as
+``@resource/manifest`` and ``@resource/AssetBundles``.
 """
 from __future__ import annotations
 
@@ -27,12 +25,12 @@ from pathlib import Path
 from typing import Mapping, Type
 from urllib.parse import unquote, urlsplit
 
+from .safe_events import SafeEventLog, build_event
+
 RESOURCE_CATEGORIES = ("AssetBundles", "Sound", "Movie", "Generic")
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 _COPY_CHUNK_SIZE = 1024 * 1024
 
-# Final-client URL families reconstructed from CustomPreference/AssetHandle.
-# The path matcher is deliberately structural rather than a single CDN layout.
 _RESOURCE_PATH_RE = re.compile(
     r"^/dl/(?:(?P<version>[0-9]+)/)?(?P<resources>resources/)?"
     r"(?:(?P<quality>Low|High)/)?"
@@ -66,13 +64,6 @@ def load_manifest_name_index(path: Path) -> dict[str, str]:
 
 
 def _digest_from_tail(tail: str, manifest_index: Mapping[str, str] | None) -> str | None:
-    """Resolve a BuildURL tail to a compressed archive digest.
-
-    Final CDN forms may contain ``<prefix>/<hash>``.  Storage forms may use a
-    bare hash or a manifest filename; compressed filename forms may append
-    ``.lz4``.  Filename resolution is intentionally unavailable without a local
-    manifest index.
-    """
     parts = [unquote(part) for part in tail.split("/") if part]
     if not parts:
         return None
@@ -84,9 +75,13 @@ def _digest_from_tail(tail: str, manifest_index: Mapping[str, str] | None) -> st
     for candidate in candidates:
         if _HEX32_RE.fullmatch(candidate):
             digest = candidate.lower()
-            if len(parts) >= 2 and _HEX32_RE.fullmatch(parts[-2]) is None and re.fullmatch(r"[0-9A-Fa-f]{2}", parts[-2]):
-                if parts[-2].lower() != digest[:2]:
-                    return None
+            if (
+                len(parts) >= 2
+                and _HEX32_RE.fullmatch(parts[-2]) is None
+                and re.fullmatch(r"[0-9A-Fa-f]{2}", parts[-2])
+                and parts[-2].lower() != digest[:2]
+            ):
+                return None
             return digest
 
     if manifest_index is None:
@@ -96,6 +91,17 @@ def _digest_from_tail(tail: str, manifest_index: Mapping[str, str] | None) -> st
         if digest is not None and _HEX32_RE.fullmatch(digest):
             return digest.lower()
     return None
+
+
+def resource_event_route(request_path: str) -> str:
+    """Reduce a resource request to a non-sensitive runtime event category."""
+    path = urlsplit(request_path).path
+    if _MANIFEST_PATH_RE.fullmatch(path):
+        return "@resource/manifest"
+    match = _RESOURCE_PATH_RE.fullmatch(path)
+    if match is not None:
+        return f"@resource/{match.group('category')}"
+    return "@resource/unresolved"
 
 
 def resolve_resource_request(
@@ -115,8 +121,7 @@ def resolve_resource_request(
         name = unquote(manifest_match.group("name"))
         if name in {".", ".."} or "/" in name or "\\" in name:
             return None
-        candidate = root / "manifests" / name
-        return candidate, None
+        return root / "manifests" / name, None
 
     match = _RESOURCE_PATH_RE.fullmatch(path)
     if match is None:
@@ -125,15 +130,10 @@ def resolve_resource_request(
     uses_resources = match.group("resources") is not None
     category = match.group("category")
 
-    # Versioned regular forms must match the frozen archive.  The final client's
-    # Movie and hush/resource forms intentionally omit a version segment.
     if request_version is not None and request_version != str(version):
         return None
     if request_version is None and not uses_resources:
         return None
-
-    # Statistically impossible combinations are rejected rather than silently
-    # broadening the server into an arbitrary file oracle.
     if category == "Movie" and request_version is not None:
         return None
 
@@ -180,14 +180,23 @@ def make_handler(
     *,
     version: str = "10133800",
     manifest_index: Mapping[str, str] | None = None,
+    event_log: SafeEventLog | None = None,
 ) -> Type[BaseHTTPRequestHandler]:
     archive_root = Path(root)
     frozen_version = str(version)
     name_index = dict(manifest_index or {})
+    sanitized_event_log = event_log
 
     class CGSSResourceHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive-resource/0.2"
+        server_version = "cgss-relive-resource/0.3"
         protocol_version = "HTTP/1.1"
+
+        def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+            if sanitized_event_log is not None and isinstance(code, int):
+                sanitized_event_log.append(
+                    build_event(route=resource_event_route(self.path), status=code)
+                )
+            super().log_request(code, size)
 
         def _send_plain(self, status: int, body: bytes) -> None:
             self.send_response(status)
@@ -283,10 +292,16 @@ def create_server(
     root: Path,
     version: str = "10133800",
     manifest_index: Mapping[str, str] | None = None,
+    event_log: SafeEventLog | None = None,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
         (host, port),
-        make_handler(Path(root), version=version, manifest_index=manifest_index),
+        make_handler(
+            Path(root),
+            version=version,
+            manifest_index=manifest_index,
+            event_log=event_log,
+        ),
     )
     server.daemon_threads = True
     return server
@@ -308,6 +323,11 @@ def main() -> int:
         type=Path,
         help="optional final manifest SQLite DB for filename-addressed storages URLs; keep it uncommitted",
     )
+    parser.add_argument(
+        "--event-log",
+        type=Path,
+        help="optional sanitized JSONL log; records only resource category and HTTP status",
+    )
     parser.add_argument("--cert", help="PEM certificate chain for HTTPS")
     parser.add_argument("--key", help="PEM private key for HTTPS")
     args = parser.parse_args()
@@ -321,12 +341,14 @@ def main() -> int:
         except (OSError, sqlite3.Error, ValueError) as exc:
             parser.error(f"failed to load --manifest-db: {exc}")
 
+    event_log = SafeEventLog(args.event_log) if args.event_log else None
     httpd = create_server(
         args.host,
         args.port,
         root=args.root,
         version=args.version,
         manifest_index=manifest_index,
+        event_log=event_log,
     )
     scheme = "http"
     if args.cert and args.key:
@@ -341,6 +363,8 @@ def main() -> int:
     print(f"frozen resource version: {args.version}")
     if args.manifest_db:
         print(f"filename index: {args.manifest_db}")
+    if args.event_log:
+        print(f"sanitized event log: {args.event_log}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
