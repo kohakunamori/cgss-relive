@@ -19,6 +19,7 @@ EXPECTED_MANIFEST_ROWS = 220837
 EXPECTED_UNIQUE_HASHES = 220803
 WIRE_MANIFESTS = ("all_dbmanifest", "Android_AHigh_SHigh")
 ANDROID_MANIFEST_NAME = "Android_AHigh_SHigh"
+MASTER_MANIFEST_NAME = "master.mdb"
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
 
@@ -37,6 +38,15 @@ def inspect_manifest(path: Path) -> tuple[list[str], int, list[str]]:
         row_count = int(connection.execute("SELECT COUNT(*) FROM manifests").fetchone()[0])
         hashes = [str(row[0]).lower() for row in connection.execute("SELECT DISTINCT hash FROM manifests")]
     return quick_check, row_count, hashes
+
+
+def read_manifest_hash(path: Path, name: str) -> str | None:
+    with open_manifest_readonly(path) as connection:
+        row = connection.execute(
+            "SELECT hash FROM manifests WHERE name = ? LIMIT 1",
+            (name,),
+        ).fetchone()
+    return str(row[0]).lower() if row else None
 
 
 def validate_hash(value: str) -> bool:
@@ -112,8 +122,8 @@ def cgss_lz4_decompress(raw: bytes) -> bytes:
     return bytes(out)
 
 
-def sha256_file(path: Path) -> bytes:
-    digest = hashlib.sha256()
+def hash_file(path: Path, algorithm: str) -> bytes:
+    digest = hashlib.new(algorithm)
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
@@ -165,7 +175,7 @@ def verify_wire_manifest_chain(wire_dir: Path, manifest_db: Path) -> tuple[dict[
     status["decoded_is_sqlite"] = True
 
     try:
-        matches = hashlib.sha256(decoded).digest() == sha256_file(manifest_db)
+        matches = hashlib.sha256(decoded).digest() == hash_file(manifest_db, "sha256")
     except OSError:
         failures.append("manifest_db_unreadable")
         return status, failures
@@ -176,11 +186,49 @@ def verify_wire_manifest_chain(wire_dir: Path, manifest_db: Path) -> tuple[dict[
     return status, failures
 
 
+def verify_master_object(root: Path, manifest_db: Path) -> tuple[dict[str, bool], list[str]]:
+    status = {
+        "manifest_entry_present": False,
+        "object_present": False,
+        "md5_matches_manifest": False,
+    }
+    failures: list[str] = []
+    if not manifest_db.is_file():
+        return status, failures
+
+    try:
+        digest = read_manifest_hash(manifest_db, MASTER_MANIFEST_NAME)
+    except (sqlite3.Error, OSError):
+        failures.append("manifest_db_unreadable")
+        return status, failures
+    if digest is None or not validate_hash(digest):
+        failures.append("master_manifest_entry_invalid")
+        return status, failures
+    status["manifest_entry_present"] = True
+
+    path = root / "objects" / digest[:2] / digest
+    if not path.is_file():
+        failures.append("master_object_missing")
+        return status, failures
+    status["object_present"] = True
+
+    try:
+        matches = hash_file(path, "md5").hex() == digest
+    except OSError:
+        failures.append("master_object_unreadable")
+        return status, failures
+    if not matches:
+        failures.append("master_object_md5_mismatch")
+        return status, failures
+    status["md5_matches_manifest"] = True
+    return status, failures
+
+
 def run_preflight(root: Path, manifest_db: Path, *, version: str) -> dict[str, object]:
     root = root.resolve()
     manifest_db = manifest_db.resolve()
     report: dict[str, object] = {
-        "schema": 2,
+        "schema": 3,
         "resource_version": str(version),
         "expected": {
             "manifest_rows": EXPECTED_MANIFEST_ROWS,
@@ -265,6 +313,10 @@ def run_preflight(root: Path, manifest_db: Path, *, version: str) -> dict[str, o
         failures.append("resource_objects_zero_length")
     if hashes and present_objects != len(hashes):
         failures.append("resource_object_count_mismatch")
+
+    master_status, master_failures = verify_master_object(root, manifest_db)
+    report["master_object"] = master_status
+    failures.extend(master_failures)
 
     report["failures"] = sorted(set(failures))
     report["ready"] = not failures
