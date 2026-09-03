@@ -1,123 +1,126 @@
 # Rooted Android integration for the final CGSS 11.6.3 client
 
 This is the real-client acceptance procedure for the untouched final Android
-11.6.3 build. It preserves the original hostname/HTTPS behavior and uses a rooted
-test device only for reversible DNS/hosts and system-CA integration.
+11.6.3 build. It preserves original hostnames/HTTPS and uses a rooted test device
+only for reversible DNS/hosts and system-CA integration.
 
-## Static facts that now drive the test
+## Static facts that drive the test
 
-For the final 11.6.3 IL2CPP specimen:
+For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 
 - API traffic uses `UnityWebRequest`;
-- no managed `CertificateHandler` subclass or `ValidateCertificate` override was
-  found;
-- no managed/Java certificate-pinning implementation is wired into the API path;
-- the manifest has no `networkSecurityConfig` and targets modern Android, so a
-  user CA alone is not a reliable trust path;
+- no managed `CertificateHandler` subclass / `ValidateCertificate` override is
+  proven on the API path;
+- no managed/Java pinning implementation is wired into the proven API path;
+- targetSdk is modern, so a user CA alone is not a reliable trust path;
 - `Stage.LoadTask.Parse` is RVA `0x04850a94`;
-- successful `/load/index` parsing flows through
-  `BootMain.CallbackOnSuccessLoad -> LastInitialized -> ChangeView(6|7)` toward
-  the Home view;
-- `/load/title` is a user-driven TitleTask and is **not** a proven prerequisite
-  for entering Home;
-- result code 214 persists `required_res_ver` but does **not** automatically
-  resend `/load/check` inside the same network task;
-- successful `VersionCheckTask.Parse` consumes `data.isS3`; the preservation
-  server fixes it to `false`, selecting the `storages.game.starlight-stage.jp`
-  URL family.
+- result code 214 persists `required_res_ver=10133800` into Savedata `RES_VER` and
+  does **not** automatically resend `/load/check` in the same network coroutine;
+- the parent coroutine continuation is now closed: after setup becomes ready,
+  `ResourcesManager.GameInitialize` resumes into
+  `AssetManager.InitializeManifest -> DownloadOrLoadForInitialize` before
+  BootMain reaches `/load/index`;
+- final `StageSceneDefine.eViewId` maps `Home=6`, `Login_Bonus=7`,
+  `Asset_Download=8`;
+- successful `/load/index` parsing reaches `BootMain.ChangeView`, which selects
+  `Home(6)` when no login bonus exists and `Login_Bonus(7)` otherwise;
+- `/load/title` is a Title/user-driven branch, not a hard Home prerequisite;
+- `data.isS3=false` selects `storages.game.starlight-stage.jp`.
 
-The remaining uncertainty is runtime state-machine behavior between version
-checking/resource initialization and BootMain, not response cryptography.
+The remaining decisive uncertainty is original-client runtime acceptance of the
+local TLS/resource stack and synthetic starter-visible `/load/index` state.
 
-## 1. Install server dependencies
-
-From the repository root:
+## 1. Install dependencies
 
 ```powershell
 python -m pip install -r .\server\requirements.txt
 ```
 
-## 2. Generate disposable API TLS material
+## 2. Generate disposable TLS material
 
 ```powershell
 python .\scripts\make-test-tls-cert.py
 ```
 
-Default output is under gitignored `work/tls/`:
+Default output is under gitignored `work/tls/`.
 
-```text
-work/tls/ca.cert.pem
-work/tls/ca.key.pem
-work/tls/server.cert.pem
-work/tls/server.key.pem
-work/tls/server.chain.pem
-```
-
-The API certificate must contain a SAN for:
+The control certificate needs SAN:
 
 ```text
 apis.game.starlight-stage.jp
 ```
 
+The resource certificate needs SAN:
+
+```text
+storages.game.starlight-stage.jp
+```
+
+A single certificate may cover both only if both SANs are actually present.
 Never commit private keys.
 
 ## 3. Trust the CA as a system CA
 
 Use the rooted device/root manager's supported system-CA mechanism. Android
-14+/Conscrypt/APEX layouts differ across Magisk, KernelSU and ROMs, so the
-repository intentionally does not automate this mutation.
+14+/Conscrypt/APEX layouts differ across Magisk, KernelSU and ROMs, so this repo
+does not automate the system mutation.
 
-The acceptance condition is that the CGSS app process trusts the CA through the
-system trust domain. Merely seeing the certificate in the user-certificate UI is
-not sufficient.
+Acceptance condition: the CGSS process trusts the disposable CA through the
+system trust domain. Merely installing it as a user certificate is insufficient.
 
-## 4. Redirect the control hostname
+## 4. Redirect both original hostnames for the native run
 
-For the first control-path test, make this hosts mapping effective on the device:
+For the primary native-214 test, make these mappings effective on device:
 
 ```text
 127.0.0.1 apis.game.starlight-stage.jp
+127.0.0.1 storages.game.starlight-stage.jp
 ```
 
-Use a reversible/systemless hosts mechanism. Keep the original hostname so Host,
-TLS SNI and certificate SAN still match production semantics.
+Keep the original names so Host, TLS SNI and SAN semantics remain intact.
 
-Do **not** redirect a resource hostname for the direct-success differential. Add
-resource redirection only when exercising the real 214/resource-update path.
+For the diagnostic `--accept-old-resource-version` run, the resource redirect may
+be omitted if the purpose is strictly to test whether bypassing the native 214
+branch reaches BootMain sooner.
 
-## 5. Bridge device TCP 443 to the host
+## 5. Bridge device ports to host servers
+
+The existing helper prepares the API 443 reverse to host 8443:
 
 ```powershell
 .\scripts\prepare-device-tunnel.ps1 -HostPort 8443 -RequireRoot
 ```
 
-For a specific ADB target:
-
-```powershell
-.\scripts\prepare-device-tunnel.ps1 -Serial <serial> -HostPort 8443 -RequireRoot
-```
-
 Conceptually:
 
 ```text
-CGSS -> https://apis.game.starlight-stage.jp:443
-          device hosts -> 127.0.0.1
-          adb reverse tcp:443 -> tcp:8443
-          host cgss-relive TLS server
+CGSS https://apis.game.starlight-stage.jp:443
+  -> device 127.0.0.1:443
+  -> adb reverse
+  -> host API TLS server :8443
 ```
 
-Remove the mapping with:
+The resource hostname also uses HTTPS 443. If both hostnames resolve to the same
+device loopback address, a single device port cannot distinguish SNI targets by
+TCP port. Use one of these integration layouts:
+
+1. preferred: a local TLS/SNI reverse proxy on host/device-facing 443 that routes
+   `apis.game...` to API :8443 and `storages.game...` to resource :8444;
+2. use distinct loopback aliases/IPs plus root iptables/nft redirects per target;
+3. run a unified front proxy that terminates a certificate covering both SANs and
+   dispatches by SNI/Host.
+
+Do not attempt to bind two independent `adb reverse tcp:443` mappings at once.
+
+Remove the API helper mapping with:
 
 ```powershell
 .\scripts\prepare-device-tunnel.ps1 -Remove
 ```
 
-## 6. Start with the starter-visible `/load/index` profile
+## 6. Start the control server with starter-visible state
 
-The first real-client run should use the one-card starter-visible profile, not the
-old strict-minimal profile. The final parser proves that a non-empty unit element
-needs `unit_slot` + `name` in its first pass and `unit_id` + `name` in a later
-pass; the builder/validator now reflects that contract.
+Use starter-visible first:
 
 ```powershell
 python -m server.http_server `
@@ -128,85 +131,20 @@ python -m server.http_server `
   --experimental-starter-load-index `
   --viewer-id 1 `
   --producer-name "Relive Producer" `
-  --event-log .\work\runtime-starter.jsonl `
+  --event-log .\work\runtime-starter-control.jsonl `
   --api-map .\work\final_map.json
 ```
 
-`--api-map` is optional. When present it is used only to annotate sanitized
-unknown-route events with the validated final endpoint identity; it does not
-invent responses.
+`--api-map` only annotates sanitized unknown-route events; it never invents a
+response.
 
-Implemented bootstrap/control routes currently include:
+The event log excludes UDID, SID, USER-ID, PARAM, viewer-id values and decoded
+request/response values.
 
-```text
-POST /load/check
-POST /load/title
-POST /load/index
-POST /load/set_cache_clear_flg
-POST /load/update_agreement_status
-GET  /healthz
-```
+## 7. Start the frozen resource server before launching native mode
 
-The event log deliberately excludes UDID, SID, USER-ID, PARAM, viewer-id values
-and decoded request/response values. It records only safe headers, route/status,
-key shapes, result-code/resource-version summaries and endpoint candidates.
-
-## 7. Two `/load/check` experiments
-
-The two modes answer different questions and must not be conflated.
-
-### A. Native resource-version negotiation (default)
-
-With incoming `RES-VER: 10133000`, the server returns:
-
-```text
-result_code = 214
-required_res_ver = 10133800
-```
-
-Final-client static analysis proves that 214 is a skip/allowed business code at
-the network layer, `required_res_ver` is persisted into Savedata `RES_VER`, and
-there is **no automatic resend inside the same d48 request coroutine**. A later
-request or resource update belongs to a higher-level state machine.
-
-Use this mode when testing the complete frozen-resource path.
-
-### B. Diagnostic direct success
-
-To distinguish the 214/resource-update path from a later BootMain blocker:
-
-```powershell
-python -m server.http_server `
-  --host 127.0.0.1 `
-  --port 8443 `
-  --cert .\work\tls\server.chain.pem `
-  --key .\work\tls\server.key.pem `
-  --accept-old-resource-version `
-  --experimental-starter-load-index `
-  --event-log .\work\runtime-direct.jsonl
-```
-
-For incoming `10133000`, this returns `result_code=1` while still supplying
-`required_res_ver=10133800`. This is a controlled differential only: it bypasses
-the native 214 gate but does not prove that every local resource prerequisite is
-satisfied.
-
-Both modes return `data.isS3=false` when the load-check data object is parsed.
-
-## 8. Resource-host integration for the native 214 path
-
-Static analysis reconstructs the default resource host as:
-
-```text
-storages.game.starlight-stage.jp
-```
-
-when `isS3=false`. The Akamai host is the `isS3=true` branch and has different
-hash-prefix behavior.
-
-Prepare the local resource server as documented in
-`docs/local-resource-server.md`. A full filename-addressed storages run should
-supply the local final manifest database:
+Do **not** wait for a second `/load/check`. The static parent continuation says
+resource initialization is the expected next stage after the native 214.
 
 ```powershell
 python -m server.resource_server `
@@ -216,124 +154,168 @@ python -m server.resource_server `
   --root .\resource-cache\10133800 `
   --manifest-db .\work\resources\manifest_10133800.db `
   --cert .\work\tls\resource.chain.pem `
-  --key .\work\tls\resource.key.pem
+  --key .\work\tls\resource.key.pem `
+  --event-log .\work\runtime-starter-resource.jsonl
 ```
 
-The resource certificate needs a SAN for the resource hostname. The API
-certificate cannot simply be reused unless it was generated with both SANs.
+The resource event log contains only category/status evidence:
 
-If the client needs the initial resource wire manifests, place verified local
-copies under:
+```text
+@resource/manifest
+@resource/AssetBundles
+@resource/Sound
+@resource/Movie
+@resource/Generic
+@resource/unresolved
+```
+
+It never contains resource filenames, hashes or query strings. `/healthz` is
+explicitly excluded from runtime evidence.
+
+Place verified local bootstrap wire manifests, when required, under:
 
 ```text
 resource-cache/10133800/manifests/all_dbmanifest
 resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-No proprietary manifest/database/resource file is committed.
+No proprietary manifest/database/resource body belongs in Git.
 
-## 9. Analyze the sanitized run
+## 8. Native `/load/check` behavior — primary experiment
+
+Incoming final-binary default:
+
+```text
+RES-VER: 10133000
+```
+
+Default local response:
+
+```text
+result_code = 214
+required_res_ver = 10133800
+data.isS3 = false
+```
+
+Expected static continuation:
+
+```text
+/load/check 214
+-> Savedata RES_VER=10133800
+-> SetupNetwork finishes
+-> GameInitialize resumes
+-> InitializeManifest
+-> DownloadOrLoadForInitialize
+-> resource request(s)
+-> GameInitialize completes
+-> BootMain.StartConnect
+-> /load/index
+-> Stage.LoadTask.Parse
+-> Home(6) or Login_Bonus(7)
+```
+
+A second `/load/check` may occur for some independent reason, but it is not a
+required link and must not be used as the acceptance criterion for 214.
+
+## 9. Diagnostic direct-success differential
+
+Only if native mode stalls before useful resource evidence, compare:
+
+```powershell
+python -m server.http_server `
+  --host 127.0.0.1 `
+  --port 8443 `
+  --cert .\work\tls\server.chain.pem `
+  --key .\work\tls\server.key.pem `
+  --accept-old-resource-version `
+  --experimental-starter-load-index `
+  --viewer-id 1 `
+  --producer-name "Relive Producer" `
+  --event-log .\work\runtime-direct-control.jsonl
+```
+
+This returns success to old 10133000 while still supplying
+`required_res_ver=10133800`. It is a diagnostic branch, not the native protocol
+model.
+
+## 10. Analyze the run
+
+The runtime analyzer schema is 3 and understands sanitized resource routes.
+When control/resource logs are combined into one time-ordered timeline, the key
+phases are:
+
+```text
+resource_version_214_responded
+resource_plane_observed
+resource_plane_served
+load_index_reached
+post_load_index_observed
+```
+
+Until the analyzer's merge mode is available, either write both sanitized
+servers to one dedicated runtime JSONL on a filesystem where append semantics are
+reliable, or analyze the two logs separately and use their timestamps to order
+evidence. Do not concatenate unsanitized web-server logs.
+
+Typical single-log command:
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
   starter=.\work\runtime-starter.jsonl
 ```
 
-If the starter-visible run fails after `/load/index`, use empty/strict profiles
-only as controlled differentials rather than as the default first attempt.
-
-For example:
-
-```powershell
-python .\scripts\analyze-runtime-events.py `
-  starter=.\work\runtime-starter.jsonl `
-  empty=.\work\runtime-empty.jsonl `
-  strict=.\work\runtime-strict.jsonl
-```
+If starter-visible reaches `/load/index` but then fails, use empty/strict profiles
+only as controlled differentials.
 
 ## Acceptance questions, in order
 
-The first real run should answer these questions without overclaiming:
+1. Does TLS complete and does `/load/check` reach the control server?
+2. After native 214, does any `@resource/*` request appear?
+3. Are resource requests served successfully, or what sanitized category first
+   returns 404/416?
+4. Does the client subsequently reach `/load/index`?
+5. Does the starter-visible `/load/index` response lead to a later client action?
+6. Does the device visibly render Home or Login Bonus followed by Home?
+7. What is the first unsupported post-Home endpoint or local-state dependency?
 
-1. Does TLS complete and does `/load/check` reach the server?
-2. In native mode, after the server returns 214, what is the **next observed
-   client action**: resource URL, process/view transition, later `/load/check`, or
-   error?
-3. Does any later control request carry `RES-VER: 10133800`?
-4. In direct-success mode, does the client proceed farther than native mode?
-5. Does BootMain reach `/load/index`?
-6. Does `/load/index` return success and is a later client action observed?
-7. Does `ChangeView(6|7)` produce the visible Home/login-bonus flow on device?
-8. What is the first unsupported route or local-state/content blocker after that?
-
-A server-side `result_code=1` event alone proves only that the server returned a
-success response. It does **not** prove client acceptance. Client acceptance needs
-a later observable client action.
-
-## Current static mainline
-
-The currently closed portion is:
-
-```text
-ResourcesManager.GameInitialize
-  -> BootNetwork.SetupNetwork
-  -> SetupNetworkCoroutine
-  -> Certification.Login
-  -> /load/check (existing viewer)
-  -> [higher-level resource/view state transition still not closed]
-  -> BootMain.FinishLoad
-  -> BootMain.Initialize
-  -> asset predownload/verify
-  -> BootMain.StartConnect
-  -> /load/index
-  -> Stage.LoadTask.Parse
-  -> Parse == 1
-  -> BootMain.CallbackOnSuccessLoad
-  -> LastInitialized
-  -> BootMain.ChangeView
-  -> SceneManager.ChangeView(6|7)
-  -> Home semantics (view enum mapping still needs runtime/static closure)
-```
-
-`/load/title` belongs to the Title user-interaction branch and should not be
-inserted into this mainline merely because the endpoint exists.
+Static mapping `Home=6` / `Login_Bonus=7` is already confirmed. The runtime test
+is validating that the local stack reaches/renders those views, not rediscovering
+what the numeric IDs mean.
 
 ## Failure classification
 
-### No server request
+### No control request
 
-Check hostname resolution, ADB reverse, IPv6 and whether the client selected a
-different hostname.
+Check hostname resolution, IPv6, reverse/proxy routing and app process network
+reachability.
 
 ### TLS error before HTTP
 
-Check that the CA is visible as a system root, certificate dates/SAN are correct,
-and SNI/Host remain the original hostname. Do not patch the APK before collecting
-the exact failure.
+Check system-root visibility, certificate dates/SAN, SNI and original Host. Do not
+patch the APK before collecting the exact failure.
 
-### 214 returned and nothing else is observed
+### 214 returned, no resource event
 
-Do not call this a failed `/load/check` parse. Static analysis says 214 can update
-Savedata without an in-coroutine retry. Compare with direct-success mode and, if
-needed, redirect/serve the storages resource hostname to observe the higher-level
-resource state machine.
+This is now a narrow blocker. The static continuation says setup should finish and
+`GameInitialize` should enter `InitializeManifest`. Check resource-host routing,
+TLS/SNI for `storages.game...`, local Savedata transition and logcat. Compare the
+direct-success differential only after those are checked.
 
-### Resource request returns 404
+### `@resource/unresolved` or resource 404
 
-Record the exact path. The local resource server now supports the statically
-reconstructed URL families; a 404 should mean a missing manifest index entry,
-missing local object/wire manifest, unsupported builder shape, or wrong frozen
-version rather than the old single-template assumption.
+The client reached the resource plane. Investigate URL-builder coverage,
+manifest-name resolution, local object/wire-manifest presence and frozen version.
+The sanitized JSONL intentionally does not reveal the raw path; use a local
+private/debug capture only when necessary and never commit it.
 
-### `/load/index` arrives and then the client stalls/errors
+### `/load/index` arrives, then stall/error
 
-Do not add hundreds of optional fields. `LoadTask.Parse` is highly guard-driven
-and can silently truncate if a provided structure omits a hard child. First
-compare the sanitized sequence and starter/empty/strict differential, then adjust
-only a statically or runtime-proven dependency.
+Do not add hundreds of optional fields. `LoadTask.Parse` is guard-heavy; a
+provided parent can make child reads hard. Compare starter/empty/strict only after
+identifying the first real blocker.
 
-### Known final endpoint returns 404
+### Known final endpoint returns 404 after Home
 
-Use the `api_candidates` annotation to select that endpoint's exact final-client
-Task/Parse path. Do not return an arbitrary empty success unless its parser proves
-that shape safe.
+Use `api_candidates` to identify its final Task/Parse implementation and restore
+only the parser-safe minimum shape. Never return arbitrary empty success merely
+because an endpoint name is known.
