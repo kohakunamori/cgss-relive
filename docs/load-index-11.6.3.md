@@ -84,11 +84,33 @@ The actual date key is `birth`; `birthday` and `last_login` are not keys in the
 analyzed final parser. `leader_serial_id`, emblem/support serial fields and
 similar tail state are guarded.
 
+### Completed tutorial semantics — statically closed
+
 `BaseTask.setupTutorial` at RVA `0x0476e1e4` receives the decoded
-`tutorial_flag`. The exact completed/non-newbie value is being independently
-closed by the bounded `scripts/analyze-tutorial-flag.py` pass; until that report
-is applied, the current numeric starter value must not be treated as proven merely
-because parsing reaches this call.
+`tutorial_flag`. Bounded exact-specimen ARM64 analysis closes the previously
+uncertain value:
+
+```text
+server tutorial_flag = 100
+client completed local TutorialData.step = 1000
+```
+
+The method preserves the decoded flag in a working register. If the existing
+local TutorialData step is already `1000`, the logic normalizes the working flag
+to `100`. When the working flag is `100`, the method calls the TutorialData step
+setter with `1000` and then saves local tutorial state.
+
+Therefore `tutorial_flag=100` is the statically justified completed/non-newbie
+synthetic value. The server constants are:
+
+```text
+COMPLETED_TUTORIAL_FLAG       = 100
+COMPLETED_TUTORIAL_LOCAL_STEP = 1000
+```
+
+The Home/starter validators reject a different synthetic tutorial flag. Do not
+replace the wire value with `1000`; `1000` is the client-side persisted completed
+step, not the response flag.
 
 ## Correct card-state split
 
@@ -246,7 +268,7 @@ above.
 
 ## Character and leader state
 
-The synthetic character row remains:
+The synthetic character row currently remains:
 
 ```json
 {"chara_id": 101, "fan": 0}
@@ -254,6 +276,12 @@ The synthetic character row remains:
 
 and guarded `user_info.leader_serial_id=1` is supplied for the initial leader.
 These are synthetic local state; no captured account payload is copied.
+
+Unlike the WorkCardData and unit chains, the current accumulated static report
+does not yet contain a closed `user_chara_list` parser/consumer proof. An exact
+single-literal/xref pass is therefore being used to decide whether this row is
+actually necessary or should be removed from the starter profile. Do not treat
+its current presence as a proven requirement.
 
 ## Optional feature sections and Home banner data
 
@@ -305,12 +333,14 @@ python -m server.http_server --experimental-home-load-index
 
 `build_starter_visible_load_index_data()` adds:
 
+- completed `tutorial_flag=100` semantics proven by `BaseTask.setupTutorial`;
 - `cs_gacha_data_cenere[0]` with serial `1`, final-master card `100001`, and all
   seven hard WorkCardData fields;
 - keeps `user_card_list=[]`;
 - one unit with `unit_slot=1`, `unit_id=1`, name and five serial slots, with
   `serial_id_0=1`;
-- one `user_chara_list` row for `chara_id=101`;
+- currently one `user_chara_list` row for `chara_id=101`, pending exact necessity
+  closure;
 - guarded `leader_serial_id=1`.
 
 ```powershell
@@ -384,6 +414,8 @@ Statically proven/strongly closed for final 11.6.3:
 
 - hard `data/common_define` prefix and seven direct integers;
 - established-account `user_info` scalar set once that path is entered;
+- `tutorial_flag=100` maps through `BaseTask.setupTutorial` to persisted completed
+  local tutorial step `1000`;
 - card WorkData creation belongs to `cs_gacha_data_cenere`, not the ambiguous
   `user_card_list` merge block;
 - Home's card predownload path immediately resolves unit serial through
@@ -398,7 +430,7 @@ Statically proven/strongly closed for final 11.6.3:
 
 Still pending or being closed:
 
-- exact `tutorial_flag` value/condition for the established-account path;
+- exact necessity/shape of synthetic `user_chara_list`;
 - original-client acceptance of the corrected synthetic starter profile;
 - visible Home rendering with the local TLS/resource stack;
 - first unsupported endpoint/local-state blocker after Home.
