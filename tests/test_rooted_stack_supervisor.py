@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run-rooted-local-sta
 SPEC = importlib.util.spec_from_file_location("run_rooted_local_stack", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 stack = importlib.util.module_from_spec(SPEC)
+# dataclasses resolves postponed annotations through sys.modules on Python 3.12.
+sys.modules[SPEC.name] = stack
 SPEC.loader.exec_module(stack)
 
 
