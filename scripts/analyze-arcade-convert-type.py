@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Recover the targeted ArcadePhaseBaseTask.ConvertType bridge.
 
-The five Arcade phase tasks are the only exact-name anchors whose constructors
-first write ApiType.Load (11), then pass their real ApiType key to ConvertType and
-store its return value back into NetworkTask.type. This bounded pass records only
-that bridge function and the five constructor call sites.
+The nine Lab/Arcade phase task constructors are special: they may initialize
+``NetworkTask.type`` to ApiType.Load (11), then pass their real Lab ApiType key to
+``ArcadePhaseBaseTask.ConvertType`` and store its return value back into the typed
+field.  The conversion can select the corresponding Garden endpoint at runtime.
+
+This bounded pass records only the bridge function and the nine constructor call
+sites.  It proves the normal Lab input key for each task; it does *not* infer the
+Garden alternate mapping from names alone.
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ from capstone.arm64 import (
 )
 from elftools.elf.elffile import ELFFile
 
-SCHEMA = 2
+SCHEMA = 3
 TARGET = "Stage.ArcadePhaseBaseTask$$ConvertType"
 TASKS = {
     "Stage.ArcadeRoundStartPhaseTask": 352,
@@ -35,6 +39,10 @@ TASKS = {
     "Stage.ArcadeCharaDeployPhaseTask": 354,
     "Stage.ArcadeSkillAtBuyingPhaseTask": 355,
     "Stage.ArcadeTradableCharaReloadPhaseTask": 356,
+    "Stage.ArcadeEditLoaderTask": 357,
+    "Stage.ArcadeSaveDeckTask": 358,
+    "Stage.LabDiscardResumeTask": 359,
+    "Stage.LabPreResumeTask": 360,
 }
 MAX_FUNCTION_SIZE = 0x1000
 MAX_INSNS = 256
@@ -255,9 +263,9 @@ def main() -> int:
         "target_rva": target.address,
         "dump_signature": find_dump_signature(args.dump_cs, target.address),
         "semantics": (
-            "each exceptional Arcade task passes its exact normal A-group ApiType key "
-            "as ConvertType(aprilFoolType); ConvertType may return that key or a context-"
-            "converted key, and the return value is stored into NetworkTask.type"
+            "each exceptional Lab/Arcade task passes its exact normal A-group ApiType key "
+            "as ConvertType(aprilFoolType); the returned key is then stored into "
+            "NetworkTask.type and may be context-converted to a Garden endpoint"
         ),
         "instructions": target_insns,
         "constructors": constructors,
