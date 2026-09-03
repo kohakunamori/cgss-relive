@@ -5,9 +5,10 @@ The supervisor is deliberately conservative:
 
 1. final 10133800 local resources must pass the sanitized preflight;
 2. control and resource backends are started on loopback plain HTTP;
-3. both health endpoints must answer before TLS is exposed;
-4. the multi-SAN TLS mux is then started on the single adb-reverse host port;
-5. any unexpected child exit tears down the whole stack.
+3. both backend health endpoints must answer;
+4. the multi-SAN TLS mux is started on the single adb-reverse host port;
+5. both original Host routes must answer /healthz through TLS before readiness;
+6. any unexpected child exit tears down the whole stack.
 
 No request/body/resource identifiers are inspected by this helper. Runtime
 evidence remains in the two backend sanitized JSONL logs.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ssl
 import subprocess
 import sys
 import time
@@ -25,6 +27,8 @@ from typing import Sequence
 
 
 FINAL_RESOURCE_VERSION = "10133800"
+API_HOST = "apis.game.starlight-stage.jp"
+RESOURCE_HOST = "storages.game.starlight-stage.jp"
 DEFAULT_API_PORT = 8080
 DEFAULT_RESOURCE_PORT = 8081
 DEFAULT_TLS_PORT = 8445
@@ -157,7 +161,57 @@ def wait_for_health(port: int, process: subprocess.Popen[bytes], *, timeout: flo
         finally:
             connection.close()
         time.sleep(POLL_INTERVAL_SECONDS)
-    raise RuntimeError(f"health check timed out on 127.0.0.1:{port}: {type(last_error).__name__ if last_error else 'unknown'}")
+    raise RuntimeError(
+        f"health check timed out on 127.0.0.1:{port}: "
+        f"{type(last_error).__name__ if last_error else 'unknown'}"
+    )
+
+
+def wait_for_tls_route(
+    port: int,
+    original_host: str,
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+) -> None:
+    """Require one Host route to reach its backend through the local TLS mux.
+
+    Certificate-chain verification is deliberately disabled for this *host-side*
+    readiness probe. Android system-CA/SAN trust remains a separate real-device
+    acceptance gate. This function proves only that the mux is listening, TLS
+    handshakes locally, Host dispatch works, and the selected backend is healthy.
+    """
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    context = ssl._create_unverified_context()  # noqa: SLF001 - local readiness probe only
+    while time.monotonic() < deadline:
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"TLS mux exited before route check: rc={exit_code}")
+        connection = http.client.HTTPSConnection(
+            "127.0.0.1",
+            port,
+            timeout=0.5,
+            context=context,
+        )
+        try:
+            connection.request("GET", "/healthz", headers={"Host": original_host})
+            response = connection.getresponse()
+            response.read()
+            if response.status == 200:
+                return
+            last_error = RuntimeError(
+                f"TLS mux route {original_host} returned HTTP {response.status}"
+            )
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+        finally:
+            connection.close()
+        time.sleep(POLL_INTERVAL_SECONDS)
+    raise RuntimeError(
+        f"TLS mux route check timed out for {original_host}: "
+        f"{type(last_error).__name__ if last_error else 'unknown'}"
+    )
 
 
 def terminate_children(children: Sequence[tuple[str, subprocess.Popen[bytes]]]) -> None:
@@ -303,9 +357,20 @@ def main() -> int:
 
         mux = start_child("TLS host mux", commands.mux, cwd=repo_root)
         children.append(mux)
-        time.sleep(0.5)
-        if mux[1].poll() is not None:
-            raise RuntimeError(f"TLS mux exited during startup: rc={mux[1].returncode}")
+        wait_for_tls_route(
+            args.tls_port,
+            API_HOST,
+            mux[1],
+            timeout=HEALTH_TIMEOUT_SECONDS,
+        )
+        print(f"TLS mux route healthy: {API_HOST}")
+        wait_for_tls_route(
+            args.tls_port,
+            RESOURCE_HOST,
+            mux[1],
+            timeout=HEALTH_TIMEOUT_SECONDS,
+        )
+        print(f"TLS mux route healthy: {RESOURCE_HOST}")
 
         print(f"rooted-device stack ready: adb reverse tcp:443 -> host tcp:{args.tls_port}")
         print("press Ctrl+C to stop all local stack processes")
