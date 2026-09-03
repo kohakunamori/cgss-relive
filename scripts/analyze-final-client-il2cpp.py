@@ -32,6 +32,19 @@ KNOWN_RVAS = {
     "Stage.ResourcesManager.<GameInitialize>d__85.MoveNext": 0x0374EED8,
 }
 
+DISCOVERY_NAME_FRAGMENTS = (
+    "Stage.ResourcesManager$$GameInitialize",
+    "Stage.ResourcesManager.<GameInitialize>",
+    "Cute.BootNetwork$$SetupNetwork",
+    "Cute.BootNetwork.<SetupNetworkCoroutine>",
+    "Cute.Certification$$Login",
+    "Cute.Certification.<Login>",
+    "Cute.Certification$$VersionCheckTaskExec",
+    "Cute.Certification.<VersionCheckTaskExec>",
+    "Cute.AssetManager$$InitializeManifest",
+    "Cute.AssetManager.<InitializeManifest>",
+)
+
 INTEREST = (
     "Boot", "Version", "Resource", "Manifest", "Download", "Asset", "Scene",
     "LoadTask", "Network", "Certification", "CustomPreference", "Home", "Title",
@@ -129,9 +142,13 @@ def make_disassembler() -> Cs:
     return md
 
 
-def disasm_function(view: BinaryView, address: int, starts: list[int]):
-    start, end = function_bounds(address, starts)
+def disasm_function(view: BinaryView, address: int, starts: list[int], max_size: int = 0x10000):
+    start, end = function_bounds(address, starts, max_size=max_size)
     return list(make_disassembler().disasm(view.read(start, end - start), start))
+
+
+def format_insns(insns: Iterable[Any]) -> list[str]:
+    return [f"0x{ins.address:X}: {ins.mnemonic} {ins.op_str}" for ins in insns]
 
 
 def direct_calls(view: BinaryView, address: int, starts: list[int], by_addr: dict[int, Method]) -> list[dict[str, Any]]:
@@ -148,8 +165,8 @@ def direct_calls(view: BinaryView, address: int, starts: list[int], by_addr: dic
 
 def infer_w1(context: Iterable[Any]) -> int | None:
     for prev in reversed(list(context)):
-        ops = prev.op_str.replace(" ", "")
-        match = re.match(r"(?:mov|movz)w1,#(0x[0-9a-f]+|\d+)$", ops, re.I)
+        text = f"{prev.mnemonic} {prev.op_str}".replace(" ", "")
+        match = re.match(r"(?:mov|movz)w1,#(0x[0-9a-f]+|\d+)$", text, re.I)
         if match:
             return int(match.group(1), 0)
     return None
@@ -197,7 +214,7 @@ def build_caller_index(
                 "parent": parent.name if parent else None,
                 "parent_rva": parent.address if parent else None,
                 "inferred_w1": infer_w1(previous),
-                "context": [f"0x{ins.address:X}: {ins.mnemonic} {ins.op_str}" for ins in context],
+                "context": format_insns(context),
             })
     return found
 
@@ -210,7 +227,11 @@ def dump_method_signature(dump_text: str, rva: int) -> str | None:
 
 def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
     out = []
-    pattern = re.compile(r"(?:public|private|internal|protected)?\s*enum\s+([\w.<>]+)\s*\{(.*?)\n\}", re.S)
+    # Il2CppDumper writes comments such as // TypeDefIndex between enum name and '{'.
+    pattern = re.compile(
+        r"(?:public|private|internal|protected)?\s*enum\s+([\w.<>]+)[^{\n]*(?:\n[^\n{]*)?\{(.*?)\n\}",
+        re.S,
+    )
     for match in pattern.finditer(dump_text):
         name, body = match.group(1), match.group(2)
         if not any(key in name.lower() for key in ("view", "scene", "stage", "main")):
@@ -225,6 +246,14 @@ def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
     return out
 
 
+def discover_methods(methods: list[Method]) -> list[Method]:
+    selected: dict[int, Method] = {}
+    for method in methods:
+        if any(fragment in method.name for fragment in DISCOVERY_NAME_FRAGMENTS):
+            selected.setdefault(method.address, method)
+    return sorted(selected.values(), key=lambda method: (method.name, method.address))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lib", type=Path, required=True)
@@ -235,9 +264,12 @@ def main() -> int:
 
     methods, by_addr, method_starts, function_starts = load_methods(args.script_json)
     dump_text = args.dump_cs.read_text(encoding="utf-8", errors="replace")
+    discovered_methods = discover_methods(methods)
+    caller_targets = set(KNOWN_RVAS.values()) | {method.address for method in discovered_methods}
+
     view = BinaryView(args.lib)
     try:
-        caller_index = build_caller_index(view, set(KNOWN_RVAS.values()), by_addr, method_starts)
+        caller_index = build_caller_index(view, caller_targets, by_addr, method_starts)
         known: dict[str, Any] = {}
         for label, rva in KNOWN_RVAS.items():
             method = by_addr.get(rva)
@@ -250,6 +282,23 @@ def main() -> int:
                 "callers": caller_index[rva],
             }
 
+        # This function is tiny and contains the exact 6/7 branch. Keep this one
+        # bounded window as evidence rather than publishing bulk disassembly.
+        known["Stage.BootMain.ChangeView"]["disassembly"] = format_insns(
+            disasm_function(view, KNOWN_RVAS["Stage.BootMain.ChangeView"], function_starts, max_size=0x200)
+        )
+
+        discovered: dict[str, Any] = {}
+        for method in discovered_methods:
+            key = f"{method.name}@0x{method.address:X}"
+            discovered[key] = {
+                "rva": method.address,
+                "name": method.name,
+                "signature": method.signature,
+                "calls": direct_calls(view, method.address, function_starts, by_addr),
+                "callers": caller_index[method.address],
+            }
+
         change_calls = known["Stage.SceneManager.ChangeView"]["callers"]
         interesting_edges: dict[str, Any] = {}
         for label, record in known.items():
@@ -258,9 +307,10 @@ def main() -> int:
                 interesting_edges[label] = edges
 
         report = {
-            "schema": 4,
+            "schema": 5,
             "method_count": len(methods),
             "known": known,
+            "discovered_bootstrap_methods": discovered,
             "change_view_callsites": change_calls,
             "enum_candidates": enum_candidates(dump_text),
             "interesting_direct_edges": interesting_edges,
@@ -281,6 +331,10 @@ def main() -> int:
         if record["dump_signature"]:
             markdown.append(f"  - dump: `{record['dump_signature']}`")
 
+    markdown += ["", "## BootMain.ChangeView bounded disassembly", ""]
+    for line in report["known"]["Stage.BootMain.ChangeView"]["disassembly"]:
+        markdown.append(f"- `{line}`")
+
     markdown += ["", "## SceneManager.ChangeView callsites", ""]
     for call in change_calls:
         markdown.append(f"- `0x{call['site']:X}` in `{call['parent']}`; inferred `w1={call['inferred_w1']}`")
@@ -290,6 +344,15 @@ def main() -> int:
     markdown += ["", "## View/scene enum candidates containing 6 or 7", ""]
     for enum in report["enum_candidates"]:
         markdown.append(f"- `{enum['enum']}`: " + ", ".join(f"{key}={value}" for key, value in enum["values"].items()))
+
+    markdown += ["", "## Discovered bootstrap/resource methods", ""]
+    for record in report["discovered_bootstrap_methods"].values():
+        markdown.append(f"### `{record['name']}` @ `0x{record['rva']:X}`")
+        for caller in record["callers"]:
+            markdown.append(f"- caller `0x{caller['site']:X}` `{caller['parent']}`")
+        for edge in record["calls"]:
+            if edge["name"] and any(key in edge["name"] for key in INTEREST):
+                markdown.append(f"- call `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`")
 
     markdown += ["", "## Interesting direct edges from bootstrap seeds", ""]
     for label, edges in report["interesting_direct_edges"].items():
