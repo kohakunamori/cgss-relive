@@ -2,39 +2,29 @@
 
 This is the real-client acceptance procedure for the untouched final Android
 11.6.3 build. It preserves original hostnames/HTTPS and uses a rooted test device
-only for reversible DNS/hosts and system-CA integration.
+only for reversible routing plus manually managed system-CA trust.
 
 ## Static facts that drive the test
 
 For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 
-- API traffic uses `UnityWebRequest`;
-- no managed `CertificateHandler` / `ValidateCertificate` override is proven on
-  the API path;
-- no managed/Java pinning implementation is wired into the proven API path;
+- API/resource traffic uses `UnityWebRequest` on the proven paths;
+- no managed `CertificateHandler` / `ValidateCertificate` override or application
+  pinning implementation is proven on the bootstrap path;
 - `Stage.LoadTask.Parse` is RVA `0x04850a94`;
 - result code 214 persists `required_res_ver=10133800` into Savedata `RES_VER` and
   does **not** automatically resend `/load/check` in the same network coroutine;
-- the parent continuation resumes into
+- the parent continuation resumes through
   `AssetManager.InitializeManifest -> DownloadOrLoadForInitialize` before
   BootMain reaches `/load/index`;
-- final `StageSceneDefine.eViewId` maps `Home=6`, `Login_Bonus=7`,
-  `Asset_Download=8`;
-- successful `/load/index` parsing reaches `BootMain.ChangeView`, selecting
-  `Home(6)` when no login bonus exists and `Login_Bonus(7)` otherwise;
+- `Home=6`, `Login_Bonus=7`, `Asset_Download=8`;
 - `/load/title` is not a hard Home prerequisite;
 - `data.isS3=false` selects `storages.game.starlight-stage.jp`.
 
-Current bounded Home static analysis also shows that `Stage.Home.Start` and
-`StartViewProcess` do not directly launch a Home API task. Startup first enters
-local/resource-facing helpers such as `PreDownloadList`, card/unit preparation,
-banner WorkData and popup checks. The corrected starter creates its owned card in
-`cs_gacha_data_cenere -> WorkCardData.AddCardData`, keeps `user_card_list=[]`, and
-keeps `user_chara_list=[]`; the latter is proven empty-array safe and has no
-bounded Home startup `WorkCharaData` consumer.
-
-The remaining decisive uncertainty is original-client runtime acceptance of the
-local TLS/resource stack and reduced starter-visible `/load/index` state.
+The reduced starter creates its owned card through
+`cs_gacha_data_cenere -> WorkCardData.AddCardData`, keeps `user_card_list=[]` and
+`user_chara_list=[]`, and backs unit serial `1` with an actual WorkCardData entry.
+Original-client acceptance of that synthetic state remains runtime-pending.
 
 ## 1. Install dependencies
 
@@ -42,36 +32,7 @@ local TLS/resource stack and reduced starter-visible `/load/index` state.
 python -m pip install -r .\server\requirements.txt
 ```
 
-## 2. Preflight the frozen local resource set
-
-The preferred stack supervisor runs this automatically, but it is useful to run
-it explicitly before the first device session:
-
-```powershell
-python .\scripts\preflight-local-resources.py `
-  --version 10133800 `
-  --root .\resource-cache\10133800 `
-  --manifest-db .\work\resources\manifest_10133800.db `
-  -o .\work\resource-preflight.json
-```
-
-Final invariants:
-
-```text
-manifest rows   220837
-unique hashes   220803
-wire manifests  2
-```
-
-The command also checks SQLite `quick_check`, complete object presence and
-zero-length objects. Output contains only counts/status/failure codes; it does not
-print resource names or hashes. **Do not continue to the rooted run unless it
-returns exit code 0 / `ready: true`.**
-
-## 3. Generate one disposable multi-SAN certificate
-
-The built-in TLS mux serves both original HTTPS hostnames on one device-facing
-port. Generate one leaf containing both SANs:
+## 2. Generate one disposable multi-SAN certificate
 
 ```powershell
 python .\scripts\make-test-tls-cert.py `
@@ -79,7 +40,7 @@ python .\scripts\make-test-tls-cert.py `
   --hostname storages.game.starlight-stage.jp
 ```
 
-Default output is under gitignored `work/tls/`:
+Default private material is under gitignored `work/tls/`:
 
 ```text
 work/tls/ca.cert.pem
@@ -90,16 +51,11 @@ work/tls/server.key.pem
 
 Never commit private keys.
 
-## 4. Trust the CA as an Android system CA
+## 3. Manually prepare rooted Android trust/routing
 
-Use the rooted device/root manager's supported system-CA mechanism. Android
-14+/Conscrypt/APEX layouts differ across Magisk, KernelSU and ROMs, so this repo
-does not automate that persistent system mutation.
-
-Acceptance condition: the CGSS process trusts `ca.cert.pem` through the system
-trust domain. Installing it only as a user CA is not sufficient evidence.
-
-## 5. Redirect both original hostnames on device
+Install `work/tls/ca.cert.pem` into the **system** trust domain using the root
+manager/ROM-specific mechanism. Android 14+/Conscrypt/APEX layouts vary; the repo
+deliberately does not automate this persistent mutation.
 
 Make both original names resolve to device loopback:
 
@@ -108,12 +64,64 @@ Make both original names resolve to device loopback:
 127.0.0.1 storages.game.starlight-stage.jp
 ```
 
-Keep the original names intact so HTTP Host, TLS SNI and certificate SAN checks
-remain realistic.
+Keep the original names intact so Host, TLS SNI and SAN verification remain
+realistic.
 
-## 6. Preferred: start the whole local stack under one supervisor
+## 4. Host resource preflight — schema 3
 
-Use the foreground supervisor for the first real-device experiment:
+The preferred supervisor runs this automatically. For the first device session it
+is still useful to run explicitly:
+
+```powershell
+python .\scripts\preflight-local-resources.py `
+  --version 10133800 `
+  --root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db `
+  -o .\work\resource-preflight.json
+```
+
+Frozen invariants:
+
+```text
+manifest rows   220837
+unique hashes   220803
+wire manifests  2
+```
+
+Schema 3 now verifies more than file presence:
+
+```text
+manifest SQLite quick_check/count/hash-shape
+all 220803 content-addressed objects present and non-zero
+all_dbmanifest parses Android_AHigh_SHigh MD5
+Android_AHigh_SHigh compressed MD5 matches that index
+Android_AHigh_SHigh CGSS-wrapper/LZ4 decodes
+wire decode is SQLite
+wire-decoded SQLite bytes == supplied manifest DB
+master.mdb entry exists
+master.mdb content-addressed object exists
+master.mdb actual MD5 == manifest hash
+```
+
+The report exposes only counts, booleans and failure codes. It does not output
+resource names/hashes or database contents. Do not continue unless it returns
+exit code 0 and `ready: true`.
+
+The resolver itself is separately verified against every final manifest row:
+
+```text
+220837 resolved
+0 unresolved
+0 hash mismatch
+0 unknown category
+```
+
+This includes 12317 path-shaped manifest names; basename aliases are intentionally
+not used because the final manifest contains colliding basenames.
+
+## 5. Start the whole host stack under the supervisor
+
+Preferred first-run command:
 
 ```powershell
 python .\scripts\run-rooted-local-stack.py `
@@ -121,116 +129,51 @@ python .\scripts\run-rooted-local-stack.py `
   --manifest-db .\work\resources\manifest_10133800.db `
   --cert .\work\tls\server.chain.pem `
   --key .\work\tls\server.key.pem `
+  --ca-cert .\work\tls\ca.cert.pem `
   --api-map .\work\final_map.json `
   --viewer-id 1 `
   --producer-name "Relive Producer"
 ```
 
-It performs these gates in order:
+The supervisor gates readiness in this order:
 
 ```text
-full 10133800 preflight
-  -> control API 127.0.0.1:8080
-  -> control /healthz == 200
-  -> resource backend 127.0.0.1:8081
-  -> resource /healthz == 200
-  -> multi-SAN TLS host mux 127.0.0.1:8445
-  -> foreground monitoring
+resource preflight schema 3
+  -> API backend 127.0.0.1:8080 /healthz
+  -> resource backend 127.0.0.1:8081 /healthz
+  -> TLS mux 127.0.0.1:8445
+  -> API original hostname: CA chain + SAN/SNI + Host /healthz
+  -> storages original hostname: CA chain + SAN/SNI + Host /healthz
+  -> foreground fail-fast monitoring
 ```
 
-If any child exits unexpectedly, the supervisor terminates the whole stack and
-returns failure instead of leaving a misleading partial test environment.
+The TLS readiness probe connects to loopback at the TCP layer but uses each
+original hostname as `server_hostname`, and trusts only the generated local CA.
+Therefore a wrong CA, broken chain or missing original-host SAN is rejected before
+`stack ready` is printed. Android system-CA visibility is still a separate device
+acceptance gate.
 
 Default behavior is native resource-version negotiation. Do not pass
-`--accept-old-resource-version` on the primary run. That flag remains an explicit
-diagnostic differential only.
+`--accept-old-resource-version` on the primary run.
 
-The supervisor writes the same sanitized evidence streams used by the manual
-setup:
+Sanitized runtime evidence is written to:
 
 ```text
 work/runtime-starter-control.jsonl
 work/runtime-starter-resource.jsonl
 ```
 
-## 7. Manual three-process mode — diagnostic fallback
+Any unexpected child exit tears down the full local stack.
 
-Use this only when isolating one backend/mux problem. The normal first run should
-use the supervisor above.
+## 6. Create exactly one device 443 reverse
 
-### Control API backend — port 8080
-
-```powershell
-python -m server.http_server `
-  --host 127.0.0.1 `
-  --port 8080 `
-  --experimental-starter-load-index `
-  --viewer-id 1 `
-  --producer-name "Relive Producer" `
-  --event-log .\work\runtime-starter-control.jsonl `
-  --api-map .\work\final_map.json
-```
-
-### Frozen resource backend — port 8081
+The tunnel helper now defaults to the TLS mux port `8445`:
 
 ```powershell
-python -m server.resource_server `
-  --host 127.0.0.1 `
-  --port 8081 `
-  --version 10133800 `
-  --root .\resource-cache\10133800 `
-  --manifest-db .\work\resources\manifest_10133800.db `
-  --event-log .\work\runtime-starter-resource.jsonl
+.\scripts\prepare-device-tunnel.ps1 -RequireRoot
 ```
 
-The resource log contains only category/status evidence:
-
-```text
-@resource/manifest
-@resource/AssetBundles
-@resource/Sound
-@resource/Movie
-@resource/Generic
-@resource/unresolved
-```
-
-Resource filename/hash/query is never logged and `/healthz` is excluded.
-
-Verified local bootstrap wire manifests live outside Git under:
-
-```text
-resource-cache/10133800/manifests/all_dbmanifest
-resource-cache/10133800/manifests/Android_AHigh_SHigh
-```
-
-### TLS Host mux — port 8445
-
-```powershell
-python -m server.tls_mux `
-  --host 127.0.0.1 `
-  --port 8445 `
-  --cert .\work\tls\server.chain.pem `
-  --key .\work\tls\server.key.pem `
-  --api-backend 127.0.0.1:8080 `
-  --resource-backend 127.0.0.1:8081
-```
-
-The mux dispatches only by original Host:
-
-```text
-apis.game.starlight-stage.jp
-  -> http://127.0.0.1:8080
-
-storages.game.starlight-stage.jp
-  -> http://127.0.0.1:8081
-```
-
-It does not log request paths, headers, bodies or query strings. Unknown Host is
-rejected with 421. Request bodies are forwarded opaquely.
-
-## 8. Use exactly one `adb reverse` for device HTTPS 443
-
-Point the device's only loopback 443 listener at mux port 8445:
+Equivalent explicit form:
 
 ```powershell
 .\scripts\prepare-device-tunnel.ps1 `
@@ -239,34 +182,68 @@ Point the device's only loopback 443 listener at mux port 8445:
   -RequireRoot
 ```
 
-Conceptually:
+Topology:
 
 ```text
 CGSS https://apis.game.starlight-stage.jp:443
 CGSS https://storages.game.starlight-stage.jp:443
                 |
-                v
-      device 127.0.0.1:443
+         device 127.0.0.1:443
                 |
-          adb reverse
+           adb reverse
                 |
-                v
-     host TLS mux 127.0.0.1:8445
-          /                   \
- API backend :8080      resource backend :8081
+      host 127.0.0.1:8445 TLS mux
+          /                    \
+ API :8080                 resource :8081
 ```
 
 Do not create two competing `adb reverse tcp:443` mappings.
 
-Remove the mapping with:
+Cleanup:
 
 ```powershell
 .\scripts\prepare-device-tunnel.ps1 -Remove
 ```
 
-## 9. Native `/load/check` behavior — primary experiment
+## 7. Run the read-only device preflight
 
-Incoming final-binary default:
+Before launching the game:
+
+```powershell
+.\scripts\check-rooted-device.ps1
+```
+
+For a selected ADB device:
+
+```powershell
+.\scripts\check-rooted-device.ps1 -Serial <adb-serial>
+```
+
+It does **not** mutate package data, hosts, CA stores or system files. Core
+`ready:true` requires:
+
+```text
+ADB state = device
+su -c id returns uid=0
+package jp.co.bandainamcoent.BNEI0242 is installed
+versionName = 11.6.3
+versionCode = 438
+adb reverse contains tcp:443 -> tcp:8445
+API hostname is present on a 127.0.0.1 hosts entry
+storages hostname is present on a 127.0.0.1 hosts entry
+```
+
+If `work/tls/ca.cert.pem` is available, the script additionally looks for an
+exact-byte SHA-256 match in common system-CA directories. That check is
+**advisory**: root managers may install/re-encode certificates in ways that do not
+preserve exact file bytes. A negative result is not proof that Android does not
+trust the CA; actual CGSS TLS acceptance remains decisive.
+
+Do not launch the client until the core device report is `ready:true`.
+
+## 8. Native `/load/check` — primary experiment
+
+The untouched binary starts with:
 
 ```text
 RES-VER: 10133000
@@ -280,16 +257,14 @@ required_res_ver = 10133800
 data.isS3 = false
 ```
 
-Expected statically closed continuation:
+Expected statically closed progression:
 
 ```text
 /load/check 214
 -> Savedata RES_VER=10133800
 -> SetupNetwork finishes
--> GameInitialize resumes
 -> InitializeManifest
--> DownloadOrLoadForInitialize
--> resource request(s)
+-> all_dbmanifest / Android_AHigh_SHigh / resource work
 -> GameInitialize completes
 -> BootMain.StartConnect
 -> /load/index
@@ -297,12 +272,10 @@ Expected statically closed continuation:
 -> Home(6) or Login_Bonus(7)
 ```
 
-A later second `/load/check` is possible for an independent path, but is not a
-required link and must not be used as the 214 acceptance criterion.
+Do not require an immediate second `/load/check`; it is not part of the same-task
+214 continuation.
 
-## 10. Analyze one merged control/resource timeline
-
-The analyzer can merge independent sanitized files by numeric event time:
+## 9. Analyze the merged control/resource timeline
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
@@ -311,112 +284,124 @@ python .\scripts\analyze-runtime-events.py `
   -o .\work\runtime-starter-report.json
 ```
 
-Repeated `--merge-run` with the same label forms one deterministic run. Missing
-timestamps are rejected rather than ordered heuristically.
-
-Important hard-mainline phases include:
-
-```text
-resource_version_214_responded
-resource_plane_observed
-resource_plane_served
-load_index_reached
-post_load_index_observed
-```
-
-A healthy native timeline may be as simple as:
+A healthy native timeline can be as small as:
 
 ```text
 /load/check             214
 @resource/manifest      200
-@resource/AssetBundles  200/206
+@resource/Generic       200/206
 /load/index             200
 ```
 
-No second `/load/check` is needed for that timeline to be valid.
+or include other resource categories. A second `/load/check` is not required.
 
-## 11. Diagnostic direct-success differential
+## 10. Diagnostic direct-success differential
 
-Only if native mode fails before useful resource evidence, rerun the supervisor
+Only if native 214 fails before useful resource evidence, restart the supervisor
 with:
 
 ```text
 --accept-old-resource-version
 ```
 
-or, in manual mode, add that flag only to `server.http_server`. It returns
-success to old 10133000 while still supplying `required_res_ver=10133800`. This is
-a diagnostic branch, not the protocol-default model.
+This returns success for old 10133000 while still advertising/advancing the final
+required resource version. It is diagnostic only, not the native protocol model.
 
-Compare equivalent runs with `scripts/analyze-runtime-events.py` after preserving
-their two sanitized streams under distinct filenames.
+## Manual three-process mode
+
+Use only to isolate one backend problem. The normal first run should use the
+supervisor.
+
+### API
+
+```powershell
+python -m server.http_server `
+  --host 127.0.0.1 --port 8080 `
+  --experimental-starter-load-index `
+  --viewer-id 1 --producer-name "Relive Producer" `
+  --event-log .\work\runtime-starter-control.jsonl `
+  --api-map .\work\final_map.json
+```
+
+### Resource backend
+
+```powershell
+python -m server.resource_server `
+  --host 127.0.0.1 --port 8081 `
+  --version 10133800 `
+  --root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db `
+  --event-log .\work\runtime-starter-resource.jsonl
+```
+
+### TLS mux
+
+```powershell
+python -m server.tls_mux `
+  --host 127.0.0.1 --port 8445 `
+  --cert .\work\tls\server.chain.pem `
+  --key .\work\tls\server.key.pem `
+  --api-backend 127.0.0.1:8080 `
+  --resource-backend 127.0.0.1:8081
+```
 
 ## Acceptance questions, in order
 
-1. Did local resource preflight return `ready: true`?
-2. Does TLS complete and does `/load/check` reach the control backend?
-3. After native 214, does any `@resource/*` request appear?
-4. Are resource requests served successfully, or which sanitized category first
-   returns 404/416?
-5. Does the client subsequently reach `/load/index`?
-6. Does the reduced starter-visible `/load/index` lead to a later client action?
-7. Does the device visibly render Home or Login Bonus followed by Home?
-8. What is the first unsupported post-Home endpoint or local-state dependency?
+1. Host resource preflight `ready:true`?
+2. Supervisor verifies both TLS original-host routes and remains healthy?
+3. Device read-only preflight core `ready:true`?
+4. Does the actual CGSS process trust TLS and reach `/load/check`?
+5. After native 214, does `@resource/*` traffic appear?
+6. Are those requests served, or which sanitized category first returns 404/416?
+7. Does `/load/index` arrive?
+8. Does the reduced starter response produce a later client action?
+9. Does Home visibly render (possibly after Login Bonus)?
+10. What is the first unsupported post-Home endpoint/local-state dependency?
 
-Static `Home=6` / `Login_Bonus=7` is already confirmed. Runtime is validating that
-the local stack reaches/renders those views, not rediscovering their numeric IDs.
+Server `200`/`result_code=1`, a green host preflight, or static `Home=6` are not by
+themselves original-client acceptance evidence.
 
 ## Failure classification
 
-### Preflight not ready
+### Host preflight fails
 
-Do not launch the original client yet. Fix the reported local-cache invariant
-first; a runtime 404 caused by an incomplete archive is not useful protocol
-evidence.
+Fix the exact reported invariant before running the game. In particular, a wire
+manifest DB mismatch means the two bootstrap wire files and manifest SQLite do not
+belong to the same frozen state; a master MD5 mismatch means the content-addressed
+path contains incorrect bytes.
 
-### No control request
+### Device preflight core fails
 
-Check hosts/DNS, IPv6, `adb reverse`, mux process and app process network
-reachability.
+Fix the ADB target/package/version/reverse/hosts condition. Do not interpret a
+failure here as a CGSS protocol problem.
 
-### TLS error before HTTP
+### TLS fails before HTTP
 
-Check system-root visibility and that the leaf certificate contains both original
-DNS SANs. Keep original Host/SNI. Do not patch the APK before collecting the exact
-failure.
-
-### Mux 421
-
-The client used a hostname not in the two-host allow-list. Capture only the
-minimum local/private evidence necessary to identify that hostname; do not add a
-wildcard route blindly.
+The host supervisor already verified the generated CA/chain/SAN locally. The main
+remaining device-side question is whether that CA is actually in the CGSS
+process's system trust domain. Keep original Host/SNI; do not patch the APK before
+collecting the exact failure.
 
 ### 214 returned, no resource event
 
-Static continuation says setup should finish and `GameInitialize` should enter
-`InitializeManifest`. Check the storages hosts mapping, mux routing, resource
-backend health, Savedata transition and logcat. Use direct-success only after
-these checks.
+Static continuation says GameInitialize should proceed into manifest/resource
+initialization. Check storages host routing, Android trust, Savedata state and
+logcat before using the direct-success differential.
 
-### `@resource/unresolved` or resource 404
+### `@resource/unresolved` / 404
 
-The client reached the resource plane. Investigate URL-builder coverage,
-manifest-name resolution, local object/wire-manifest presence and frozen version.
-Because preflight already established local completeness, a post-preflight 404 is
-stronger evidence of an unsupported client URL shape rather than a casually
-missing archive object.
+The final filename resolver has been checked against all 220837 manifest rows,
+including 12317 path-shaped names. A new unresolved request is therefore strong
+evidence of a URL family outside the current reconstructed builders, not a reason
+to add fuzzy basename lookup.
 
 ### `/load/index` arrives, then stalls
 
-Do not add hundreds of optional fields. `LoadTask.Parse` is guard-heavy and a
-provided parent can make child reads hard. Current Home static analysis favors
-keeping optional sections empty/omitted unless a runtime blocker proves they are
-needed. In particular, do not re-add `user_chara_list` state merely because card
-100001 maps to chara 101; Home startup currently gets its character identity from
-WorkCardData.
+Do not inflate the response with optional sections. The parser is guard-heavy and
+partially populated guarded parents can be more dangerous than omission. Keep the
+current reduced starter and identify the first actual blocker.
 
-### Known final endpoint returns 404 after Home
+### Known endpoint 404 after Home
 
-Use `api_candidates` to identify its final Task/Parse implementation and restore
-only the parser-safe minimum. Never return arbitrary empty success merely because
-an endpoint name is known.
+Use final Task/Parse evidence and implement only the parser-safe minimum. Never
+return arbitrary empty success solely because the endpoint name is known.
