@@ -5,11 +5,11 @@ import argparse
 import bisect
 import json
 import re
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_INS_BL, ARM64_INS_BLR, ARM64_OP_IMM
 from elftools.elf.elffile import ELFFile
@@ -155,16 +155,6 @@ def infer_w1(context: Iterable[Any]) -> int | None:
     return None
 
 
-def decode_bl_target(pc: int, word: int) -> int | None:
-    # ARM64 BL has opcode 100101b in bits 31..26, followed by signed imm26 << 2.
-    if word & 0xFC000000 != 0x94000000:
-        return None
-    imm26 = word & 0x03FFFFFF
-    if imm26 & 0x02000000:
-        imm26 -= 1 << 26
-    return pc + (imm26 << 2)
-
-
 def local_context(view: BinaryView, site: int, before: int = 8):
     start = max(0, site - before * 4)
     blob = view.read(start, (before + 1) * 4)
@@ -177,15 +167,28 @@ def build_caller_index(
     by_addr: dict[int, Method],
     method_starts: list[int],
 ) -> dict[int, list[dict[str, Any]]]:
-    """Find direct callers with raw ARM64 BL decoding, disassembling only matches."""
+    """Find direct ARM64 BL callers using vectorized opcode/imm26 decoding."""
     found: dict[int, list[dict[str, Any]]] = {target: [] for target in targets}
+    target_array = np.array(sorted(targets), dtype=np.int64)
+
     for base, blob in view.exec_ranges():
         usable = len(blob) - (len(blob) % 4)
-        for offset, (word,) in enumerate(struct.iter_unpack("<I", memoryview(blob)[:usable])):
-            site = base + offset * 4
-            target = decode_bl_target(site, word)
-            if target not in targets:
-                continue
+        if not usable:
+            continue
+        words = np.frombuffer(memoryview(blob)[:usable], dtype="<u4")
+        bl_indices = np.flatnonzero((words & np.uint32(0xFC000000)) == np.uint32(0x94000000))
+        if bl_indices.size == 0:
+            continue
+
+        imms = (words[bl_indices] & np.uint32(0x03FFFFFF)).astype(np.int64)
+        imms = np.where((imms & 0x02000000) != 0, imms - (1 << 26), imms)
+        sites = np.int64(base) + bl_indices.astype(np.int64) * 4
+        call_targets = sites + (imms << 2)
+        matched = np.isin(call_targets, target_array)
+
+        for site, target in zip(sites[matched].tolist(), call_targets[matched].tolist()):
+            site = int(site)
+            target = int(target)
             parent = method_at(site, by_addr, method_starts)
             context = local_context(view, site)
             previous = [ins for ins in context if ins.address < site]
@@ -255,7 +258,7 @@ def main() -> int:
                 interesting_edges[label] = edges
 
         report = {
-            "schema": 3,
+            "schema": 4,
             "method_count": len(methods),
             "known": known,
             "change_view_callsites": change_calls,
