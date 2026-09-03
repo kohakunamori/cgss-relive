@@ -1,11 +1,11 @@
 # CGSS Android 11.6.3 `/load/check` reconstruction
 
-This note records the current clean-room understanding of the final Android
-11.6.3 version-check path and the behavior implemented by `cgss-relive`.
+This note records the clean-room understanding of the final Android 11.6.3
+version-check path and the behavior implemented by `cgss-relive`.
 
-## Final-client native targets
+## Exact final-client targets
 
-For the exact final arm64 IL2CPP specimen:
+For the hash-verified final arm64 IL2CPP specimen:
 
 | Managed method | arm64 RVA |
 | --- | ---: |
@@ -17,7 +17,16 @@ For the exact final arm64 IL2CPP specimen:
 | `Cute.Cryptographer.decode` | `0x050c3688` |
 | `Cute.Certification.VersionCheckTaskExec` | `0x050bde1c` |
 | `<VersionCheckTaskExec>d__43.MoveNext` | `0x050bf3c8` |
-| `NetworkManager.<Connect>d__48.MoveNext` | `0x050b61c8` |
+| `Cute.Certification.Login` | `0x050bdd9c` |
+| `Cute.BootNetwork.SetupNetwork` | `0x050c6c84` |
+| `<SetupNetworkCoroutine>d__11.MoveNext` | `0x050c74dc` |
+| `Stage.ResourcesManager.GameInitialize` | `0x037340ac` |
+| `<GameInitialize>d__85.MoveNext` | `0x0374ed34` |
+| `Cute.AssetManager.InitializeManifest` | `0x050a9000` |
+
+Important correction: `0x0374eed8` is **not** the `GameInitialize` coroutine
+entry. It is the direct `bl Cute.BootNetwork.SetupNetwork` instruction inside
+`<GameInitialize>d__85.MoveNext`.
 
 ## Response wire path
 
@@ -31,8 +40,8 @@ HTTP response body
   -> CheckResult / task Parse
 ```
 
-The repository's response codec is the tested inverse of the final-client
-request envelope. Response cryptography is no longer the main uncertainty.
+The repository response codec is the tested inverse of the final-client request
+envelope. Response cryptography is no longer the main uncertainty.
 
 ## Result-code constants
 
@@ -49,33 +58,90 @@ Final 11.6.3 constants:
 
 ## Correct 214 semantics
 
-The previous bootstrap working model treated 214 as if it directly caused an
-immediate `/load/check` retry. Final static control-flow analysis disproves that.
+For result code `214`:
 
-For a response with result code 214:
-
-1. the d48 HTTP coroutine accepts 214 through the final-client skip/allowed-code
-   table instead of treating it as a generic transport error;
-2. common result handling persists `required_res_ver` into local Savedata
-   `RES_VER`;
+1. the HTTP/network coroutine accepts 214 through the final-client allowed-code
+   path instead of treating it as a generic transport failure;
+2. common result handling persists `required_res_ver` into Savedata `RES_VER`;
 3. no popup is required for 214 in this path;
-4. the same d48 coroutine does **not** automatically resend `/load/check`;
-5. any later resource download, view transition or later version-check request is
-   initiated by a higher-level boot/resource state machine.
+4. the same network coroutine does **not** automatically resend `/load/check`.
 
-Therefore this sequence is valid only as two observations separated by an
-unknown higher-level transition:
+Therefore do not model 214 as:
 
 ```text
-observed /load/check with RES-VER 10133000
-server -> 214 + required_res_ver 10133800
-client persists RES_VER = 10133800
-... higher-level boot/resource behavior ...
-possible later request(s) with RES-VER 10133800
+/load/check 10133000 -> 214 -> immediate /load/check 10133800
 ```
 
-Do not describe the second request as an automatic retry unless runtime evidence
-actually shows it.
+unless a real runtime independently happens to show a later check.
+
+## The parent continuation is now statically closed
+
+The earlier documentation stopped at “some unknown higher-level resource
+transition after 214”. Bounded final-client coroutine evidence closes that gap.
+
+`BootMain.Initialize` starts `ResourcesManager.GameInitialize`:
+
+```text
+0x39ce8b4  bl  Stage.ResourcesManager.GameInitialize
+0x39ce8c4  bl  UnityEngine.MonoBehaviour.StartCoroutine
+```
+
+`GameInitialize` starts the network setup:
+
+```text
+0x374eed8  bl  Cute.BootNetwork.SetupNetwork
+```
+
+`SetupNetworkCoroutine` directly calls and yields `Certification.Login`:
+
+```text
+0x50c758c  bl  Cute.Certification.Login
+0x50c759c  bl  UnityEngine.MonoBehaviour.StartCoroutine
+state <- 1
+return true
+```
+
+The existing-viewer login path owns `VersionCheckTaskExec`, hence `/load/check`.
+After setup becomes ready, `GameInitialize` resumes and directly starts manifest
+initialization:
+
+```text
+0x374ef00  read BootNetwork ready flag
+0x374ef04  if not ready -> yield/poll
+...
+0x374ef38  bl  Cute.AssetManager.InitializeManifest
+0x374ef4c  bl  UnityEngine.MonoBehaviour.StartCoroutine
+state <- 2
+return true
+```
+
+`AssetManager.<InitializeManifest>d__65.MoveNext` in turn invokes
+`DownloadOrLoadForInitialize` from multiple states, including call sites
+`0x50b103c`, `0x50b1094`, and `0x50b1324`.
+
+The final native mainline is therefore:
+
+```text
+BootMain.Initialize
+  -> ResourcesManager.GameInitialize
+  -> BootNetwork.SetupNetwork
+  -> SetupNetworkCoroutine
+  -> Certification.Login
+  -> VersionCheckTaskExec
+  -> /load/check RES-VER=10133000
+  -> server: 214 + required_res_ver=10133800
+  -> client persists Savedata RES_VER=10133800
+  -> SetupNetwork completes / ready
+  -> GameInitialize resumes
+  -> AssetManager.InitializeManifest
+  -> manifest/resource DownloadOrLoadForInitialize
+  -> GameInitialize completes
+  -> BootMain.Initialize resumes
+  -> BootMain.StartConnect
+  -> /load/index
+```
+
+A second `/load/check` is not a required link in this static chain.
 
 ## Resource-host selector: `data.isS3`
 
@@ -85,19 +151,19 @@ actually shows it.
 response data["isS3"] -> ToBoolean -> NetworkUtil.isS3
 ```
 
-The selector chooses between the final resource hosts/URL families:
+The selector chooses between final resource hosts/URL families:
 
 ```text
 isS3 = false -> storages.game.starlight-stage.jp
 isS3 = true  -> asset-starlight-stage.akamaized.net
 ```
 
-The offline server fixes `isS3=false` so the resource plane is deterministic and
-matches the storages URL family supported by `server.resource_server`.
+The offline server fixes `isS3=false` so resource routing is deterministic and
+matches the storage-family support in `server.resource_server`.
 
 ## Default preservation policy
 
-The default server behavior remains native resource-version negotiation:
+Default server behavior remains native version negotiation:
 
 ```text
 incoming RES-VER != 10133800
@@ -110,18 +176,18 @@ incoming RES-VER == 10133800
   -> data.isS3 = false
 ```
 
-This models the final-client business-code path without inventing an immediate
-retry.
+The important runtime observation after the first 214 is now **resource-plane
+traffic**, not an expected retry.
 
 ## Diagnostic direct-success policy
 
-For a controlled runtime differential, the server exposes:
+For a controlled differential the server exposes:
 
 ```text
 --accept-old-resource-version
 ```
 
-When the client sends old `RES-VER: 10133000`, this mode returns:
+When the client sends `RES-VER: 10133000`, this mode returns:
 
 ```text
 result_code = 1
@@ -129,62 +195,41 @@ required_res_ver = 10133800
 data.isS3 = false
 ```
 
-The purpose is to answer a narrow question: does bypassing the 214 gate allow the
-client to reach a later BootMain or `/load/index` stage?
+This mode separates the native 214/resource branch from later BootMain or
+`/load/index` failures. It is not the protocol-default model.
 
-It is **not** the default protocol model and it does not prove that all local
-resource prerequisites are satisfied. `required_res_ver` is still supplied so
-common result handling can advance subsequent request headers to the frozen
-version.
+## Sanitized runtime evidence
 
-## Why both modes matter
-
-A native-mode stall after server-side 214 is ambiguous because static analysis
-says no in-coroutine retry should be expected. Compare:
-
-- native 214 mode;
-- direct-success mode;
-- and, when needed, native mode with the local storages resource host redirected.
-
-That three-way differential separates:
-
-1. version-result handling;
-2. higher-level resource initialization/update;
-3. later BootMain `/load/index` parsing.
-
-## Resource version facts
-
-Keep these two values distinct:
+The control API event log and resource server event log use the same strict
+sanitized schema. The resource server may be started with `--event-log`; it logs
+only synthetic categories:
 
 ```text
-binary/default RES_VER: 10133000
-frozen final server/resource revision: 10133800
+@resource/manifest
+@resource/AssetBundles
+@resource/Sound
+@resource/Movie
+@resource/Generic
+@resource/unresolved
 ```
 
-`10133800` is independently validated by the repository's public-CDN bootstrap
-and manifest/master verification workflow.
+It never logs resource filenames, hashes, query strings, request bodies, UDID,
+SID, USER-ID, PARAM, or viewer/account values.
 
-## Implemented modules
+`scripts/analyze-runtime-events.py` treats:
 
-- `server/cgss_codec.py` — final request/response envelope;
-- `server/header_codec.py` — reversible final UDID-header decode;
-- `server/load_check.py` — native 214 and explicit direct-success policies;
-- `server/bootstrap_core.py` — transport-independent request/response exchange;
-- `server/http_server.py` — HTTPS/control front end, defaults `isS3=false`;
-- `server/resource_server.py` — final-client resource URL-family resolver over
-  the frozen content-addressed archive.
+```text
+214 response -> later @resource/*
+```
 
-## Runtime evidence boundary
+as direct evidence that the client advanced into the statically proven
+`InitializeManifest`/resource stage even when no second `/load/check` appears.
 
-A server event showing `result_code=1` or 214 proves what the server returned.
-It does not, by itself, prove the original client accepted the response.
+## Evidence boundary
 
-Client acceptance requires a later observable client action such as:
+A server-side 214 or success event proves what the server returned. A resource
+request proves the client advanced into resource initialization. `/load/index`
+proves the client advanced beyond that resource stage.
 
-- a resource request;
-- a subsequent control request;
-- `/load/index`;
-- a view transition/logcat event;
-- or visible Home behavior.
-
-The sanitized runtime analyzer deliberately keeps this distinction.
+Visible Home still requires an original-client runtime observation; static
+control flow alone does not claim that a particular local run rendered Home.
