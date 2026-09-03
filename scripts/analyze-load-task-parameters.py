@@ -2,11 +2,12 @@
 """Bounded clean-room analysis of final LoadTask ``load_state`` / ``next_api``.
 
 The exact dump declares both fields on ``LoadTaskParam`` while final
-``Stage.LoadTask.SetParameter`` has no explicit arguments. The relevant object is
-therefore ``this`` (x0), not an x1 parameter. This pass records the two metadata
-field offsets, string-literal presence separately, and memory reads from aliases
-of the SetParameter ``this`` pointer. It emits only aggregate offsets and tiny
-contexts around matching target-field reads.
+``Stage.LoadTask.SetParameter`` has no explicit arguments. This pass therefore
+tracks memory accesses through aliases of the method ``this`` pointer and records
+whether the target offsets are read or written. That distinction matters:
+SetParameter may populate request-side state rather than consume response data.
+Only the two target metadata declarations, aggregate self offsets, and tiny
+contexts around matching accesses are emitted.
 """
 from __future__ import annotations
 
@@ -155,8 +156,13 @@ def canonical_register(dis: Cs, reg_id: int) -> str:
     return name
 
 
-def is_memory_load(ins: Any) -> bool:
-    return ins.mnemonic.lower().startswith(("ldr", "ldur", "ldp"))
+def memory_access_kind(ins: Any) -> str | None:
+    mnemonic = ins.mnemonic.lower()
+    if mnemonic.startswith(("ldr", "ldur", "ldp")):
+        return "read"
+    if mnemonic.startswith(("str", "stur", "stp")):
+        return "write"
+    return None
 
 
 def written_registers(dis: Cs, ins: Any) -> set[str]:
@@ -167,7 +173,7 @@ def written_registers(dis: Cs, ins: Any) -> set[str]:
     return {canonical_register(dis, int(reg)) for reg in writes}
 
 
-def scan_self_memory_reads(
+def scan_self_memory_accesses(
     view: BinaryView,
     start: int,
     end: int,
@@ -181,7 +187,8 @@ def scan_self_memory_reads(
 
     for index, ins in enumerate(instructions):
         ops = ins.operands
-        if is_memory_load(ins):
+        access_kind = memory_access_kind(ins)
+        if access_kind is not None:
             for operand in ops:
                 if operand.type != ARM64_OP_MEM:
                     continue
@@ -198,6 +205,7 @@ def scan_self_memory_reads(
                         {
                             "site": ins.address,
                             "mnemonic": ins.mnemonic,
+                            "access": access_kind,
                             "offset": displacement,
                             "targets": sorted(target_offsets[displacement]),
                             "context": [
@@ -221,8 +229,6 @@ def scan_self_memory_reads(
         for register in written_registers(dis, ins):
             aliases.discard(register)
         if ins.id in {ARM64_INS_BL, ARM64_INS_BLR}:
-            # AAPCS64 return value overwrites x0. A preserved this alias such as
-            # x19 remains valid and may later be moved back into x0.
             aliases.discard("x0")
         if alias_copy_destination is not None:
             aliases.add(alias_copy_destination)
@@ -256,14 +262,14 @@ def main() -> int:
     set_parameter_end = next_function_start(starts, SET_PARAMETER_START)
     view = BinaryView(args.lib)
     try:
-        offsets, reads = scan_self_memory_reads(
+        offsets, accesses = scan_self_memory_accesses(
             view, SET_PARAMETER_START, set_parameter_end, param_offsets
         )
     finally:
         view.close()
 
     report = {
-        "schema": 4,
+        "schema": 5,
         "targets": list(TARGET_VALUES),
         "string_literal_present": target_string_literals(args.stringliteral_json),
         "dump_declarations": declarations,
@@ -276,9 +282,25 @@ def main() -> int:
             "resolved_name": methods.get(SET_PARAMETER_START),
             "dump_signature": find_method_signature(args.dump_cs, SET_PARAMETER_START),
             "self_memory_offsets": [f"0x{offset:X}" for offset in offsets],
-            "target_field_reads": reads,
+            "target_field_accesses": accesses,
             "observed_targets": sorted(
-                {target for hit in reads for target in hit["targets"]}
+                {target for hit in accesses for target in hit["targets"]}
+            ),
+            "written_targets": sorted(
+                {
+                    target
+                    for hit in accesses
+                    if hit["access"] == "write"
+                    for target in hit["targets"]
+                }
+            ),
+            "read_targets": sorted(
+                {
+                    target
+                    for hit in accesses
+                    if hit["access"] == "read"
+                    for target in hit["targets"]
+                }
             ),
         },
     }
@@ -294,7 +316,8 @@ def main() -> int:
                 "load_task_param_offsets": report["load_task_param_offsets"],
                 "set_parameter_signature": report["set_parameter"]["dump_signature"],
                 "self_memory_offsets": report["set_parameter"]["self_memory_offsets"],
-                "set_parameter_observed_targets": report["set_parameter"]["observed_targets"],
+                "written_targets": report["set_parameter"]["written_targets"],
+                "read_targets": report["set_parameter"]["read_targets"],
             },
             sort_keys=True,
         )
