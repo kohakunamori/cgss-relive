@@ -63,6 +63,42 @@ class ResourceManifestTests(unittest.TestCase):
             self.assertEqual(report["category_counts"]["<unknown>"], 1)
             self.assertEqual(report["master_mdb"]["hash"], "6" * 32)
             self.assertEqual(report["unknown_category_examples"][0]["name"], "future.unknown")
+            self.assertEqual(
+                report["name_shape"],
+                {
+                    "names_with_slash": 2,
+                    "unique_basenames": 8,
+                    "basename_collision_groups": 0,
+                    "basename_hash_conflict_groups": 0,
+                },
+            )
+
+    def test_name_shape_detects_basename_collisions_without_exporting_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "manifest.db"
+            conn = sqlite3.connect(path)
+            try:
+                conn.execute("CREATE TABLE manifests (name TEXT, hash TEXT)")
+                conn.executemany(
+                    "INSERT INTO manifests(name, hash) VALUES (?, ?)",
+                    [
+                        ("a/shared.unity3d", "1" * 32),
+                        ("b/shared.unity3d", "2" * 32),
+                        ("c/same.acb", "3" * 32),
+                        ("d/same.acb", "3" * 32),
+                        ("plain.awb", "4" * 32),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            report = MODULE.inspect_manifest(path, unknown_examples=0)
+            self.assertEqual(report["name_shape"]["names_with_slash"], 4)
+            self.assertEqual(report["name_shape"]["unique_basenames"], 3)
+            self.assertEqual(report["name_shape"]["basename_collision_groups"], 2)
+            self.assertEqual(report["name_shape"]["basename_hash_conflict_groups"], 1)
+            self.assertEqual(report["unknown_category_examples"], [])
 
     def test_catalog_is_normalized_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
