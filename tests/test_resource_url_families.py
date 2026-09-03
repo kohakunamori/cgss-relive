@@ -42,6 +42,65 @@ class ResourceURLFamilyTests(unittest.TestCase):
             (root / "objects" / "01" / digest, digest),
         )
 
+    def test_path_shaped_manifest_name_wins_before_shorter_suffix(self) -> None:
+        root = Path("cache")
+        path_digest = "11111111111111111111111111111111"
+        bare_digest = "22222222222222222222222222222222"
+        route = "/dl/10133800/High/AssetBundles/Android/chara/body/foo.unity3d"
+        index = {
+            "chara/body/foo.unity3d": path_digest,
+            "foo.unity3d": bare_digest,
+        }
+        self.assertEqual(
+            resolve_resource_request(root, route, manifest_index=index),
+            (root / "objects" / "11" / path_digest, path_digest),
+        )
+
+    def test_conflicting_basenames_do_not_create_aliases(self) -> None:
+        root = Path("cache")
+        first_digest = "33333333333333333333333333333333"
+        second_digest = "44444444444444444444444444444444"
+        index = {
+            "a/shared.unity3d": first_digest,
+            "b/shared.unity3d": second_digest,
+        }
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/AssetBundles/Android/a/shared.unity3d",
+                manifest_index=index,
+            ),
+            (root / "objects" / "33" / first_digest, first_digest),
+        )
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/AssetBundles/Android/b/shared.unity3d",
+                manifest_index=index,
+            ),
+            (root / "objects" / "44" / second_digest, second_digest),
+        )
+        self.assertIsNone(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/AssetBundles/Android/shared.unity3d",
+                manifest_index=index,
+            )
+        )
+
+    def test_path_shaped_lz4_name_strips_extension_at_same_suffix_depth(self) -> None:
+        root = Path("cache")
+        digest = "55555555555555555555555555555555"
+        route = "/dl/resources/High/AssetBundles/Android/chara/body/foo.unity3d.lz4"
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                route,
+                manifest_index={"chara/body/foo.unity3d": digest},
+            ),
+            (root / "objects" / "55" / digest, digest),
+        )
+
     def test_manifest_db_loader_is_read_only_name_to_hash_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             db = Path(temp) / "manifest.db"
