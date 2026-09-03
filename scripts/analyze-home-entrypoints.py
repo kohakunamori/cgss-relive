@@ -20,12 +20,17 @@ from capstone.arm64 import ARM64_INS_BL, ARM64_OP_IMM
 from elftools.elf.elffile import ELFFile
 
 HOME_PREFIX = "Stage.Home$$"
-MAX_ENTRY_METHODS = 48
+MAX_ENTRY_METHODS = 32
 MAX_ENTRY_SIZE = 0x200
 
+# Keep this intentionally narrow. The class has 249 methods; substring selectors
+# for generic words such as Load/Refresh/Create/Setup pulled ordinary business
+# helpers into the report. Exact lifecycle names plus the view-entry family are
+# sufficient to identify immediate Home initialization dependencies.
 ENTRY_PATTERNS = (
     re.compile(r"^(?:Awake|Start|OnEnable|Initialize|Init|Setup|Create|Load|Refresh|Ready)$", re.I),
-    re.compile(r"(?:StartView|ViewProcess|Initialize|Setup|Create|Load|Refresh|UpdateHome|HomeView)", re.I),
+    re.compile(r"^(?:StartView|StartViewProcess|ViewProcess|HomeView)(?:$|[_<].*)", re.I),
+    re.compile(r"^(?:StartView|StartViewProcess|ViewProcess|HomeView).*", re.I),
 )
 
 DEPENDENCY_TERMS = (
@@ -211,7 +216,7 @@ def main() -> int:
         for method in entry_methods
     ]
     report = {
-        "schema": 2,
+        "schema": 3,
         "class": "Stage.Home",
         "class_method_count": len(home_methods),
         "selected_method_count": len(entry_methods),
