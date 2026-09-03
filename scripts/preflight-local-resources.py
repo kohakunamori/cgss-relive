@@ -7,15 +7,23 @@ resource names, hashes, manifest rows, database contents, or object bytes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sqlite3
-import sys
+import struct
 from pathlib import Path
 
 FINAL_RESOURCE_VERSION = "10133800"
 EXPECTED_MANIFEST_ROWS = 220837
 EXPECTED_UNIQUE_HASHES = 220803
 WIRE_MANIFESTS = ("all_dbmanifest", "Android_AHigh_SHigh")
+ANDROID_MANIFEST_NAME = "Android_AHigh_SHigh"
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+class WireManifestError(ValueError):
+    """Raised when the frozen bootstrap wire chain is malformed."""
 
 
 def open_manifest_readonly(path: Path) -> sqlite3.Connection:
@@ -41,11 +49,138 @@ def validate_hash(value: str) -> bool:
     return True
 
 
+def parse_android_manifest_md5(data: bytes) -> str:
+    text = data.decode("utf-8", errors="replace")
+    pattern = rf"(?:^|\r?\n){re.escape(ANDROID_MANIFEST_NAME)},([0-9a-fA-F]{{32}}),"
+    match = re.search(pattern, text)
+    if not match:
+        match = re.search(rf"{re.escape(ANDROID_MANIFEST_NAME)},([0-9a-fA-F]{{32}}),", text)
+    if not match:
+        raise WireManifestError("android manifest entry missing from wire index")
+    return match.group(1).lower()
+
+
+def cgss_lz4_decompress(raw: bytes) -> bytes:
+    if len(raw) < 16:
+        raise WireManifestError("wire manifest is shorter than CGSS wrapper")
+
+    expected_size = struct.unpack_from("<I", raw, 4)[0]
+    src = memoryview(raw)[16:]
+    pos = 0
+    out = bytearray()
+
+    def read_length(base: int) -> int:
+        nonlocal pos
+        length = base
+        if base == 15:
+            while True:
+                if pos >= len(src):
+                    raise WireManifestError("truncated LZ4 extended length")
+                value = int(src[pos])
+                pos += 1
+                length += value
+                if value != 255:
+                    break
+        return length
+
+    while pos < len(src):
+        token = int(src[pos])
+        pos += 1
+        literal_length = read_length(token >> 4)
+        if pos + literal_length > len(src):
+            raise WireManifestError("truncated LZ4 literal run")
+        out.extend(src[pos : pos + literal_length])
+        pos += literal_length
+
+        if pos == len(src):
+            break
+        if pos + 2 > len(src):
+            raise WireManifestError("truncated LZ4 match offset")
+        offset = int(src[pos]) | (int(src[pos + 1]) << 8)
+        pos += 2
+        if offset <= 0 or offset > len(out):
+            raise WireManifestError("invalid LZ4 match offset")
+
+        match_length = read_length(token & 0x0F) + 4
+        for _ in range(match_length):
+            out.append(out[-offset])
+            if len(out) > expected_size:
+                raise WireManifestError("LZ4 output exceeded wrapper-declared size")
+
+    if len(out) != expected_size:
+        raise WireManifestError("LZ4 decoded size does not match wrapper")
+    return bytes(out)
+
+
+def sha256_file(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
+def verify_wire_manifest_chain(wire_dir: Path, manifest_db: Path) -> tuple[dict[str, bool], list[str]]:
+    status = {
+        "index_parsed": False,
+        "android_wire_md5_matches_index": False,
+        "android_wire_decodes": False,
+        "decoded_is_sqlite": False,
+        "decoded_matches_manifest_db": False,
+    }
+    failures: list[str] = []
+    index_path = wire_dir / WIRE_MANIFESTS[0]
+    android_path = wire_dir / WIRE_MANIFESTS[1]
+    if not index_path.is_file() or not android_path.is_file() or not manifest_db.is_file():
+        return status, failures
+
+    try:
+        expected_md5 = parse_android_manifest_md5(index_path.read_bytes())
+    except (OSError, WireManifestError):
+        failures.append("wire_index_invalid")
+        return status, failures
+    status["index_parsed"] = True
+
+    try:
+        compressed = android_path.read_bytes()
+    except OSError:
+        failures.append("wire_android_manifest_unreadable")
+        return status, failures
+    actual_md5 = hashlib.md5(compressed).hexdigest()
+    if actual_md5.lower() != expected_md5:
+        failures.append("wire_android_manifest_md5_mismatch")
+        return status, failures
+    status["android_wire_md5_matches_index"] = True
+
+    try:
+        decoded = cgss_lz4_decompress(compressed)
+    except WireManifestError:
+        failures.append("wire_android_manifest_decode_failed")
+        return status, failures
+    status["android_wire_decodes"] = True
+
+    if not decoded.startswith(SQLITE_MAGIC):
+        failures.append("wire_android_manifest_not_sqlite")
+        return status, failures
+    status["decoded_is_sqlite"] = True
+
+    try:
+        matches = hashlib.sha256(decoded).digest() == sha256_file(manifest_db)
+    except OSError:
+        failures.append("manifest_db_unreadable")
+        return status, failures
+    if not matches:
+        failures.append("wire_manifest_db_mismatch")
+        return status, failures
+    status["decoded_matches_manifest_db"] = True
+    return status, failures
+
+
 def run_preflight(root: Path, manifest_db: Path, *, version: str) -> dict[str, object]:
     root = root.resolve()
     manifest_db = manifest_db.resolve()
     report: dict[str, object] = {
-        "schema": 1,
+        "schema": 2,
         "resource_version": str(version),
         "expected": {
             "manifest_rows": EXPECTED_MANIFEST_ROWS,
@@ -91,6 +226,9 @@ def run_preflight(root: Path, manifest_db: Path, *, version: str) -> dict[str, o
     report["wire_manifests_present"] = wire_present
     if wire_present != len(WIRE_MANIFESTS):
         failures.append("wire_manifest_missing")
+    wire_chain, wire_failures = verify_wire_manifest_chain(wire_dir, manifest_db)
+    report["wire_chain"] = wire_chain
+    failures.extend(wire_failures)
 
     object_root = root / "objects"
     missing_objects = 0
