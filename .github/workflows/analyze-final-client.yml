@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '.github/workflows/analyze-final-client.yml'
+      - 'scripts/extract-launchable-activity.py'
       - 'scripts/analyze-final-client-il2cpp.py'
       - 'scripts/analyze-bootstrap-continuations.py'
       - 'scripts/analyze-home-entrypoints.py'
@@ -38,6 +39,20 @@ jobs:
             'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
           echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
           unzip -q work/final.xapk -d work/xapk
+
+      - name: Extract sanitized launchable activity identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAPT=$(find "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}/build-tools" -type f -name aapt -print 2>/dev/null | sort -V | tail -1)
+          test -n "$AAPT"
+          python scripts/extract-launchable-activity.py \
+            --aapt "$AAPT" \
+            --apk-root work/xapk \
+            --package jp.co.bandainamcoent.BNEI0242 \
+            --version-name 11.6.3 \
+            --version-code 438 \
+            --output reports/launchable-activity.json
 
       - name: Extract and verify arm64 IL2CPP specimen
         shell: bash
