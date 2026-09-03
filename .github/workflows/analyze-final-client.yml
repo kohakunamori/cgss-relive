@@ -7,6 +7,7 @@ on:
       - '.github/workflows/analyze-final-client.yml'
       - 'scripts/analyze-final-client-il2cpp.py'
       - 'scripts/analyze-bootstrap-continuations.py'
+      - 'scripts/analyze-home-entrypoints.py'
 
 permissions:
   contents: read
@@ -91,7 +92,7 @@ jobs:
           test -s work/dump/dump.cs
           test -s work/dump/script.json
 
-      - name: Targeted callgraph and continuation analysis
+      - name: Targeted callgraph, continuation and Home analysis
         shell: bash
         run: |
           set -euo pipefail
@@ -104,6 +105,10 @@ jobs:
           python scripts/analyze-bootstrap-continuations.py \
             --lib work/libil2cpp.so \
             --output reports/bootstrap-continuations.json
+          python scripts/analyze-home-entrypoints.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --output reports/home-entrypoints.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
