@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Analyze sanitized cgss-relive runtime event logs and compare profile runs.
+"""Analyze sanitized cgss-relive runtime evidence and compare profile runs.
 
-Input must be JSONL emitted by ``server.safe_events.SafeEventLog``. Both control
-and resource servers use the same strict sanitized schema. Resource-plane routes
-are synthetic categories such as ``@resource/manifest``; raw filenames, hashes,
-query strings, request bodies and account/session values are never accepted.
+Control/resource JSONL must use ``server.safe_events.SafeEventLog``'s strict
+schema. Independent server streams can be merged by timestamp with repeated
+``--merge-run LABEL=PATH``.
 
-Multiple sanitized files from one runtime can be merged by timestamp with
-repeated ``--merge-run LABEL=PATH`` arguments. This is the preferred way to
-combine independent control-server and resource-server logs without concurrent
-writes to one file.
+Optional ``--device-log LABEL=PATH`` accepts only the category-only output of
+``scripts/sanitize-device-logcat.py``. Device diagnostics are attached to the
+matching run but never enter the HTTP/resource sequence, phase machine, or
+cross-run signature comparison. This prevents a logcat line from fabricating
+network progress while still surfacing TLS/crash/ANR evidence.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -38,10 +39,25 @@ _ALLOWED_EVENT_KEYS = {
 _ALLOWED_HEADERS = {"APP-VER", "RES-VER", "X-Unity-Version"}
 _ALLOWED_RESPONSE_HEADERS = {"result_code", "required_res_ver", "app_ver"}
 _ALLOWED_API_CANDIDATE_KEYS = {"group", "key", "name", "literal_index"}
+_ALLOWED_DEVICE_KEYS = {"schema", "time", "source", "category", "severity"}
+_ALLOWED_DEVICE_CATEGORIES = {
+    "process_crash",
+    "anr",
+    "tls_certificate_error",
+    "tls_handshake_error",
+    "dns_error",
+    "connection_refused",
+    "network_unreachable",
+    "network_timeout",
+    "http_error",
+    "unity_web_request_error",
+    "process_exit",
+}
+_ALLOWED_DEVICE_SEVERITIES = {"warning", "error", "fatal"}
 
 
 class UnsafeEventLog(ValueError):
-    """Raised when a JSONL file is not the documented sanitized event format."""
+    """Raised when a JSONL file is not one of the documented sanitized formats."""
 
 
 @dataclass(frozen=True)
@@ -123,25 +139,51 @@ def validate_event(value: Any, *, line_number: int) -> dict[str, Any]:
     return value
 
 
-def load_events(path: Path) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+def validate_device_event(value: Any, *, line_number: int) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _ALLOWED_DEVICE_KEYS:
+        raise UnsafeEventLog(f"device line {line_number}: event is not the strict device schema")
+    if value.get("schema") != 1:
+        raise UnsafeEventLog(f"device line {line_number}: unsupported schema")
+    if value.get("source") != "device_logcat":
+        raise UnsafeEventLog(f"device line {line_number}: unsupported source")
+    if not isinstance(value.get("time"), (int, float)):
+        raise UnsafeEventLog(f"device line {line_number}: time must be numeric")
+    if value.get("category") not in _ALLOWED_DEVICE_CATEGORIES:
+        raise UnsafeEventLog(f"device line {line_number}: unsupported category")
+    if value.get("severity") not in _ALLOWED_DEVICE_SEVERITIES:
+        raise UnsafeEventLog(f"device line {line_number}: unsupported severity")
+    return value
+
+
+def _load_jsonl(path: Path) -> list[Any]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         raise UnsafeEventLog(f"could not read {path}: {exc}") from exc
+    values: list[Any] = []
     for line_number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         try:
-            value = json.loads(line)
+            values.append((line_number, json.loads(line)))
         except json.JSONDecodeError as exc:
             raise UnsafeEventLog(f"line {line_number}: invalid JSON: {exc.msg}") from exc
-        events.append(validate_event(value, line_number=line_number))
-    return events
+    return values
+
+
+def load_events(path: Path) -> list[dict[str, Any]]:
+    return [validate_event(value, line_number=line) for line, value in _load_jsonl(path)]
+
+
+def load_device_events(path: Path) -> list[dict[str, Any]]:
+    return [
+        validate_device_event(value, line_number=line)
+        for line, value in _load_jsonl(path)
+    ]
 
 
 def merge_event_streams(streams: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Merge sanitized streams by event timestamp with deterministic tie order."""
+    """Merge sanitized control/resource streams by numeric timestamp."""
     tagged: list[tuple[float, int, int, dict[str, Any]]] = []
     for source_index, events in enumerate(streams):
         for event_index, event in enumerate(events):
@@ -151,6 +193,57 @@ def merge_event_streams(streams: list[list[dict[str, Any]]]) -> list[dict[str, A
             tagged.append((float(timestamp), source_index, event_index, event))
     tagged.sort(key=lambda item: (item[0], item[1], item[2]))
     return [event for _, _, _, event in tagged]
+
+
+def merge_device_streams(streams: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    events = [event for stream in streams for event in stream]
+    events.sort(key=lambda event: float(event["time"]))
+    return events
+
+
+def analyze_device_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
+    categories = Counter(str(event["category"]) for event in events)
+    severities = Counter(str(event["severity"]) for event in events)
+    first_event = None
+    if events:
+        event = min(events, key=lambda item: float(item["time"]))
+        first_event = {
+            "time": float(event["time"]),
+            "category": str(event["category"]),
+            "severity": str(event["severity"]),
+        }
+    first_failure = None
+    for event in sorted(events, key=lambda item: float(item["time"])):
+        if event["severity"] in {"error", "fatal"}:
+            first_failure = {
+                "time": float(event["time"]),
+                "category": str(event["category"]),
+                "severity": str(event["severity"]),
+            }
+            break
+    return {
+        "events": len(events),
+        "categories": dict(sorted(categories.items())),
+        "severities": dict(sorted(severities.items())),
+        "first_event": first_event,
+        "first_failure": first_failure,
+        "has_tls_error": bool(
+            categories["tls_certificate_error"] or categories["tls_handshake_error"]
+        ),
+        "has_process_crash": bool(categories["process_crash"]),
+        "has_anr": bool(categories["anr"]),
+        "has_network_error": any(
+            categories[name]
+            for name in (
+                "dns_error",
+                "connection_refused",
+                "network_unreachable",
+                "network_timeout",
+                "http_error",
+                "unity_web_request_error",
+            )
+        ),
+    }
 
 
 def _response_header(event: Mapping[str, Any], name: str) -> Any:
@@ -364,18 +457,26 @@ def _parse_run(value: str) -> tuple[str, Path]:
     return path.stem, path
 
 
-def _parse_merge_run(value: str) -> tuple[str, Path]:
+def _parse_label_path(value: str, option: str) -> tuple[str, Path]:
     if "=" not in value:
-        raise argparse.ArgumentTypeError("--merge-run must be LABEL=PATH")
+        raise argparse.ArgumentTypeError(f"{option} must be LABEL=PATH")
     label, raw_path = value.split("=", 1)
     if not label or not raw_path:
-        raise argparse.ArgumentTypeError("--merge-run must be LABEL=PATH")
+        raise argparse.ArgumentTypeError(f"{option} must be LABEL=PATH")
     return label, Path(raw_path)
+
+
+def _parse_merge_run(value: str) -> tuple[str, Path]:
+    return _parse_label_path(value, "--merge-run")
+
+
+def _parse_device_log(value: str) -> tuple[str, Path]:
+    return _parse_label_path(value, "--device-log")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Analyze sanitized cgss-relive runtime event JSONL and compare profile runs"
+        description="Analyze sanitized cgss-relive runtime evidence and compare profile runs"
     )
     parser.add_argument("runs", nargs="*", type=_parse_run, metavar="[LABEL=]EVENTS.jsonl")
     parser.add_argument(
@@ -384,12 +485,21 @@ def main() -> int:
         type=_parse_merge_run,
         default=[],
         metavar="LABEL=EVENTS.jsonl",
-        help="repeat with the same LABEL to merge control/resource logs by numeric event time",
+        help="repeat with the same LABEL to merge control/resource logs by numeric time",
+    )
+    parser.add_argument(
+        "--device-log",
+        action="append",
+        type=_parse_device_log,
+        default=[],
+        metavar="LABEL=DEVICE.jsonl",
+        help="attach strict sanitized device-logcat evidence to an existing run label",
     )
     parser.add_argument("-o", "--output", type=Path, help="optional JSON report path")
     args = parser.parse_args()
 
     loaded: list[tuple[str, list[dict[str, Any]]]] = []
+    device_by_label: dict[str, list[dict[str, Any]]] = {}
     try:
         labels: set[str] = set()
         for label, path in args.runs:
@@ -410,14 +520,31 @@ def main() -> int:
 
         if not loaded:
             raise UnsafeEventLog("at least one run or --merge-run is required")
+
+        device_paths: dict[str, list[Path]] = {}
+        for label, path in args.device_log:
+            if label not in labels:
+                raise UnsafeEventLog(f"--device-log label has no matching run: {label}")
+            device_paths.setdefault(label, []).append(path)
+        for label, paths in device_paths.items():
+            device_by_label[label] = merge_device_streams(
+                [load_device_events(path) for path in paths]
+            )
     except UnsafeEventLog as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    run_reports: dict[str, Any] = {}
+    for label, events in loaded:
+        run_report = analyze_events(events)
+        if label in device_by_label:
+            run_report["device_diagnostics"] = analyze_device_events(device_by_label[label])
+        run_reports[label] = run_report
+
     report = {
-        "schema": 3,
+        "schema": 4,
         "final_resource_version": FINAL_RESOURCE_VERSION,
-        "runs": {label: analyze_events(events) for label, events in loaded},
+        "runs": run_reports,
         "comparison": compare_runs(loaded),
     }
     text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
