@@ -1,8 +1,8 @@
 # CGSS Android 11.6.3 `/load/index` parser reduction
 
-This note records the current clean-room reduction of final Android 11.6.3
+This note records the clean-room reduction of final Android 11.6.3
 `Stage.LoadTask.Parse` and the synthetic profiles implemented by the server.
-Static evidence from the final IL2CPP specimen supersedes earlier historical
+Static evidence from the exact final IL2CPP specimen supersedes historical
 response-shape assumptions.
 
 ## Final parser target
@@ -14,10 +14,9 @@ response-shape assumptions.
 - missing hard children commonly branch to the shared early exit near
   `0x0486fa88`
 
-A critical semantic detail is that an early hard-key miss can stop the remainder
-of this parser while the framework still sees the common/base success result.
-Therefore “server returned result_code=1” is not evidence that the entire
-`/load/index` state was populated.
+A hard-key miss can stop the remainder of the parser while the framework still
+sees the common/base success result. Therefore server `result_code=1` is not by
+itself proof that all `/load/index` state was populated.
 
 ## Parser primitives
 
@@ -35,8 +34,7 @@ response fields.
 
 ## Required envelope and `common_define`
 
-For the established-account/non-newbie path used by preservation tests, the
-server should provide:
+For the established-account/non-newbie preservation path:
 
 ```text
 data
@@ -89,12 +87,7 @@ The actual date key is `birth`; `birthday` and `last_login` are not parser keys 
 the analyzed function. `leader_serial_id`, emblem/support serial additions and
 similar trailing fields are guarded.
 
-The earlier repository note that an empty `user_unit_list` required
-`user_info.unit_slot` was incorrect. Final static evidence shows the top-level
-unit list is guarded and an empty list is safe. `unit_slot` belongs to each
-**non-empty unit element**, not `user_info`.
-
-## `user_unit_list`: corrected final contract
+## `user_unit_list`: final conservative contract
 
 Top-level `user_unit_list` is presence-guarded and may be omitted or empty.
 
@@ -106,12 +99,17 @@ name
 ```
 
 It then checks formatted keys `serial_id_0` through `serial_id_4` in a loop whose
-upper bound is statically fixed by `cmp w20,#5`. Missing/zero serial keys are
-safe in this pass.
+upper bound is statically fixed by `cmp w20,#5`. Missing/zero serial keys are safe
+in this pass.
 
-A later independent unit-processing entry also directly reads `unit_id` and
-`name`. To satisfy both known passes, the starter-visible profile deliberately
-uses the conservative shape:
+A later independent unit-processing pass directly reads:
+
+```text
+unit_id
+name
+```
+
+To satisfy both known passes, the starter-visible profile uses:
 
 ```json
 {
@@ -126,12 +124,7 @@ uses the conservative shape:
 }
 ```
 
-This is synthetic preservation state. `unit_slot=1` and `unit_id=1` are not
-copied from an account capture.
-
-The exact second-pass requirements for optional pose/costume/dress-customize
-substructures remain below the threshold for claiming them mandatory; the
-server does not invent them without runtime/static evidence.
+This is synthetic preservation state, not copied account state.
 
 ## Card/chara starter state
 
@@ -164,21 +157,21 @@ Current synthetic character row:
 {"chara_id": 101, "fan": 0}
 ```
 
-The server also sets guarded `leader_serial_id=1` as a functional Home choice.
+The server also sets guarded `leader_serial_id=1` as the initial Home leader.
 
 ## Other sections
 
 Most observed feature/data sections are top-level guarded and may be omitted.
 Examples include item, room, live, event, story, login-bonus, popup, panel mission
-and many campaign sections.
+and campaign sections.
 
-The safe rule is:
+Safe rule:
 
-> if a whole guarded feature is not needed, omit the key instead of sending a
+> If a whole guarded feature is not needed, omit the key rather than sending a
 > partially populated object.
 
-Some guarded keys have hard children once present. For example `music_list`, if
-provided, must contain `normal` (which may itself be an empty array).
+Some guarded parents have hard children once present. Example: `music_list`, if
+provided, must contain `normal`, which may itself be an empty array.
 
 ## Implemented profile layers
 
@@ -187,7 +180,7 @@ remain interpretable.
 
 ### 1. Strict minimal
 
-`build_minimal_load_index_data()` provides the common/user bootstrap scalars only.
+`build_minimal_load_index_data()` provides common/user bootstrap scalars only.
 
 ```powershell
 python -m server.http_server --experimental-minimal-load-index
@@ -196,8 +189,7 @@ python -m server.http_server --experimental-minimal-load-index
 ### 2. Empty Home candidate
 
 `build_home_candidate_load_index_data()` adds selected explicit empty manager
-containers plus `music_list={"normal": []}`. It no longer adds a synthetic
-`user_info.unit_slot`.
+containers plus `music_list={"normal": []}`.
 
 ```powershell
 python -m server.http_server --experimental-home-load-index
@@ -208,8 +200,7 @@ python -m server.http_server --experimental-home-load-index
 `build_starter_visible_load_index_data()` adds:
 
 - one synthetic owned serial `1` for final-master card `100001`;
-- one corrected unit carrying `unit_slot=1`, `unit_id=1`, name and five serial
-  slots;
+- one unit carrying `unit_slot=1`, `unit_id=1`, name and five serial slots;
 - one `user_chara_list` row for `chara_id=101`;
 - guarded `leader_serial_id=1`.
 
@@ -220,12 +211,12 @@ python -m server.http_server `
   --producer-name "Relive Producer"
 ```
 
-The starter-visible profile should be the first real-device test. Empty/strict
-profiles are differential fallbacks only.
+Use this profile for the first real-device run. Empty/strict profiles are
+fallback differentials only.
 
-## `/load/index` success -> Home control flow
+## `/load/index` success -> Home is now statically closed
 
-The final static call graph closes the success side as:
+The final call graph is:
 
 ```text
 BootMain.StartConnect
@@ -238,18 +229,67 @@ BootMain.StartConnect
   -> BootMain.CallbackOnSuccessLoad
   -> BootMain.LastInitialized
   -> BootMain.ChangeView
-  -> Stage.SceneManager.ChangeView(next = loginBonus ? 7 : 6)
-  -> Home semantics
+  -> Stage.SceneManager.ChangeView
 ```
 
-There is no statically proven mandatory network request immediately after
-successful `/load/index`. `/load/update_agreement_status` is driven by a Home UI
-interaction; `/load/title` is a Title-screen user-driven task rather than a hard
+The final `StageSceneDefine.eViewId` enum directly maps:
+
+```text
+BootMain       = 5
+Home           = 6
+Login_Bonus    = 7
+Asset_Download = 8
+```
+
+`BootMain.ChangeView` has the exact bounded branch:
+
+```text
+call LoginBonusData.IsExistLoginBonus
+...
+mov  w8, #6
+cinc w1, w8, ne
+branch Stage.SceneManager.ChangeView
+```
+
+Thus:
+
+```text
+no login bonus -> Home (6)
+login bonus    -> Login_Bonus (7)
+```
+
+Independent call-site corroboration includes:
+
+```text
+Stage.Footer.OnClickHomeButton -> ChangeView(6)
+Stage.MenuTop.OnPushOsBackKey  -> ChangeView(6)
+```
+
+The old statement that IDs 6/7 were statically unclosed is obsolete.
+
+There is no statically proven mandatory network request immediately after a
+successful `/load/index`. `/load/update_agreement_status` is driven by Home UI
+interaction; `/load/title` is a Title-screen/user-driven task rather than a hard
 Home prerequisite.
 
-The exact enum names behind view IDs `6` and `7` remain unclosed statically, so a
-real-device transition is still required before labeling that mapping as fully
-confirmed.
+## Pre-`/load/index` resource stage
+
+The parent bootstrap chain is also now statically closed:
+
+```text
+/load/check 214
+-> persist RES_VER=10133800
+-> ResourcesManager.GameInitialize resumes
+-> AssetManager.InitializeManifest
+-> DownloadOrLoadForInitialize resource work
+-> GameInitialize completes
+-> BootMain.Initialize resumes
+-> BootMain.StartConnect
+-> /load/index
+```
+
+A second `/load/check` is not a required link. In runtime logs, resource-plane
+requests after the 214 are the expected evidence that this stage advanced.
 
 ## Proven vs runtime-pending
 
@@ -257,16 +297,17 @@ Statically proven or strongly closed for final 11.6.3:
 
 - hard `data/common_define` prefix and seven direct integers;
 - established-account `user_info` scalar set;
-- optional/guard-heavy nature of the accumulated schema;
+- guard-heavy nature of the accumulated schema;
 - non-empty unit `unit_slot + name` first pass;
 - fixed five serial slots;
 - later unit pass requiring `unit_id + name`;
-- `/load/index` success callback chain toward Home;
-- `/load/title` is not a mandatory link in that chain.
+- `/load/index` success callback chain;
+- `Home=6`, `Login_Bonus=7`, `Asset_Download=8`;
+- `/load/title` is not a mandatory link in the Home chain;
+- 214 continues into resource initialization before `/load/index`.
 
 Still runtime-pending:
 
 - original-client acceptance of the synthetic starter profile;
-- visible identity of ChangeView IDs 6/7;
-- whether a local resource prerequisite blocks BootMain before `/load/index`;
-- first unsupported/local-state blocker after Home transition.
+- actual visible rendering of Home with the local compatibility stack;
+- first unsupported endpoint/local-state blocker after Home entry.
