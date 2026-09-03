@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Bounded clean-room analysis of final LoadTask ``load_state`` / ``next_api``.
 
-Those names are present in the IL2CPP metadata-derived dump but are not guaranteed
-to exist as managed string literals. This pass treats dump.cs field metadata as
-the primary evidence, records string-literal presence separately, and tracks
-memory reads from the LoadTask.SetParameter argument object by field offset. It
-emits only the two target declarations, aggregate argument offsets, and tiny
-contexts around matching target-offset reads.
+The exact dump declares both fields on ``LoadTaskParam`` while final
+``Stage.LoadTask.SetParameter`` has no explicit arguments. The relevant object is
+therefore ``this`` (x0), not an x1 parameter. This pass records the two metadata
+field offsets, string-literal presence separately, and memory reads from aliases
+of the SetParameter ``this`` pointer. It emits only aggregate offsets and tiny
+contexts around matching target-field reads.
 """
 from __future__ import annotations
 
@@ -17,14 +17,22 @@ from pathlib import Path
 from typing import Any
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from capstone.arm64 import ARM64_INS_ADD, ARM64_INS_MOV, ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
+from capstone.arm64 import (
+    ARM64_INS_ADD,
+    ARM64_INS_BL,
+    ARM64_INS_BLR,
+    ARM64_INS_MOV,
+    ARM64_OP_IMM,
+    ARM64_OP_MEM,
+    ARM64_OP_REG,
+)
 from elftools.elf.elffile import ELFFile
 
 SET_PARAMETER_START = 0x04877A14
 TARGET_VALUES = ("load_state", "next_api")
 MAX_FUNCTION_SIZE = 0x4000
 CONTEXT_RADIUS = 5
-MAX_ARGUMENT_OFFSETS = 96
+MAX_SELF_OFFSETS = 128
 _TYPE_RE = re.compile(r"^\s*(?:public|private|internal|protected)?\s*(?:sealed\s+|abstract\s+|static\s+)?(?:class|struct)\s+([^\s:{]+)")
 _OFFSET_RE = re.compile(r"//\s*0x([0-9A-Fa-f]+)\s*$")
 _RVA_RE = re.compile(r"//\s*RVA:\s*0x([0-9A-Fa-f]+)")
@@ -129,9 +137,7 @@ def find_method_signature(path: Path, rva: int) -> str | None:
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     for index, line in enumerate(lines):
         match = _RVA_RE.search(line)
-        if not match or int(match.group(1), 16) != rva:
-            continue
-        if index + 1 < len(lines):
+        if match and int(match.group(1), 16) == rva and index + 1 < len(lines):
             return lines[index + 1].strip()
     return None
 
@@ -142,7 +148,7 @@ def md() -> Cs:
     return dis
 
 
-def canonical_pointer_register(dis: Cs, reg_id: int) -> str:
+def canonical_register(dis: Cs, reg_id: int) -> str:
     name = dis.reg_name(reg_id)
     if name.startswith("w") and name[1:].isdigit():
         return "x" + name[1:]
@@ -150,11 +156,18 @@ def canonical_pointer_register(dis: Cs, reg_id: int) -> str:
 
 
 def is_memory_load(ins: Any) -> bool:
-    mnemonic = ins.mnemonic.lower()
-    return mnemonic.startswith(("ldr", "ldur", "ldp"))
+    return ins.mnemonic.lower().startswith(("ldr", "ldur", "ldp"))
 
 
-def scan_argument_memory_reads(
+def written_registers(dis: Cs, ins: Any) -> set[str]:
+    try:
+        _, writes = ins.regs_access()
+    except Exception:
+        return set()
+    return {canonical_register(dis, int(reg)) for reg in writes}
+
+
+def scan_self_memory_reads(
     view: BinaryView,
     start: int,
     end: int,
@@ -162,7 +175,7 @@ def scan_argument_memory_reads(
 ) -> tuple[list[int], list[dict[str, Any]]]:
     dis = md()
     instructions = list(dis.disasm(view.read(start, end - start), start))
-    aliases = {"x1"}
+    aliases = {"x0"}
     observed_offsets: set[int] = set()
     target_hits: list[dict[str, Any]] = []
 
@@ -173,7 +186,7 @@ def scan_argument_memory_reads(
                 if operand.type != ARM64_OP_MEM:
                     continue
                 mem = operand.mem
-                base = canonical_pointer_register(dis, int(mem.base))
+                base = canonical_register(dis, int(mem.base))
                 if base not in aliases:
                     continue
                 displacement = int(mem.disp)
@@ -194,24 +207,28 @@ def scan_argument_memory_reads(
                         }
                     )
 
+        alias_copy_destination: str | None = None
         if ins.id in {ARM64_INS_MOV, ARM64_INS_ADD} and len(ops) >= 2:
             if ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_REG:
-                destination = canonical_pointer_register(dis, int(ops[0].reg))
-                source = canonical_pointer_register(dis, int(ops[1].reg))
+                destination = canonical_register(dis, int(ops[0].reg))
+                source = canonical_register(dis, int(ops[1].reg))
                 is_alias_copy = ins.id == ARM64_INS_MOV
                 if ins.id == ARM64_INS_ADD:
                     is_alias_copy = len(ops) >= 3 and ops[2].type == ARM64_OP_IMM and int(ops[2].imm) == 0
                 if is_alias_copy and source in aliases:
-                    aliases.add(destination)
-                elif destination in aliases and destination != "x1":
-                    aliases.discard(destination)
-        elif ops and ops[0].type == ARM64_OP_REG:
-            destination = canonical_pointer_register(dis, int(ops[0].reg))
-            if destination in aliases and destination != "x1" and not is_memory_load(ins):
-                aliases.discard(destination)
+                    alias_copy_destination = destination
 
-    if len(observed_offsets) > MAX_ARGUMENT_OFFSETS:
-        raise RuntimeError("unexpectedly many parameter-object memory offsets")
+        for register in written_registers(dis, ins):
+            aliases.discard(register)
+        if ins.id in {ARM64_INS_BL, ARM64_INS_BLR}:
+            # AAPCS64 return value overwrites x0. A preserved this alias such as
+            # x19 remains valid and may later be moved back into x0.
+            aliases.discard("x0")
+        if alias_copy_destination is not None:
+            aliases.add(alias_copy_destination)
+
+    if len(observed_offsets) > MAX_SELF_OFFSETS:
+        raise RuntimeError("unexpectedly many LoadTask self-object memory offsets")
     return sorted(observed_offsets), target_hits
 
 
@@ -239,14 +256,14 @@ def main() -> int:
     set_parameter_end = next_function_start(starts, SET_PARAMETER_START)
     view = BinaryView(args.lib)
     try:
-        offsets, reads = scan_argument_memory_reads(
+        offsets, reads = scan_self_memory_reads(
             view, SET_PARAMETER_START, set_parameter_end, param_offsets
         )
     finally:
         view.close()
 
     report = {
-        "schema": 3,
+        "schema": 4,
         "targets": list(TARGET_VALUES),
         "string_literal_present": target_string_literals(args.stringliteral_json),
         "dump_declarations": declarations,
@@ -258,7 +275,7 @@ def main() -> int:
             "end": set_parameter_end,
             "resolved_name": methods.get(SET_PARAMETER_START),
             "dump_signature": find_method_signature(args.dump_cs, SET_PARAMETER_START),
-            "argument_memory_offsets": [f"0x{offset:X}" for offset in offsets],
+            "self_memory_offsets": [f"0x{offset:X}" for offset in offsets],
             "target_field_reads": reads,
             "observed_targets": sorted(
                 {target for hit in reads for target in hit["targets"]}
@@ -276,7 +293,7 @@ def main() -> int:
                 "string_literal_present": report["string_literal_present"],
                 "load_task_param_offsets": report["load_task_param_offsets"],
                 "set_parameter_signature": report["set_parameter"]["dump_signature"],
-                "argument_memory_offsets": report["set_parameter"]["argument_memory_offsets"],
+                "self_memory_offsets": report["set_parameter"]["self_memory_offsets"],
                 "set_parameter_observed_targets": report["set_parameter"]["observed_targets"],
             },
             sort_keys=True,
