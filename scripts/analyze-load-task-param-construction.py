@@ -149,12 +149,14 @@ def summarize_type_block(
         offset_match = _OFFSET_RE.search(line)
         if offset_match:
             offset = int(offset_match.group(1), 16)
-            if offset in TARGET_OFFSETS or (wanted == "NetworkTask" and offset == PARAMS_OFFSET):
+            is_target_field = wanted == "LoadTaskParam" and offset in TARGET_OFFSETS
+            is_params_field = wanted == "NetworkTask" and offset == PARAMS_OFFSET
+            if is_target_field or is_params_field:
                 fields.append(
                     {
                         "line": index + 1,
                         "offset": offset,
-                        "target": TARGET_OFFSETS.get(offset),
+                        "target": TARGET_OFFSETS.get(offset) if is_target_field else None,
                         "declaration": line.strip(),
                     }
                 )
@@ -365,7 +367,7 @@ def main() -> int:
         view.close()
 
     report = {
-        "schema": 3,
+        "schema": 4,
         "load_task_param": load_param,
         "base_param": base_param,
         "post_params": post_params,
