@@ -49,8 +49,16 @@ def process_load_check_request(
     final_res_ver: str = FINAL_RESOURCE_VERSION,
     servertime: int | None = None,
     dynamic_key: bytes | None = None,
+    is_s3: bool | None = False,
+    accept_old_resource_version: bool = False,
 ) -> BootstrapExchange:
-    """Decode a final-client load/check request and build its encrypted reply."""
+    """Decode a final-client load/check request and build its encrypted reply.
+
+    The HTTP-facing server defaults ``is_s3`` to false so a successful version
+    check selects the statically reconstructed storages-host URL family. Set
+    ``accept_old_resource_version`` only for controlled runtime differential
+    tests; normal behavior still returns 214 on a resource-version mismatch.
+    """
     udid, request = decode_client_request(headers, body, route="load/check")
     current_res_ver = _get_header(headers, "RES-VER") or ""
     sid = _get_header(headers, "SID")
@@ -62,6 +70,8 @@ def process_load_check_request(
         sid=sid,
         servertime=servertime,
         dynamic_key=dynamic_key,
+        is_s3=is_s3,
+        accept_old_resource_version=accept_old_resource_version,
     )
     return BootstrapExchange(
         udid=udid,
