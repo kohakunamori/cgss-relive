@@ -8,6 +8,11 @@ any still-unclassified suffix instead of silently guessing a URL.
 When the manifest contains a ``category`` column, suffix x declared-category
 counts are also recorded. Those values are delivery groups (for example
 ``every``/``common``), not CDN directory names.
+
+The report also records only aggregate path-shape facts for ``manifests.name``.
+It never emits path examples for this purpose. These counts allow the local
+resource resolver to prove whether basename-only lookup is sufficient or whether
+relative-path suffix matching is required.
 """
 from __future__ import annotations
 
@@ -89,6 +94,9 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
         total = 0
         unique_names: set[str] = set()
         unique_hashes: set[str] = set()
+        names_with_slash = 0
+        basename_names: dict[str, set[str]] = collections.defaultdict(set)
+        basename_hashes: dict[str, set[str]] = collections.defaultdict(set)
 
         query = "SELECT name, hash, category FROM manifests ORDER BY name" if has_declared_category else "SELECT name, hash, NULL FROM manifests ORDER BY name"
         for name, digest, declared_category in conn.execute(query):
@@ -97,6 +105,12 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
             total += 1
             unique_names.add(name)
             unique_hashes.add(digest.lower())
+            normalized_name = name.replace("\\", "/")
+            if "/" in normalized_name:
+                names_with_slash += 1
+            basename = normalized_name.rsplit("/", 1)[-1]
+            basename_names[basename].add(normalized_name)
+            basename_hashes[basename].add(digest.lower())
             suffix = suffix_for_name(name)
             suffix_counts[suffix] += 1
             category = category_for_name(name)
@@ -120,6 +134,9 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
             "SELECT COUNT(*) FROM (SELECT hash FROM manifests GROUP BY hash HAVING COUNT(*) > 1)"
         ).fetchone()[0]
 
+        basename_collision_groups = sum(1 for names in basename_names.values() if len(names) > 1)
+        basename_hash_conflict_groups = sum(1 for hashes in basename_hashes.values() if len(hashes) > 1)
+
         master = conn.execute("SELECT hash FROM manifests WHERE name='master.mdb' LIMIT 1").fetchone()
         master_hash = str(master[0]).lower() if master else None
 
@@ -134,6 +151,12 @@ def inspect_manifest(path: Path, *, unknown_examples: int = 50) -> dict[str, Any
             "unique_hashes": len(unique_hashes),
             "duplicate_name_groups": int(duplicate_names),
             "duplicate_hash_groups": int(duplicate_hash_groups),
+            "name_shape": {
+                "names_with_slash": names_with_slash,
+                "unique_basenames": len(basename_names),
+                "basename_collision_groups": basename_collision_groups,
+                "basename_hash_conflict_groups": basename_hash_conflict_groups,
+            },
             "master_mdb": {
                 "hash": master_hash,
                 "resource_path": resource_path("master.mdb", master_hash) if master_hash else None,
