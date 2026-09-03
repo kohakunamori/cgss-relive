@@ -8,33 +8,31 @@ response-shape assumptions.
 ## Final parser target
 
 - `Stage.LoadTask.Parse`: RVA `0x04850a94`
-- parser body begins near `0x04852398`
-- the earlier `0x04850a94..0x04852397` region is largely static key setup rather
-  than ordinary response reads
+- ordinary response reads begin near `0x04852398`
+- the preceding region is largely static key registration/setup
 - missing hard children commonly branch to the shared early exit near
   `0x0486fa88`
 
-A hard-key miss can stop the remainder of the parser while the framework still
-sees the common/base success result. Therefore server `result_code=1` is not by
-itself proof that all `/load/index` state was populated.
+A hard-key miss can therefore stop later state initialization while the common
+framework still observes success. Server-side `result_code=1` is not sufficient
+proof that Home state was populated.
 
 ## Parser primitives
 
 The final parser repeatedly uses three patterns:
 
-1. **hard read** — direct `JsonData.get_Item(key)` followed by a null check;
-   missing value can jump to the shared early exit;
-2. **guard read** — key enumeration/ContainsKey-style check; missing key skips
-   that feature block safely;
+1. **hard read** — direct `JsonData.get_Item(key)` followed by null check; missing
+   value can jump to shared early exit;
+2. **guard read** — key-enumeration/ContainsKey-style test; missing key skips the
+   whole feature block safely;
 3. **array guard** — count `< 1` skips the element loop, so an explicitly empty
-   array is safe for that block.
+   array is safe for that particular block.
 
-The function references hundreds of strings. That is not the number of mandatory
-response fields.
+The hundreds of referenced strings are not hundreds of mandatory response keys.
 
-## Required envelope and `common_define`
+## Required `common_define`
 
-For the established-account/non-newbie preservation path:
+For the established-account path:
 
 ```text
 data
@@ -57,9 +55,8 @@ room_lvup_jewel
 
 ## `user_info`
 
-The normal path hard-reads `tutorial_flag`, and when `user_info` is present the
-observed scalar passes require the full synthetic set currently emitted by
-`build_minimal_load_index_data()`:
+The tutorial gate hard-reads `tutorial_flag`. Once the normal `user_info` scalar
+passes are entered, the synthetic profile supplies:
 
 ```text
 tutorial_flag
@@ -83,13 +80,124 @@ last_payment_date
 stamina_heal_time
 ```
 
-The actual date key is `birth`; `birthday` and `last_login` are not parser keys in
-the analyzed function. `leader_serial_id`, emblem/support serial additions and
-similar trailing fields are guarded.
+The actual date key is `birth`; `birthday` and `last_login` are not keys in the
+analyzed final parser. `leader_serial_id`, emblem/support serial fields and
+similar tail state are guarded.
 
-## `user_unit_list`: final conservative contract
+`BaseTask.setupTutorial` at RVA `0x0476e1e4` receives the decoded
+`tutorial_flag`. The exact completed/non-newbie value is being independently
+closed by the bounded `scripts/analyze-tutorial-flag.py` pass; until that report
+is applied, the current numeric starter value must not be treated as proven merely
+because parsing reaches this call.
 
-Top-level `user_unit_list` is presence-guarded and may be omitted or empty.
+## Correct card-state split
+
+This is important for Home entry and supersedes the older starter implementation.
+
+Final `LoadTask.Parse` contains two different card-looking blocks:
+
+### `user_card_list` at approximately `0x48589cc`
+
+This top-level key is guarded and empty-safe. Its observed element handling is a
+Cenere/merge-style path with individually guarded fields. Static evidence does
+**not** show this block invoking `WorkCardData.AddCardData`.
+
+For the synthetic starter it is intentionally kept:
+
+```json
+"user_card_list": []
+```
+
+### `cs_gacha_data_cenere` at approximately `0x4858d70`
+
+The exact guarded literal is:
+
+```text
+cs_gacha_data_cenere
+```
+
+When this array is present and non-empty, each element first invokes:
+
+```text
+WorkCardData.AddCardData
+```
+
+and then hard-reads seven fields:
+
+```text
+serial_id
+card_id
+exp
+step
+love
+skill_level
+protect
+```
+
+`join_type` is guarded/optional.
+
+This is therefore the statically proven container that creates the WorkCardData
+object later consumed by Home.
+
+The synthetic card is now emitted as:
+
+```json
+"cs_gacha_data_cenere": [
+  {
+    "serial_id": 1,
+    "card_id": 100001,
+    "exp": 0,
+    "step": 0,
+    "love": 0,
+    "skill_level": 1,
+    "protect": 0
+  }
+]
+```
+
+The final `10133800` master independently proves:
+
+```text
+card_id 100001 = 島村卯月
+chara_id 101
+```
+
+The ownership serial `1` remains purely synthetic preservation state.
+
+## Why the WorkCardData container matters to Home
+
+Bounded exact-specimen Home analysis closes the immediate consumer:
+
+```text
+Stage.Home.Start
+ -> Stage.Home.PreDownloadList
+ -> Stage.Home.CardDownloadList(... serialId ...)
+```
+
+The actual startup worker is pinned at:
+
+```text
+Stage.Home.CardDownloadList @ 0x03ec0d70
+```
+
+It calls:
+
+```text
+Stage.WorkCardData.GetCardDataWithSerial(serialId)
+```
+
+and subsequently uses the returned `CardData` for image/chara/rarity/resource
+preparation. Therefore a unit slot that references serial `1` must have caused a
+real WorkCardData object for serial `1` to be created during `/load/index`.
+
+Putting the synthetic card only in `user_card_list` did not statically guarantee
+that invariant. `server/minimal_profile.py` now keeps `user_card_list=[]` and
+puts the one starter card only in `cs_gacha_data_cenere`; the validator rejects a
+second copy in `user_card_list`.
+
+## `user_unit_list`: conservative final contract
+
+Top-level `user_unit_list` is guarded and may be omitted or empty.
 
 For a non-empty unit element, the first confirmed pass directly reads:
 
@@ -98,18 +206,27 @@ unit_slot   # 1-based; client stores value-1
 name
 ```
 
-It then checks formatted keys `serial_id_0` through `serial_id_4` in a loop whose
-upper bound is statically fixed by `cmp w20,#5`. Missing/zero serial keys are safe
-in this pass.
+It then scans exactly five formatted keys:
 
-A later independent unit-processing pass directly reads:
+```text
+serial_id_0
+serial_id_1
+serial_id_2
+serial_id_3
+serial_id_4
+```
+
+Missing/zero serial values are safe in this pass.
+
+A later independent pass directly reads:
 
 ```text
 unit_id
 name
 ```
 
-To satisfy both known passes, the starter-visible profile uses:
+The starter-visible unit therefore conservatively supplies both IDs and all five
+serial keys:
 
 ```json
 {
@@ -124,63 +241,52 @@ To satisfy both known passes, the starter-visible profile uses:
 }
 ```
 
-This is synthetic preservation state, not copied account state.
+The serial `1` reference is now backed by the WorkCardData record described
+above.
 
-## Card/chara starter state
+## Character and leader state
 
-The frozen `10133800` master independently proves:
-
-```text
-card_id 100001 = 島村卯月
-chara_id 101
-```
-
-The synthetic ownership serial is `1`.
-
-Current starter card core:
-
-```json
-{
-  "serial_id": 1,
-  "card_id": 100001,
-  "exp": 0,
-  "step": 0,
-  "love": 0,
-  "skill_level": 1,
-  "protect": 0
-}
-```
-
-Current synthetic character row:
+The synthetic character row remains:
 
 ```json
 {"chara_id": 101, "fan": 0}
 ```
 
-The server also sets guarded `leader_serial_id=1` as the initial Home leader.
+and guarded `user_info.leader_serial_id=1` is supplied for the initial leader.
+These are synthetic local state; no captured account payload is copied.
 
-## Other sections
+## Optional feature sections and Home banner data
 
-Most observed feature/data sections are top-level guarded and may be omitted.
-Examples include item, room, live, event, story, login-bonus, popup, panel mission
-and campaign sections.
+Most feature/data sections are top-level guarded and may be omitted. Examples
+include item, room, live, event, story, login bonus, popup, panel mission,
+campaign, lottery, questionnaire and MV-related sections.
 
 Safe rule:
 
 > If a whole guarded feature is not needed, omit the key rather than sending a
 > partially populated object.
 
-Some guarded parents have hard children once present. Example: `music_list`, if
-provided, must contain `normal`, which may itself be an empty array.
+This remains true even though Home startup touches many WorkData managers.
+Targeted `Stage.HomeCustomUtil.SetBannerAssetList` analysis shows that absent
+business data for several optional systems follows ordinary skip/continue paths,
+including entry-SP-campaign, lottery, cookie-swap, questionnaire and MV
+connection cases. Some singleton/type-pointer null checks do flow to a shared
+exception helper, but those are runtime-instance invariants and are not evidence
+that the corresponding `/load/index` JSON key must be fabricated.
+
+`sp_campaign` is explicitly C-class/guarded in the final key registry. Do not add
+it merely because Home queries campaign WorkData.
+
+`music_list` is a representative guarded-parent caveat: if the key is sent, it
+must contain `normal`, though `normal` may be an empty array.
 
 ## Implemented profile layers
 
-`server/minimal_profile.py` keeps three distinct profiles so runtime differentials
-remain interpretable.
+`server/minimal_profile.py` keeps three differential profiles.
 
 ### 1. Strict minimal
 
-`build_minimal_load_index_data()` provides common/user bootstrap scalars only.
+`build_minimal_load_index_data()` emits the hard common/user scalar core only.
 
 ```powershell
 python -m server.http_server --experimental-minimal-load-index
@@ -189,7 +295,7 @@ python -m server.http_server --experimental-minimal-load-index
 ### 2. Empty Home candidate
 
 `build_home_candidate_load_index_data()` adds selected explicit empty manager
-containers plus `music_list={"normal": []}`.
+lists and `music_list={"normal": []}`.
 
 ```powershell
 python -m server.http_server --experimental-home-load-index
@@ -199,8 +305,11 @@ python -m server.http_server --experimental-home-load-index
 
 `build_starter_visible_load_index_data()` adds:
 
-- one synthetic owned serial `1` for final-master card `100001`;
-- one unit carrying `unit_slot=1`, `unit_id=1`, name and five serial slots;
+- `cs_gacha_data_cenere[0]` with serial `1`, final-master card `100001`, and all
+  seven hard WorkCardData fields;
+- keeps `user_card_list=[]`;
+- one unit with `unit_slot=1`, `unit_id=1`, name and five serial slots, with
+  `serial_id_0=1`;
 - one `user_chara_list` row for `chara_id=101`;
 - guarded `leader_serial_id=1`.
 
@@ -211,28 +320,28 @@ python -m server.http_server `
   --producer-name "Relive Producer"
 ```
 
-Use this profile for the first real-device run. Empty/strict profiles are
-fallback differentials only.
+Starter-visible remains the first real-device profile. Empty/strict are fallback
+differentials only.
 
-## `/load/index` success -> Home is now statically closed
+## `/load/index` success -> Home
 
-The final call graph is:
+The final call graph is statically closed:
 
 ```text
 BootMain.StartConnect
-  -> new Stage.LoadTask (type 11 = /load/index)
-  -> NetworkManager.Connect
-  -> UnityWebRequest response/decrypt/JsonData
-  -> NetworkTask.CheckResult
-  -> virtual Stage.LoadTask.Parse (0x04850a94)
-  -> Parse == 1
-  -> BootMain.CallbackOnSuccessLoad
-  -> BootMain.LastInitialized
-  -> BootMain.ChangeView
-  -> Stage.SceneManager.ChangeView
+ -> Stage.LoadTask (/load/index)
+ -> NetworkManager.Connect
+ -> response/decrypt/JsonData
+ -> NetworkTask.CheckResult
+ -> Stage.LoadTask.Parse
+ -> Parse == 1
+ -> BootMain.CallbackOnSuccessLoad
+ -> BootMain.LastInitialized
+ -> BootMain.ChangeView
+ -> Stage.SceneManager.ChangeView
 ```
 
-The final `StageSceneDefine.eViewId` enum directly maps:
+Final `StageSceneDefine.eViewId` values:
 
 ```text
 BootMain       = 5
@@ -241,73 +350,55 @@ Login_Bonus    = 7
 Asset_Download = 8
 ```
 
-`BootMain.ChangeView` has the exact bounded branch:
+`BootMain.ChangeView` calls `LoginBonusData.IsExistLoginBonus` and selects Home 6
+when no login bonus exists, otherwise Login_Bonus 7.
 
-```text
-call LoginBonusData.IsExistLoginBonus
-...
-mov  w8, #6
-cinc w1, w8, ne
-branch Stage.SceneManager.ChangeView
-```
-
-Thus:
-
-```text
-no login bonus -> Home (6)
-login bonus    -> Login_Bonus (7)
-```
-
-Independent call-site corroboration includes:
-
-```text
-Stage.Footer.OnClickHomeButton -> ChangeView(6)
-Stage.MenuTop.OnPushOsBackKey  -> ChangeView(6)
-```
-
-The old statement that IDs 6/7 were statically unclosed is obsolete.
-
-There is no statically proven mandatory network request immediately after a
-successful `/load/index`. `/load/update_agreement_status` is driven by Home UI
-interaction; `/load/title` is a Title-screen/user-driven task rather than a hard
-Home prerequisite.
+There is no statically proven mandatory network request immediately after
+successful `/load/index`. Home startup first performs local/resource-facing
+prechecks and predownload-list construction. Therefore post-Home API endpoints
+should be restored only when runtime evidence proves they are requested.
 
 ## Pre-`/load/index` resource stage
 
-The parent bootstrap chain is also now statically closed:
+The parent bootstrap chain is also statically closed:
 
 ```text
 /load/check 214
--> persist RES_VER=10133800
--> ResourcesManager.GameInitialize resumes
--> AssetManager.InitializeManifest
--> DownloadOrLoadForInitialize resource work
--> GameInitialize completes
--> BootMain.Initialize resumes
--> BootMain.StartConnect
--> /load/index
+ -> persist RES_VER=10133800
+ -> SetupNetwork becomes ready
+ -> ResourcesManager.GameInitialize resumes
+ -> AssetManager.InitializeManifest
+ -> DownloadOrLoadForInitialize
+ -> resource requests
+ -> GameInitialize completes
+ -> BootMain.StartConnect
+ -> /load/index
 ```
 
-A second `/load/check` is not a required link. In runtime logs, resource-plane
-requests after the 214 are the expected evidence that this stage advanced.
+A second `/load/check` is not a required link. Sanitized `@resource/*` events
+after 214 are the expected runtime evidence that this stage advanced.
 
 ## Proven vs runtime-pending
 
-Statically proven or strongly closed for final 11.6.3:
+Statically proven/strongly closed for final 11.6.3:
 
 - hard `data/common_define` prefix and seven direct integers;
-- established-account `user_info` scalar set;
-- guard-heavy nature of the accumulated schema;
-- non-empty unit `unit_slot + name` first pass;
-- fixed five serial slots;
-- later unit pass requiring `unit_id + name`;
+- established-account `user_info` scalar set once that path is entered;
+- card WorkData creation belongs to `cs_gacha_data_cenere`, not the ambiguous
+  `user_card_list` merge block;
+- Home's card predownload path immediately resolves unit serial through
+  `WorkCardData.GetCardDataWithSerial`;
+- non-empty unit `unit_slot + name`, fixed five serial slots, and later
+  `unit_id + name` pass;
+- guard-heavy optional feature sections;
 - `/load/index` success callback chain;
 - `Home=6`, `Login_Bonus=7`, `Asset_Download=8`;
-- `/load/title` is not a mandatory link in the Home chain;
-- 214 continues into resource initialization before `/load/index`.
+- 214 continues into resource initialization before `/load/index`;
+- `/load/title` is not a hard Home prerequisite.
 
-Still runtime-pending:
+Still pending or being closed:
 
-- original-client acceptance of the synthetic starter profile;
-- actual visible rendering of Home with the local compatibility stack;
-- first unsupported endpoint/local-state blocker after Home entry.
+- exact `tutorial_flag` value/condition for the established-account path;
+- original-client acceptance of the corrected synthetic starter profile;
+- visible Home rendering with the local TLS/resource stack;
+- first unsupported endpoint/local-state blocker after Home.
