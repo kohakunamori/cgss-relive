@@ -2,10 +2,9 @@
 """Recover the targeted ArcadePhaseBaseTask.ConvertType bridge.
 
 The five Arcade phase tasks are the only exact-name anchors whose constructors
-first write ApiType.Load (11) before calling ConvertType and storing its return value
-back into NetworkTask.type. This bounded pass records only that bridge function and
-the five constructor call sites so the exception can be closed without broad native
-body export.
+first write ApiType.Load (11), then pass their real ApiType key to ConvertType and
+store its return value back into NetworkTask.type. This bounded pass records only
+that bridge function and the five constructor call sites.
 """
 from __future__ import annotations
 
@@ -17,18 +16,26 @@ from pathlib import Path
 from typing import Any
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from capstone.arm64 import ARM64_INS_BL, ARM64_INS_MOV, ARM64_INS_MOVK, ARM64_INS_MOVN, ARM64_INS_MOVZ, ARM64_OP_IMM, ARM64_OP_REG
+from capstone.arm64 import (
+    ARM64_INS_BL,
+    ARM64_INS_MOV,
+    ARM64_INS_MOVK,
+    ARM64_INS_MOVN,
+    ARM64_INS_MOVZ,
+    ARM64_OP_IMM,
+    ARM64_OP_REG,
+)
 from elftools.elf.elffile import ELFFile
 
-SCHEMA = 1
+SCHEMA = 2
 TARGET = "Stage.ArcadePhaseBaseTask$$ConvertType"
-TASKS = [
-    "Stage.ArcadeRoundStartPhaseTask",
-    "Stage.ArcadeCharaTradePhaseTask",
-    "Stage.ArcadeCharaDeployPhaseTask",
-    "Stage.ArcadeSkillAtBuyingPhaseTask",
-    "Stage.ArcadeTradableCharaReloadPhaseTask",
-]
+TASKS = {
+    "Stage.ArcadeRoundStartPhaseTask": 352,
+    "Stage.ArcadeCharaTradePhaseTask": 353,
+    "Stage.ArcadeCharaDeployPhaseTask": 354,
+    "Stage.ArcadeSkillAtBuyingPhaseTask": 355,
+    "Stage.ArcadeTradableCharaReloadPhaseTask": 356,
+}
 MAX_FUNCTION_SIZE = 0x1000
 MAX_INSNS = 256
 
@@ -54,7 +61,14 @@ class BinaryView:
         self.segments = []
         for segment in self.elf.iter_segments():
             if segment["p_type"] == "PT_LOAD":
-                self.segments.append((int(segment["p_vaddr"]), int(segment["p_memsz"]), int(segment["p_offset"]), int(segment["p_filesz"])))
+                self.segments.append(
+                    (
+                        int(segment["p_vaddr"]),
+                        int(segment["p_memsz"]),
+                        int(segment["p_offset"]),
+                        int(segment["p_filesz"]),
+                    )
+                )
 
     def close(self) -> None:
         self.stream.close()
@@ -140,7 +154,12 @@ def ctor_call_args(view: BinaryView, starts: list[int], ctor: Method, target: in
                 else:
                     constants.pop(dst, None)
             continue
-        if ins.id in {ARM64_INS_MOVZ, ARM64_INS_MOVN, ARM64_INS_MOVK} and len(ops) >= 2 and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_IMM:
+        if (
+            ins.id in {ARM64_INS_MOVZ, ARM64_INS_MOVN, ARM64_INS_MOVK}
+            and len(ops) >= 2
+            and ops[0].type == ARM64_OP_REG
+            and ops[1].type == ARM64_OP_IMM
+        ):
             dst = canon_reg(md.reg_name(int(ops[0].reg)))
             imm = int(ops[1].imm)
             shift_obj = getattr(ops[1], "shift", None)
@@ -157,25 +176,30 @@ def ctor_call_args(view: BinaryView, starts: list[int], ctor: Method, target: in
         if ins.id == ARM64_INS_BL and ops and ops[0].type == ARM64_OP_IMM:
             call_target = int(ops[0].imm)
             if call_target == target:
-                args = {reg: value for reg, value in sorted(constants.items()) if reg in {f"x{i}" for i in range(8)} and 0 <= value <= 0xFFFF}
+                args = {
+                    reg: value
+                    for reg, value in sorted(constants.items())
+                    if reg in {f"x{i}" for i in range(8)} and 0 <= value <= 0xFFFF
+                }
                 calls.append({"call_rva": int(ins.address), "small_args": args})
             for i in range(18):
                 constants.pop(f"x{i}", None)
     return calls
 
 
-def find_dump_signature(path: Path) -> list[str]:
+def find_dump_signature(path: Path, target_rva: int) -> list[str]:
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    needle = f"RVA: 0x{target_rva:X}"
     result = []
     for i, line in enumerate(lines):
-        if "ConvertType(" not in line:
+        if needle not in line:
             continue
-        nearby = lines[max(0, i - 2): i + 1]
+        nearby = lines[i : min(len(lines), i + 3)]
         for item in nearby:
             text = item.strip()
             if text and ("RVA:" in text or "ConvertType(" in text):
                 result.append(text[:300])
-    return result[:8]
+    return result[:4]
 
 
 def main() -> int:
@@ -200,16 +224,28 @@ def main() -> int:
     try:
         target_insns = disasm(view, starts, target)
         constructors = []
-        for owner in TASKS:
+        for owner, expected_key in TASKS.items():
             ctors = [m for m in by_owner.get(owner, []) if m.member in {".ctor", "ctor"}]
             if len(ctors) != 1:
                 raise RuntimeError(f"expected one ctor for {owner}, got {len(ctors)}")
             ctor = ctors[0]
-            constructors.append({
-                "task": owner,
-                "ctor_rva": ctor.address,
-                "convert_calls": ctor_call_args(view, starts, ctor, target.address),
-            })
+            calls = ctor_call_args(view, starts, ctor, target.address)
+            if len(calls) != 1:
+                raise RuntimeError(f"expected one ConvertType call in {owner}, got {len(calls)}")
+            input_key = calls[0]["small_args"].get("x0")
+            if input_key != expected_key:
+                raise RuntimeError(
+                    f"ConvertType input mismatch for {owner}: expected {expected_key}, got {input_key}"
+                )
+            constructors.append(
+                {
+                    "task": owner,
+                    "expected_api_key": expected_key,
+                    "ctor_rva": ctor.address,
+                    "convert_call_rva": calls[0]["call_rva"],
+                    "convert_input_key": input_key,
+                }
+            )
     finally:
         view.close()
 
@@ -217,12 +253,20 @@ def main() -> int:
         "schema": SCHEMA,
         "target": TARGET,
         "target_rva": target.address,
-        "dump_signature": find_dump_signature(args.dump_cs),
+        "dump_signature": find_dump_signature(args.dump_cs, target.address),
+        "semantics": (
+            "each exceptional Arcade task passes its exact normal A-group ApiType key "
+            "as ConvertType(aprilFoolType); ConvertType may return that key or a context-"
+            "converted key, and the return value is stored into NetworkTask.type"
+        ),
         "instructions": target_insns,
         "constructors": constructors,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return 0
 
 
