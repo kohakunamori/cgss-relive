@@ -14,6 +14,9 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_INS_BL, ARM64_INS_BLR, ARM64_OP_IMM
 from elftools.elf.elffile import ELFFile
 
+# Exact final Android 11.6.3 arm64 entries. Keep method entries distinct from
+# coroutine call sites; an earlier seed incorrectly labeled 0x374EED8 as the
+# GameInitialize MoveNext entry even though it is the SetupNetwork BL site.
 KNOWN_RVAS = {
     "Stage.LoadTask.Parse": 0x04850A94,
     "Stage.SceneManager.ChangeView": 0x0373BD8C,
@@ -25,11 +28,15 @@ KNOWN_RVAS = {
     "Stage.BootMain.<Initialize>d__14.MoveNext": 0x039CE78C,
     "Stage.BootMain.StartConnect": 0x039C9A24,
     "Stage.BootMain.<StartConnect>d__15.MoveNext": 0x039D157C,
-    "Cute.Certification.VersionCheckTaskExec": 0x050BF3C8,
-    "Cute.VersionCheckTask.Parse": 0x050C5400,
-    "Cute.BootNetwork.Update": 0x050C6F8C,
+    "Stage.ResourcesManager.GameInitialize": 0x037340AC,
+    "Stage.ResourcesManager.<GameInitialize>d__85.MoveNext": 0x0374ED34,
+    "Cute.BootNetwork.SetupNetwork": 0x050C6C84,
     "Cute.BootNetwork.<SetupNetworkCoroutine>d__11.MoveNext": 0x050C74DC,
-    "Stage.ResourcesManager.<GameInitialize>d__85.MoveNext": 0x0374EED8,
+    "Cute.Certification.Login": 0x050BDD9C,
+    "Cute.Certification.VersionCheckTaskExec": 0x050BDE1C,
+    "Cute.Certification.<VersionCheckTaskExec>d__43.MoveNext": 0x050BF3C8,
+    "Cute.VersionCheckTask.Parse": 0x050C5400,
+    "Cute.AssetManager.InitializeManifest": 0x050A9000,
 }
 
 DISCOVERY_NAME_FRAGMENTS = (
@@ -151,7 +158,12 @@ def format_insns(insns: Iterable[Any]) -> list[str]:
     return [f"0x{ins.address:X}: {ins.mnemonic} {ins.op_str}" for ins in insns]
 
 
-def direct_calls(view: BinaryView, address: int, starts: list[int], by_addr: dict[int, Method]) -> list[dict[str, Any]]:
+def direct_calls(
+    view: BinaryView,
+    address: int,
+    starts: list[int],
+    by_addr: dict[int, Method],
+) -> list[dict[str, Any]]:
     calls = []
     for ins in disasm_function(view, address, starts):
         if ins.id == ARM64_INS_BL and ins.operands and ins.operands[0].type == ARM64_OP_IMM:
@@ -227,7 +239,6 @@ def dump_method_signature(dump_text: str, rva: int) -> str | None:
 
 def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
     out = []
-    # Il2CppDumper writes comments such as // TypeDefIndex between enum name and '{'.
     pattern = re.compile(
         r"(?:public|private|internal|protected)?\s*enum\s+([\w.<>]+)[^{\n]*(?:\n[^\n{]*)?\{(.*?)\n\}",
         re.S,
@@ -238,7 +249,10 @@ def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
             continue
         values: dict[str, int] = {}
         for line in body.splitlines():
-            value_match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\s*[,;]?", line)
+            value_match = re.search(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\s*[,;]?",
+                line,
+            )
             if value_match:
                 values[value_match.group(1)] = int(value_match.group(2), 0)
         if 6 in values.values() or 7 in values.values():
@@ -282,10 +296,13 @@ def main() -> int:
                 "callers": caller_index[rva],
             }
 
-        # This function is tiny and contains the exact 6/7 branch. Keep this one
-        # bounded window as evidence rather than publishing bulk disassembly.
         known["Stage.BootMain.ChangeView"]["disassembly"] = format_insns(
-            disasm_function(view, KNOWN_RVAS["Stage.BootMain.ChangeView"], function_starts, max_size=0x200)
+            disasm_function(
+                view,
+                KNOWN_RVAS["Stage.BootMain.ChangeView"],
+                function_starts,
+                max_size=0x200,
+            )
         )
 
         discovered: dict[str, Any] = {}
@@ -302,12 +319,16 @@ def main() -> int:
         change_calls = known["Stage.SceneManager.ChangeView"]["callers"]
         interesting_edges: dict[str, Any] = {}
         for label, record in known.items():
-            edges = [edge for edge in record["calls"] if edge["name"] and any(key in edge["name"] for key in INTEREST)]
+            edges = [
+                edge
+                for edge in record["calls"]
+                if edge["name"] and any(key in edge["name"] for key in INTEREST)
+            ]
             if edges:
                 interesting_edges[label] = edges
 
         report = {
-            "schema": 5,
+            "schema": 6,
             "method_count": len(methods),
             "known": known,
             "discovered_bootstrap_methods": discovered,
@@ -319,15 +340,23 @@ def main() -> int:
         view.close()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     markdown = [
-        "# Final 11.6.3 targeted IL2CPP analysis", "",
-        "Generated from an ephemeral hash-verified specimen; no game binary is retained.", "",
-        "## Known method resolution", "",
+        "# Final 11.6.3 targeted IL2CPP analysis",
+        "",
+        "Generated from an ephemeral hash-verified specimen; no game binary is retained.",
+        "",
+        "## Known method resolution",
+        "",
     ]
     for label, record in report["known"].items():
-        markdown.append(f"- `{label}` @ `0x{record['rva']:X}` → `{record['resolved_name'] or 'unresolved'}`")
+        markdown.append(
+            f"- `{label}` @ `0x{record['rva']:X}` → `{record['resolved_name'] or 'unresolved'}`"
+        )
         if record["dump_signature"]:
             markdown.append(f"  - dump: `{record['dump_signature']}`")
 
@@ -337,13 +366,18 @@ def main() -> int:
 
     markdown += ["", "## SceneManager.ChangeView callsites", ""]
     for call in change_calls:
-        markdown.append(f"- `0x{call['site']:X}` in `{call['parent']}`; inferred `w1={call['inferred_w1']}`")
+        markdown.append(
+            f"- `0x{call['site']:X}` in `{call['parent']}`; inferred `w1={call['inferred_w1']}`"
+        )
         for line in call["context"]:
             markdown.append(f"  - `{line}`")
 
     markdown += ["", "## View/scene enum candidates containing 6 or 7", ""]
     for enum in report["enum_candidates"]:
-        markdown.append(f"- `{enum['enum']}`: " + ", ".join(f"{key}={value}" for key, value in enum["values"].items()))
+        markdown.append(
+            f"- `{enum['enum']}`: "
+            + ", ".join(f"{key}={value}" for key, value in enum["values"].items())
+        )
 
     markdown += ["", "## Discovered bootstrap/resource methods", ""]
     for record in report["discovered_bootstrap_methods"].values():
@@ -352,13 +386,17 @@ def main() -> int:
             markdown.append(f"- caller `0x{caller['site']:X}` `{caller['parent']}`")
         for edge in record["calls"]:
             if edge["name"] and any(key in edge["name"] for key in INTEREST):
-                markdown.append(f"- call `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`")
+                markdown.append(
+                    f"- call `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`"
+                )
 
     markdown += ["", "## Interesting direct edges from bootstrap seeds", ""]
     for label, edges in report["interesting_direct_edges"].items():
         markdown.append(f"### {label}")
         for edge in edges:
-            markdown.append(f"- `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`")
+            markdown.append(
+                f"- `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`"
+            )
 
     args.output.with_suffix(".md").write_text("\n".join(markdown) + "\n", encoding="utf-8")
     return 0
