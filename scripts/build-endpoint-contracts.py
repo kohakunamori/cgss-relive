@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """Build an evidence-graded final-client endpoint/task contract table.
 
-Inputs are sanitized derived reports only.  The builder deliberately distinguishes
-static proof from naming candidates:
-
-* ``proven-static``: a concrete NetworkTask writes an ApiType key directly into the
-  typed ``NetworkTask.type`` backing field, or an explicitly proven conversion
-  bridge receives that key;
-* ``candidate-name``: normalized enum/task names match but no key-flow proof exists;
-* ``unresolved``: neither form of evidence exists yet.
-
-Intermediate/default base-task writes and ConvertType pre-initialization writes are
-not promoted to endpoint bindings.
+`proven-static` requires concrete key flow into the typed `Cute.NetworkTask.type`
+field. Accepted evidence is: direct constant field writes, the proven Arcade
+ConvertType bridge, or caller-side object provenance into `NetworkTask.set_type`.
+Naming alone remains candidate evidence only.
 """
 from __future__ import annotations
 
@@ -22,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-SCHEMA = 1
+SCHEMA = 2
 CONVERT_TARGET = "Stage.ArcadePhaseBaseTask$$ConvertType"
 _SUFFIXES = ("NetworkTask", "Task", "Api", "Request", "Response")
 
@@ -52,25 +45,23 @@ def load_map(path: Path) -> dict[str, list[dict[str, Any]]]:
             if not isinstance(entry, list) or len(entry) != 4:
                 raise RuntimeError(f"invalid {group} row: {entry!r}")
             name, key, route, literal_index = entry
-            rows.append(
-                {
-                    "group": group,
-                    "key": int(key),
-                    "enum": str(name),
-                    "route": str(route),
-                    "literal_index": int(literal_index),
-                }
-            )
+            rows.append({
+                "group": group,
+                "key": int(key),
+                "enum": str(name),
+                "route": str(route),
+                "literal_index": int(literal_index),
+            })
         result[group] = rows
     return result
 
 
 def task_has_convert_bridge(task: dict[str, Any]) -> bool:
-    for method in task.get("field_touching_methods", []):
-        for call in method.get("calls", []):
-            if call.get("target_name") == CONVERT_TARGET:
-                return True
-    return False
+    return any(
+        call.get("target_name") == CONVERT_TARGET
+        for method in task.get("field_touching_methods", [])
+        for call in method.get("calls", [])
+    )
 
 
 def direct_bindings(field_report: dict[str, Any]) -> tuple[dict[int, list[dict[str, Any]]], set[str]]:
@@ -82,48 +73,47 @@ def direct_bindings(field_report: dict[str, Any]) -> tuple[dict[int, list[dict[s
         if converted:
             converted_tasks.add(task_name)
         values = [int(value) for value in task.get("constant_write_values", [])]
-
-        # ConvertType callers first write a default ApiType.Load (11) and then
-        # overwrite the typed field with the conversion result. That 11 is not an
-        # endpoint binding for the Arcade task.
         if converted:
             values = [value for value in values if value != 11]
-
-        # Abstract/base helper classes can initialize defaults but are not concrete
-        # server operations. Keep them out of route bindings.
         short = task_name.rsplit(".", 1)[-1]
         if short in {"BaseTask", "ArcadePhaseBaseTask"} or short.endswith("TaskBase"):
             continue
-
         for key in sorted(set(values)):
-            if not 0 <= key <= 515:
-                continue
-            bindings[key].append(
-                {
+            if 0 <= key <= 515:
+                bindings[key].append({
                     "task": task_name,
                     "evidence": "direct-networktask-type-write",
-                }
-            )
+                })
     return bindings, converted_tasks
 
 
-def add_arcade_bindings(
-    bindings: dict[int, list[dict[str, Any]]],
-    arcade_report: dict[str, Any],
-) -> None:
+def add_arcade_bindings(bindings: dict[int, list[dict[str, Any]]], arcade_report: dict[str, Any]) -> None:
     for row in arcade_report.get("constructors", []):
-        task = str(row["task"])
         key = int(row["convert_input_key"])
         expected = int(row["expected_api_key"])
         if key != expected:
-            raise RuntimeError(f"Arcade bridge mismatch for {task}: {key} != {expected}")
-        bindings[key].append(
-            {
-                "task": task,
-                "evidence": "convert-type-input-to-networktask-type",
-                "convert_call_rva": int(row["convert_call_rva"]),
-            }
-        )
+            raise RuntimeError(f"Arcade bridge mismatch for {row['task']}: {key} != {expected}")
+        bindings[key].append({
+            "task": str(row["task"]),
+            "evidence": "convert-type-input-to-networktask-type",
+            "convert_call_rva": int(row["convert_call_rva"]),
+        })
+
+
+def add_set_type_bindings(bindings: dict[int, list[dict[str, Any]]], report: dict[str, Any]) -> None:
+    if report.get("schema") != 1:
+        raise RuntimeError("set_type callsite report schema mismatch")
+    for row in report.get("observations", []):
+        key = int(row["key"])
+        if not 0 <= key <= 515:
+            continue
+        bindings[key].append({
+            "task": str(row["task"]),
+            "evidence": "caller-object-provenance-to-networktask-set-type",
+            "caller": str(row["caller"]),
+            "caller_rva": int(row["caller_rva"]),
+            "set_type_call_rva": int(row["set_type_call_rva"]),
+        })
 
 
 def name_candidates(tasks: list[str], enum_name: str) -> list[str]:
@@ -136,6 +126,7 @@ def main() -> int:
     parser.add_argument("--api-map", type=Path, required=True)
     parser.add_argument("--field-report", type=Path, required=True)
     parser.add_argument("--arcade-report", type=Path, required=True)
+    parser.add_argument("--set-type-report", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path)
     args = parser.parse_args()
@@ -148,8 +139,13 @@ def main() -> int:
     if arcade_report.get("schema") not in {2, 3}:
         raise RuntimeError("Arcade ConvertType proof report schema mismatch")
 
-    direct, converted_tasks = direct_bindings(field_report)
-    add_arcade_bindings(direct, arcade_report)
+    bindings, converted_tasks = direct_bindings(field_report)
+    add_arcade_bindings(bindings, arcade_report)
+    if args.set_type_report:
+        add_set_type_bindings(
+            bindings,
+            json.loads(args.set_type_report.read_text(encoding="utf-8")),
+        )
     tasks = [str(row["task"]) for row in field_report.get("tasks", [])]
 
     endpoints = []
@@ -159,12 +155,14 @@ def main() -> int:
     }
     for group in ("A", "B"):
         for endpoint in api_map[group]:
-            bindings = direct.get(endpoint["key"], []) if group == "A" else []
-            # Deduplicate same task/evidence generated by multiple observations.
+            raw_bindings = bindings.get(endpoint["key"], []) if group == "A" else []
             unique = []
             seen = set()
-            for binding in bindings:
-                marker = (binding["task"], binding["evidence"])
+            for binding in raw_bindings:
+                marker = (
+                    binding["task"], binding["evidence"],
+                    binding.get("caller_rva"), binding.get("set_type_call_rva"),
+                )
                 if marker in seen:
                     continue
                 seen.add(marker)
@@ -172,26 +170,17 @@ def main() -> int:
 
             candidates = []
             if not unique:
-                candidates = name_candidates(tasks, endpoint["enum"])
-                # If the only name match is a ConvertType caller, its key-flow must
-                # be proven by the bridge report rather than by the name fallback.
-                candidates = [task for task in candidates if task not in converted_tasks]
-
-            if unique:
-                status = "proven-static"
-            elif candidates:
-                status = "candidate-name"
-            else:
-                status = "unresolved"
-
+                candidates = [
+                    task for task in name_candidates(tasks, endpoint["enum"])
+                    if task not in converted_tasks
+                ]
+            status = "proven-static" if unique else ("candidate-name" if candidates else "unresolved")
             row = dict(endpoint)
-            row.update(
-                {
-                    "status": status,
-                    "task_bindings": unique,
-                    "name_candidates": candidates,
-                }
-            )
+            row.update({
+                "status": status,
+                "task_bindings": unique,
+                "name_candidates": candidates,
+            })
             endpoints.append(row)
             summary[group]["total"] += 1
             summary[group][status.replace("-", "_")] += 1
@@ -203,29 +192,22 @@ def main() -> int:
         "endpoints": endpoints,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     if args.markdown_output:
         lines = [
-            "# Final 11.6.3 endpoint/task contract status",
-            "",
+            "# Final 11.6.3 endpoint/task contract status", "",
             "`proven-static` requires key-flow evidence into the typed `NetworkTask.type` field.",
-            "Naming alone is never promoted to proof.",
-            "",
+            "Naming alone is never promoted to proof.", "",
         ]
         for group in ("A", "B"):
             s = summary[group]
             lines += [
-                f"## Group {group}",
-                "",
+                f"## Group {group}", "",
                 f"- total: **{s['total']}**",
                 f"- proven-static: **{s['proven_static']}**",
                 f"- candidate-name: **{s['candidate_name']}**",
-                f"- unresolved: **{s['unresolved']}**",
-                "",
+                f"- unresolved: **{s['unresolved']}**", "",
             ]
         lines += ["## Remaining non-proven endpoints", ""]
         for row in endpoints:
@@ -234,9 +216,7 @@ def main() -> int:
             suffix = ""
             if row["name_candidates"]:
                 suffix = " -> " + ", ".join(f"`{x}`" for x in row["name_candidates"])
-            lines.append(
-                f"- `{row['group']}:{row['key']}` `{row['enum']}` `{row['route']}`: **{row['status']}**{suffix}"
-            )
+            lines.append(f"- `{row['group']}:{row['key']}` `{row['enum']}` `{row['route']}`: **{row['status']}**{suffix}")
         lines.append("")
         args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
         args.markdown_output.write_text("\n".join(lines), encoding="utf-8")
