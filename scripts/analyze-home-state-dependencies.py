@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Target six data-facing methods reached during final Home startup.
+"""Target data-facing methods reached during final Home startup.
 
-The methods are selected from the proven one-hop Home startup report. This helper
-emits only:
-- exact method name/RVA/signature;
-- a small initial ARM64 window;
-- direct named calls excluding framework/runtime noise;
-- small contexts around calls whose names look like user/work/temp/master state.
-
-It never emits a global method index, strings table, or complete decompilation.
+The helper emits only exact selected method/RVA metadata, bounded initial ARM64,
+direct named calls excluding framework noise, and compact contexts around
+state-related calls. For ``SetBannerAssetList`` it additionally follows only the
+conditional branches immediately preceding those state calls and emits tiny
+landing windows, allowing null/default guards to be distinguished from shared
+exception paths without exporting the full CFG.
 """
 from __future__ import annotations
 
@@ -23,18 +21,24 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_INS_BL, ARM64_OP_IMM
 from elftools.elf.elffile import ELFFile
 
-TARGET_NAMES = (
-    "Stage.Home$$CardDownloadList",
-    "Stage.WorkDataUtil$$GetFavoriteUnitData",
-    "Stage.PresentAllPopup$$GetAllPresentPopupItemList",
-    "Stage.HomeCustomUtil$$SetBannerAssetList",
-    "Stage.TempData.GenericSpPageTempData$$ExistsAnyLoginBonus",
-    "Stage.DirectAndLimitedLoginBonusPopup$$GetDirectAndLimitedLoginBonusPopupAssetName",
+# CardDownloadList is overloaded. The startup call from PreDownloadList resolves
+# to the worker at 0x3EC0D70; the later 0x3ED57F4 method is only a tiny wrapper.
+TARGET_SPECS = (
+    ("Stage.Home$$CardDownloadList", 0x3EC0D70),
+    ("Stage.WorkDataUtil$$GetFavoriteUnitData", None),
+    ("Stage.PresentAllPopup$$GetAllPresentPopupItemList", None),
+    ("Stage.HomeCustomUtil$$SetBannerAssetList", None),
+    ("Stage.TempData.GenericSpPageTempData$$ExistsAnyLoginBonus", None),
+    ("Stage.DirectAndLimitedLoginBonusPopup$$GetDirectAndLimitedLoginBonusPopupAssetName", None),
 )
 INITIAL_WINDOW = 0x240
 FULL_SCAN_MAX_SIZE = 0x5000
 CONTEXT_INSTRUCTIONS = 5
+GUARD_LOOKBACK = 12
+LANDING_INSTRUCTIONS = 12
 MAX_NAMED_CALLS = 160
+MAX_GUARD_LANDINGS = 48
+KNOWN_SHARED_EXCEPTION_HELPER = 0x32EE7D8
 FRAMEWORK_PREFIXES = (
     "UnityEngine.",
     "System.",
@@ -59,6 +63,26 @@ STATE_TERMS = (
     "Data",
     "Manager",
 )
+CONDITIONAL_BRANCH_MNEMONICS = {
+    "cbz",
+    "cbnz",
+    "tbz",
+    "tbnz",
+    "b.eq",
+    "b.ne",
+    "b.lt",
+    "b.le",
+    "b.gt",
+    "b.ge",
+    "b.lo",
+    "b.ls",
+    "b.hi",
+    "b.hs",
+    "b.mi",
+    "b.pl",
+    "b.vs",
+    "b.vc",
+}
 
 
 @dataclass(frozen=True)
@@ -76,22 +100,24 @@ def as_int(value: Any) -> int:
     raise TypeError(f"unsupported address: {value!r}")
 
 
-def load_methods(path: Path) -> tuple[dict[int, Method], dict[str, Method], list[int]]:
+def load_methods(path: Path) -> tuple[dict[int, Method], dict[str, list[Method]], list[int]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     by_addr: dict[int, Method] = {}
-    by_name: dict[str, Method] = {}
+    by_name: dict[str, list[Method]] = {}
     for item in data.get("ScriptMethod", []):
         address = as_int(item.get("Address", 0))
         if address <= 0:
             continue
         method = Method(address, str(item["Name"]), item.get("Signature"))
         by_addr.setdefault(address, method)
-        by_name.setdefault(method.name, method)
+        by_name.setdefault(method.name, []).append(method)
     starts = set(by_addr)
     for value in data.get("Addresses", []):
         address = as_int(value)
         if address > 0:
             starts.add(address)
+    for methods in by_name.values():
+        methods.sort(key=lambda method: method.address)
     return by_addr, by_name, sorted(starts)
 
 
@@ -163,6 +189,82 @@ def relevant_call_name(name: str) -> bool:
     return any(term in name for term in STATE_TERMS)
 
 
+def conditional_branch_target(instruction: Any) -> int | None:
+    if instruction.mnemonic.lower() not in CONDITIONAL_BRANCH_MNEMONICS:
+        return None
+    for operand in reversed(instruction.operands):
+        if operand.type == ARM64_OP_IMM:
+            return int(operand.imm)
+    return None
+
+
+def resolve_target(
+    name: str,
+    requested_rva: int | None,
+    by_addr: dict[int, Method],
+    by_name: dict[str, list[Method]],
+) -> Method:
+    if requested_rva is not None:
+        method = by_addr.get(requested_rva)
+        if method is None:
+            raise RuntimeError(f"missing target RVA 0x{requested_rva:X} for {name}")
+        if method.name != name:
+            raise RuntimeError(
+                f"target RVA 0x{requested_rva:X} resolved to {method.name}, expected {name}"
+            )
+        return method
+    candidates = by_name.get(name, [])
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"expected one method named {name}, found {len(candidates)}; pin an RVA"
+        )
+    return candidates[0]
+
+
+def guard_landings_for_state_calls(
+    view: BinaryView,
+    method: Method,
+    instructions: list[Any],
+    state_call_indices: list[int],
+    function_start: int,
+    function_end_address: int,
+) -> list[dict[str, Any]]:
+    unique: dict[tuple[int, int], dict[str, Any]] = {}
+    md = disassembler()
+    for call_index in state_call_indices:
+        for branch in instructions[max(0, call_index - GUARD_LOOKBACK) : call_index]:
+            target = conditional_branch_target(branch)
+            if target is None or not (function_start <= target < function_end_address):
+                continue
+            key = (branch.address, target)
+            if key in unique:
+                continue
+            landing = list(md.disasm(view.read(target, LANDING_INSTRUCTIONS * 4), target))
+            calls_exception_helper = False
+            for instruction in landing:
+                if (
+                    instruction.id == ARM64_INS_BL
+                    and instruction.operands
+                    and instruction.operands[0].type == ARM64_OP_IMM
+                    and int(instruction.operands[0].imm) == KNOWN_SHARED_EXCEPTION_HELPER
+                ):
+                    calls_exception_helper = True
+                    break
+            unique[key] = {
+                "branch_site": branch.address,
+                "branch": format_instruction(branch),
+                "target": target,
+                "forward_distance": target - branch.address,
+                "calls_known_exception_helper": calls_exception_helper,
+                "landing": [format_instruction(item) for item in landing],
+            }
+    if len(unique) > MAX_GUARD_LANDINGS:
+        raise RuntimeError(
+            f"{method.name} produced {len(unique)} state guard landings; refine lookback"
+        )
+    return sorted(unique.values(), key=lambda item: (item["branch_site"], item["target"]))
+
+
 def analyze_method(
     view: BinaryView,
     method: Method,
@@ -174,6 +276,7 @@ def analyze_method(
 
     named_calls: list[dict[str, Any]] = []
     relevant_contexts: list[dict[str, Any]] = []
+    state_call_indices: list[int] = []
     for index, instruction in enumerate(instructions):
         call = call_from_instruction(instruction, by_addr)
         if call is None:
@@ -182,6 +285,7 @@ def analyze_method(
             continue
         named_calls.append(call)
         if relevant_call_name(call["name"]):
+            state_call_indices.append(index)
             lo = max(0, index - CONTEXT_INSTRUCTIONS)
             hi = min(len(instructions), index + CONTEXT_INSTRUCTIONS + 1)
             relevant_contexts.append(
@@ -193,6 +297,17 @@ def analyze_method(
     if len(named_calls) > MAX_NAMED_CALLS:
         raise RuntimeError(
             f"{method.name} has {len(named_calls)} non-framework named calls; refine before emitting"
+        )
+
+    guard_landings: list[dict[str, Any]] = []
+    if method.name == "Stage.HomeCustomUtil$$SetBannerAssetList":
+        guard_landings = guard_landings_for_state_calls(
+            view,
+            method,
+            instructions,
+            state_call_indices,
+            method.address,
+            end,
         )
 
     initial_end = min(end, method.address + INITIAL_WINDOW)
@@ -209,6 +324,7 @@ def analyze_method(
         "scanned_size": end - method.address,
         "named_calls": named_calls,
         "state_contexts": relevant_contexts,
+        "guard_landings": guard_landings,
         "initial_disassembly": [format_instruction(item) for item in initial],
     }
 
@@ -221,10 +337,7 @@ def main() -> int:
     args = parser.parse_args()
 
     by_addr, by_name, starts = load_methods(args.script_json)
-    missing = [name for name in TARGET_NAMES if name not in by_name]
-    if missing:
-        raise RuntimeError(f"missing exact Home state targets: {missing}")
-    targets = [by_name[name] for name in TARGET_NAMES]
+    targets = [resolve_target(name, rva, by_addr, by_name) for name, rva in TARGET_SPECS]
 
     view = BinaryView(args.lib)
     try:
@@ -232,7 +345,7 @@ def main() -> int:
     finally:
         view.close()
 
-    report = {"schema": 1, "target_count": len(analyses), "targets": analyses}
+    report = {"schema": 2, "target_count": len(analyses), "targets": analyses}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -260,6 +373,16 @@ def main() -> int:
             lines.append(f"- `0x{context['site']:X}` -> `{context['name']}`")
             for instruction in context["context"]:
                 lines.append(f"  - `{instruction}`")
+        if target["guard_landings"]:
+            lines.append(f"State guard landings: {len(target['guard_landings'])}")
+            for guard in target["guard_landings"]:
+                lines.append(
+                    f"- branch `0x{guard['branch_site']:X}` -> `0x{guard['target']:X}`; "
+                    f"known_exception_helper={str(guard['calls_known_exception_helper']).lower()}"
+                )
+                lines.append(f"  - `{guard['branch']}`")
+                for instruction in guard["landing"]:
+                    lines.append(f"  - `{instruction}`")
         lines.append("Initial bounded instructions:")
         for instruction in target["initial_disassembly"]:
             lines.append(f"- `{instruction}`")
