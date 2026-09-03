@@ -1,0 +1,119 @@
+name: Analyze final 11.6.3 client
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/analyze-final-client.yml'
+      - 'scripts/analyze-final-client-il2cpp.py'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify exact final XAPK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk reports
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+
+      - name: Extract and verify arm64 IL2CPP specimen
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARM_APK=''
+          META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"
+          test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          def h(p):
+              q=Path(p); return {'sha256': hashlib.sha256(q.read_bytes()).hexdigest(), 'size': q.stat().st_size}
+          report={
+              'package':'jp.co.bandainamcoent.BNEI0242',
+              'version':'11.6.3',
+              'version_code':438,
+              'xapk':h('work/final.xapk'),
+              'libil2cpp_arm64':h('work/libil2cpp.so'),
+              'global_metadata':h('work/global-metadata.dat'),
+          }
+          Path('reports/specimen.json').write_text(json.dumps(report, indent=2)+'\n')
+          PY
+
+      - name: Run Il2CppDumper v6.7.46
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 \
+            -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          mkdir -p work/dumper work/dump
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json')
+          d=json.loads(p.read_text())
+          d['RequireAnyKey']=False
+          d['GenerateScript']=True
+          d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d, indent=2))
+          PY
+          DLL=$(find work/dumper -maxdepth 2 -type f -name 'Il2CppDumper.dll' | head -1)
+          test -n "$DLL"
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/dump.cs
+          test -s work/dump/script.json
+
+      - name: Targeted callgraph analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python scripts/analyze-final-client-il2cpp.py \
+            --lib work/libil2cpp.so \
+            --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json \
+            --output reports/final-client-targeted.json
+
+      - name: Enforce clean-room artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          test ! -e work/final.xapk
+          find reports -type f -maxdepth 1 -print
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'global-metadata.dat' -o -name 'dump.cs' -o -name 'script.json' \) | grep -q .; then
+            echo 'proprietary/bulk analysis output escaped report boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload sanitized targeted reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-targeted-analysis
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
