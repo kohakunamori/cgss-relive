@@ -294,6 +294,7 @@ def main() -> int:
 
     lines = args.dump_cs.read_text(encoding="utf-8", errors="replace").splitlines()
     load_param = summarize_type(lines, "LoadTaskParam")
+    base_param = summarize_type(lines, "BaseParam")
     post_params = summarize_type(lines, "PostParams")
     network_task = summarize_type(lines, "NetworkTask")
 
@@ -314,8 +315,9 @@ def main() -> int:
         view.close()
 
     report = {
-        "schema": 1,
+        "schema": 2,
         "load_task_param": load_param,
+        "base_param": base_param,
         "post_params": post_params,
         "network_task": network_task,
         "set_parameter": {
@@ -334,6 +336,7 @@ def main() -> int:
         json.dumps(
             {
                 "load_task_param_bases": load_param["bases"],
+                "base_param_bases": base_param["bases"],
                 "load_task_param_ctor_rvas": sorted(ctor_rvas),
                 "target_offset_access_count": len(set_parameter["target_offset_accesses"]),
                 "params_assignment_count": len(set_parameter["params_assignment_sites"]),
