@@ -1,20 +1,18 @@
 # Local final-resource server
 
 `server.resource_server` is the read-only serving layer over the frozen
-`10133800` content-addressed archive. The archive remains stored as:
+`10133800` content-addressed archive:
 
 ```text
 resource-cache/10133800/objects/<hh>/<md5>
 ```
 
-The HTTP layer no longer assumes that the final 11.6.3 client always asks for a
-single `/dl/resources/<Category>/<hh>/<hash>` shape. Static analysis of
-`CustomPreference` and `AssetHandle.BuildURL` proves several URL families, so the
-server accepts those families and resolves them back to the same object store.
+The HTTP layer accepts URL families reconstructed from the exact final 11.6.3
+client and maps them back to the same archive.
 
 ## Statically reconstructed URL families
 
-The final client can construct paths such as:
+Examples include:
 
 ```text
 /dl/<ver>/manifests/<file>
@@ -27,25 +25,20 @@ The final client can construct paths such as:
 /dl/resources/Generic/<hh>/<hash>
 ```
 
-The exact builder facts are important:
+Important builder facts:
 
-- `isS3=false` selects `storages.game.starlight-stage.jp` and does **not** imply
-  a `<hash-prefix>/<hash>` path for every resource;
-- `isS3=true` selects the Akamai CDN family and introduces hash-prefix sharding
-  only in specific branches;
-- `Movie` and hush/resource paths can omit the resource-version segment;
-- regular paths use the Savedata `RES_VER` value;
-- `.lz4` is appended by the compressed/hush branch rather than being a separate
+- `isS3=false` selects `storages.game.starlight-stage.jp`;
+- `isS3=true` selects the Akamai CDN family;
+- hash-prefix sharding is branch-specific, not universal;
+- Movie/resource forms can omit the version segment;
+- regular paths use Savedata `RES_VER`;
+- `.lz4` belongs to compressed builder forms rather than defining a different
   archive identity.
 
-The compatibility server therefore resolves hash-addressed forms directly and
-supports filename-addressed storages forms when a local final manifest database
-is supplied.
+## Filename index
 
-## Optional filename index
-
-A filename-addressed request cannot be mapped to the content-addressed archive
-from the URL alone. Pass the locally preserved final manifest SQLite database:
+Filename-addressed storages requests require the locally preserved final manifest
+SQLite database:
 
 ```powershell
 python -m server.resource_server `
@@ -53,47 +46,25 @@ python -m server.resource_server `
   --manifest-db .\work\resources\manifest_10133800.db
 ```
 
-The database is opened read-only and only `name, hash` from `manifests` is loaded
-into memory. The database itself remains proprietary/uncommitted.
-
-Without `--manifest-db`, hash-addressed paths continue to work; filename paths
-return 404 instead of guessing.
+The DB is opened read-only; only `name, hash` from `manifests` is loaded. Without
+it, hash-addressed forms still work and unresolved filename forms return 404
+rather than being guessed.
 
 ## Bootstrap manifest wire objects
 
-The resource archive intentionally stores ordinary downloadable objects by MD5.
-`all_dbmanifest` and `Android_AHigh_SHigh` are separate bootstrap wire objects.
-If the verified copies are needed for a real-client resource update, place them
-locally under:
+Verified local copies, when needed, live outside Git under:
 
 ```text
 resource-cache/10133800/manifests/all_dbmanifest
 resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-They are then exposed only at the configured frozen version:
+They are exposed only as version-scoped manifest requests. Nothing is synthesized
+and no proprietary body is committed.
 
-```text
-/dl/10133800/manifests/all_dbmanifest
-/dl/10133800/manifests/Android_AHigh_SHigh
-```
+## Run with TLS and sanitized runtime evidence
 
-Nothing is synthesized and these files must never be committed.
-
-## Run
-
-Plain HTTP for local socket tests:
-
-```powershell
-python -m server.resource_server `
-  --host 127.0.0.1 `
-  --port 8081 `
-  --version 10133800 `
-  --root .\resource-cache\10133800 `
-  --manifest-db .\work\resources\manifest_10133800.db
-```
-
-TLS for a redirected original resource hostname:
+For the native final-client path:
 
 ```powershell
 python -m server.resource_server `
@@ -103,12 +74,40 @@ python -m server.resource_server `
   --root .\resource-cache\10133800 `
   --manifest-db .\work\resources\manifest_10133800.db `
   --cert .\work\tls\resource.chain.pem `
-  --key .\work\tls\resource.key.pem
+  --key .\work\tls\resource.key.pem `
+  --event-log .\work\runtime-starter-resource.jsonl
 ```
 
-The certificate SAN must match whichever original resource hostname is actually
-redirected. The control-API certificate for `apis.game.starlight-stage.jp` must
-not be assumed valid for `storages.game.starlight-stage.jp` or the Akamai host.
+The certificate SAN must match the original resource hostname being redirected.
+Do not assume the API certificate covers `storages.game.starlight-stage.jp`.
+
+## Sanitized event log
+
+`--event-log` is specifically for integration evidence. The requested filename,
+MD5/hash, path tail and query string are discarded before logging. Only synthetic
+route category + HTTP status are retained:
+
+```text
+@resource/manifest
+@resource/AssetBundles
+@resource/Sound
+@resource/Movie
+@resource/Generic
+@resource/unresolved
+```
+
+`/healthz` is not logged at all, so monitoring cannot create a false
+`resource_plane_observed` phase.
+
+Control/resource logs can later be merged safely by event timestamp:
+
+```powershell
+python .\scripts\analyze-runtime-events.py `
+  --merge-run starter=.\work\runtime-starter-control.jsonl `
+  --merge-run starter=.\work\runtime-starter-resource.jsonl
+```
+
+This avoids concurrent writes from two server processes to one evidence file.
 
 ## HTTP behavior
 
@@ -117,24 +116,40 @@ The server is read-only and supports:
 - `GET`;
 - `HEAD`;
 - one `Range: bytes=...` range;
-- immutable `ETag`/cache headers for content-addressed objects;
+- immutable ETag/cache headers for content-addressed objects;
 - version-scoped bootstrap manifests;
-- optional TLS.
+- optional TLS;
+- optional sanitized resource-plane event logging.
 
-Invalid URL families, mismatched frozen versions, unknown filenames and missing
+Invalid URL families, wrong frozen versions, unknown filenames and missing
 objects return 404. Unsatisfiable ranges return 416.
 
-## Integration policy
+## Native bootstrap role
 
-The control server now explicitly returns `data.isS3=false`, selecting the
-storages URL family when `/load/check` reaches its successful parse. Redirect the
-resource hostname only when running the real resource-update path; a direct
-success `/load/check` differential can be used first to separate resource-stage
-failures from later BootMain or `/load/index` failures.
+The static final-client parent continuation is now closed:
+
+```text
+/load/check 10133000
+-> 214 + required_res_ver=10133800
+-> client persists RES_VER=10133800
+-> SetupNetwork becomes ready
+-> ResourcesManager.GameInitialize resumes
+-> AssetManager.InitializeManifest
+-> DownloadOrLoadForInitialize
+-> resource requests handled here
+-> GameInitialize completes
+-> BootMain.StartConnect
+-> /load/index
+```
+
+Therefore start and route the resource server **before** launching the native 214
+run. Do not wait for an automatic second `/load/check`; it is not a required link.
+
+A successful `@resource/*` event after the 214 is direct runtime evidence that the
+client entered the statically expected resource initialization stage.
 
 ## Integrity boundary
 
 `archive-resources.py` verifies compressed MD5 before atomically admitting an
-object into the archive. The serving hot path therefore does not rehash every
-request. If the archive may have changed, rerun the offline verifier before
-serving it.
+object into the archive. The hot serving path does not rehash every request. If
+the archive may have changed, rerun the offline verifier before serving it.
