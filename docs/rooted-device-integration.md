@@ -8,6 +8,9 @@ only for reversible routing plus manually managed system-CA trust.
 
 For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 
+- package: `jp.co.bandainamcoent.BNEI0242`;
+- unique MAIN/LAUNCHER activity:
+  `jp.co.cygames.stage.StageUnityPlayerActivity`;
 - API/resource traffic uses `UnityWebRequest` on the proven paths;
 - no managed `CertificateHandler` / `ValidateCertificate` override or application
   pinning implementation is proven on the bootstrap path;
@@ -20,6 +23,11 @@ For the exact hash-verified final 11.6.3 arm64 IL2CPP specimen:
 - `Home=6`, `Login_Bonus=7`, `Asset_Download=8`;
 - `/load/title` is not a hard Home prerequisite;
 - `data.isS3=false` selects `storages.game.starlight-stage.jp`.
+
+The launcher is derived with `aapt dump badging` from the exact hash-verified
+XAPK. The extractor accepts only package `jp.co.bandainamcoent.BNEI0242`,
+versionName `11.6.3`, versionCode `438`, and requires exactly one distinct
+launchable activity across matching APK splits. It is not a guessed Unity class.
 
 The reduced starter creates its owned card through
 `cs_gacha_data_cenere -> WorkCardData.AddCardData`, keeps `user_card_list=[]` and
@@ -88,7 +96,7 @@ unique hashes   220803
 wire manifests  2
 ```
 
-Schema 3 now verifies more than file presence:
+Schema 3 verifies:
 
 ```text
 manifest SQLite quick_check/count/hash-shape
@@ -118,6 +126,16 @@ The resolver itself is separately verified against every final manifest row:
 
 This includes 12317 path-shaped manifest names; basename aliases are intentionally
 not used because the final manifest contains colliding basenames.
+
+For a slower preservation-grade byte audit after copying/restoring the archive:
+
+```powershell
+python .\scripts\audit-local-resource-objects.py `
+  --root .\resource-cache\10133800 `
+  --manifest-db .\work\resources\manifest_10133800.db
+```
+
+That optional audit hashes every unique object; it is not part of each launch.
 
 ## 5. Start the whole host stack under the supervisor
 
@@ -167,7 +185,7 @@ Any unexpected child exit tears down the full local stack.
 
 ## 6. Create exactly one device 443 reverse
 
-The tunnel helper now defaults to the TLS mux port `8445`:
+The tunnel helper defaults to the TLS mux port `8445`:
 
 ```powershell
 .\scripts\prepare-device-tunnel.ps1 -RequireRoot
@@ -205,7 +223,7 @@ Cleanup:
 .\scripts\prepare-device-tunnel.ps1 -Remove
 ```
 
-## 7. Run the read-only device preflight
+## 7. Run the read-only device preflight — schema 2
 
 Before launching the game:
 
@@ -228,10 +246,15 @@ su -c id returns uid=0
 package jp.co.bandainamcoent.BNEI0242 is installed
 versionName = 11.6.3
 versionCode = 438
+PackageManager MAIN/LAUNCHER resolves to:
+  jp.co.bandainamcoent.BNEI0242/jp.co.cygames.stage.StageUnityPlayerActivity
 adb reverse contains tcp:443 -> tcp:8445
 API hostname is present on a 127.0.0.1 hosts entry
 storages hostname is present on a 127.0.0.1 hosts entry
 ```
+
+The launcher check is a runtime cross-check against the activity independently
+extracted from the exact frozen XAPK.
 
 If `work/tls/ca.cert.pem` is available, the script additionally looks for an
 exact-byte SHA-256 match in common system-CA directories. That check is
@@ -241,7 +264,53 @@ trust the CA; actual CGSS TLS acceptance remains decisive.
 
 Do not launch the client until the core device report is `ready:true`.
 
-## 8. Native `/load/check` — primary experiment
+## 8. Exact launch + private package-scoped logcat capture
+
+The preferred real-client entry is now:
+
+```powershell
+.\scripts\capture-device-logcat.ps1 `
+  -Launch `
+  -ClearBuffer `
+  -RawPath .\work\private\runtime-starter-logcat.txt `
+  -SanitizedPath .\work\runtime-starter-device.jsonl
+```
+
+For a selected device, add `-Serial <adb-serial>`.
+
+With `-Launch`, this helper normally performs the read-only device preflight
+first. It then:
+
+```text
+verify exact 11.6.3 / versionCode 438 package
+force-stop prior target process
+clear logcat if -ClearBuffer was requested
+am start -W -n jp.co.bandainamcoent.BNEI0242/jp.co.cygames.stage.StageUnityPlayerActivity
+wait for the exact package PID
+capture only that PID's logcat to work/private/
+on completion sanitize it to category-only JSONL
+```
+
+`-SkipDevicePreflight` exists only for a deliberate diagnostic session. Do not use
+it on the primary acceptance run.
+
+The raw file under `work/private/` can contain URLs, identifiers, certificate
+messages or other sensitive values. It is gitignored. **Do not commit, upload or
+share the raw logcat.** The sanitizer emits only:
+
+```text
+time
+category
+severity
+```
+
+Device categories are diagnostic evidence such as TLS/network/crash/ANR. They do
+not advance HTTP/resource/Home phases by themselves.
+
+Press Ctrl+C after the desired startup outcome/failure has been reproduced; the
+finally path runs the sanitizer over the private capture.
+
+## 9. Native `/load/check` — primary experiment
 
 The untouched binary starts with:
 
@@ -275,16 +344,24 @@ Expected statically closed progression:
 Do not require an immediate second `/load/check`; it is not part of the same-task
 214 continuation.
 
-## 9. Analyze the merged control/resource timeline
+## 10. Analyze server + device evidence — report schema 4
+
+Merge the two server streams by timestamp and attach sanitized device diagnostics
+to the same logical run:
 
 ```powershell
 python .\scripts\analyze-runtime-events.py `
   --merge-run starter=.\work\runtime-starter-control.jsonl `
   --merge-run starter=.\work\runtime-starter-resource.jsonl `
+  --device-log starter=.\work\runtime-starter-device.jsonl `
   -o .\work\runtime-starter-report.json
 ```
 
-A healthy native timeline can be as small as:
+The HTTP/resource phase machine is driven **only** by server events. Device
+logcat evidence is attached under `device_diagnostics`; it cannot fabricate
+`/load/check`, resource-plane or Home progress.
+
+A healthy native server timeline can be as small as:
 
 ```text
 /load/check             214
@@ -295,7 +372,11 @@ A healthy native timeline can be as small as:
 
 or include other resource categories. A second `/load/check` is not required.
 
-## 10. Diagnostic direct-success differential
+If there is no HTTP event at all but `device_diagnostics` contains TLS/network
+failures, diagnose the device trust/routing layer instead of changing response
+payloads.
+
+## 11. Diagnostic direct-success differential
 
 Only if native 214 fails before useful resource evidence, restart the supervisor
 with:
@@ -349,14 +430,15 @@ python -m server.tls_mux `
 
 1. Host resource preflight `ready:true`?
 2. Supervisor verifies both TLS original-host routes and remains healthy?
-3. Device read-only preflight core `ready:true`?
-4. Does the actual CGSS process trust TLS and reach `/load/check`?
-5. After native 214, does `@resource/*` traffic appear?
-6. Are those requests served, or which sanitized category first returns 404/416?
-7. Does `/load/index` arrive?
-8. Does the reduced starter response produce a later client action?
-9. Does Home visibly render (possibly after Login Bonus)?
-10. What is the first unsupported post-Home endpoint/local-state dependency?
+3. Device read-only preflight schema 2 `ready:true`?
+4. Does exact `StageUnityPlayerActivity` start and the CGSS process remain alive?
+5. Does the actual CGSS process trust TLS and reach `/load/check`?
+6. After native 214, does `@resource/*` traffic appear?
+7. Are those requests served, or which sanitized category first returns 404/416?
+8. Does `/load/index` arrive?
+9. Does the reduced starter response produce a later client action?
+10. Does Home visibly render (possibly after Login Bonus)?
+11. What is the first unsupported post-Home endpoint/local-state dependency?
 
 Server `200`/`result_code=1`, a green host preflight, or static `Home=6` are not by
 themselves original-client acceptance evidence.
@@ -372,21 +454,22 @@ path contains incorrect bytes.
 
 ### Device preflight core fails
 
-Fix the ADB target/package/version/reverse/hosts condition. Do not interpret a
-failure here as a CGSS protocol problem.
+Fix the ADB target/package/version/launcher/reverse/hosts condition. Do not
+interpret a failure here as a CGSS protocol problem.
 
 ### TLS fails before HTTP
 
 The host supervisor already verified the generated CA/chain/SAN locally. The main
 remaining device-side question is whether that CA is actually in the CGSS
 process's system trust domain. Keep original Host/SNI; do not patch the APK before
-collecting the exact failure.
+collecting the exact failure. Use the sanitized device diagnostic categories,
+while keeping raw logcat private.
 
 ### 214 returned, no resource event
 
 Static continuation says GameInitialize should proceed into manifest/resource
 initialization. Check storages host routing, Android trust, Savedata state and
-logcat before using the direct-success differential.
+sanitized device diagnostics before using the direct-success differential.
 
 ### `@resource/unresolved` / 404
 
