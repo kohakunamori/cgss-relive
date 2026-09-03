@@ -48,12 +48,13 @@ def make_handler(
     load_index_data: Mapping[str, Any] | None = None,
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
+    accept_old_resource_version: bool = False,
 ) -> Type[BaseHTTPRequestHandler]:
     events = SafeEventLog(event_log) if event_log is not None else None
     api_index = api_index or {}
 
     class CGSSBootstrapHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive/0.1"
+        server_version = "cgss-relive/0.2"
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
@@ -145,6 +146,8 @@ def make_handler(
                         headers,
                         body,
                         final_res_ver=final_res_ver,
+                        is_s3=False,
+                        accept_old_resource_version=accept_old_resource_version,
                     )
                 elif route == ROUTE_TITLE:
                     exchange = process_load_title_request(headers, body)
@@ -180,10 +183,17 @@ def create_server(
     load_index_data: Mapping[str, Any] | None = None,
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
+    accept_old_resource_version: bool = False,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
         (host, port),
-        make_handler(final_res_ver, load_index_data, event_log, api_index),
+        make_handler(
+            final_res_ver,
+            load_index_data,
+            event_log,
+            api_index,
+            accept_old_resource_version,
+        ),
     )
     server.daemon_threads = True
     return server
@@ -206,6 +216,14 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--final-res-ver", default=FINAL_RESOURCE_VERSION)
+    parser.add_argument(
+        "--accept-old-resource-version",
+        action="store_true",
+        help=(
+            "diagnostic only: return result_code=1 for an old RES-VER while still "
+            "supplying required_res_ver; bypasses the native 214 gate"
+        ),
+    )
     parser.add_argument(
         "--load-index-profile",
         type=Path,
@@ -301,6 +319,7 @@ def main() -> int:
         load_index_data=load_index_data,
         event_log=args.event_log,
         api_index=api_index,
+        accept_old_resource_version=args.accept_old_resource_version,
     )
     scheme = "http"
     if args.cert and args.key:
@@ -311,6 +330,10 @@ def main() -> int:
 
     bound_host, bound_port = httpd.server_address[:2]
     print(f"cgss-relive bootstrap listening on {scheme}://{bound_host}:{bound_port}")
+    if args.accept_old_resource_version:
+        print("load/check resource policy: diagnostic direct success + required_res_ver advance")
+    else:
+        print("load/check resource policy: native 214 negotiation on mismatch")
     if args.event_log:
         print(f"sanitized event log: {args.event_log}")
     if args.api_map:
