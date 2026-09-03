@@ -151,6 +151,7 @@ jobs:
             --output reports/user-chara-parser-block.json
           python scripts/analyze-load-task-parameters.py \
             --lib work/libil2cpp.so \
+            --dump-cs work/dump/dump.cs \
             --script-json work/dump/script.json \
             --stringliteral-json work/dump/stringliteral.json \
             --output reports/load-task-parameters.json
