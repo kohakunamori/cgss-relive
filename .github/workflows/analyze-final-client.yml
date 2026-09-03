@@ -13,6 +13,7 @@ on:
       - 'scripts/analyze-tutorial-flag.py'
       - 'scripts/find-exact-stringliteral.py'
       - 'scripts/find-literal-xrefs-in-function.py'
+      - 'scripts/analyze-load-index-user-chara.py'
 
 permissions:
   contents: read
@@ -142,6 +143,11 @@ jobs:
             --script-json work/dump/script.json \
             --target 0x85C6820 \
             --output reports/user-chara-literal-xref.json
+          python scripts/analyze-load-index-user-chara.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --output reports/user-chara-parser-block.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
