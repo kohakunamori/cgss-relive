@@ -15,6 +15,7 @@ on:
       - 'scripts/analyze-load-index-user-chara.py'
       - 'scripts/analyze-load-task-parameters.py'
       - 'scripts/analyze-secondary-user-unit.py'
+      - 'scripts/analyze-unit-cosmetics.py'
 
 permissions:
   contents: read
@@ -158,6 +159,11 @@ jobs:
             --script-json work/dump/script.json \
             --stringliteral-json work/dump/stringliteral.json \
             --output reports/secondary-user-unit.json
+          python scripts/analyze-unit-cosmetics.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --output reports/unit-cosmetics.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
