@@ -38,8 +38,6 @@ Read `AGENT_HANDOFF.md` first. In particular:
 
 ## New analysis strategy
 
-The branch shifts from purely blocker-driven reverse engineering to:
-
 ```text
 global-metadata.dat + libil2cpp.so
         -> all NetworkTask descendants
@@ -51,54 +49,76 @@ global-metadata.dat + libil2cpp.so
         -> generated local-server contracts
 ```
 
-The first broad pass is implemented by:
+Primary implementation:
 
 ```text
 scripts/analyze-server-contracts.py
 .github/workflows/analyze-server-contracts.yml
 ```
 
-It emits only sanitized derived metadata. It must not commit or upload APK/XAPK,
-`libil2cpp.so`, metadata, `dump.cs`, `script.json`, `stringliteral.json`, game
-databases/assets or bulk decompiler output.
+Raw specimen/decompiler material must remain ephemeral.
 
-## Current phase
+## C0 — broad NetworkTask inventory
 
-### C0 — broad NetworkTask inventory
+Status: **COMPLETE ENOUGH TO PROCEED**
 
-Status: **implemented, CI validation pending/ongoing**
-
-Expected artifact:
+First validated exact-specimen run:
 
 ```text
-final-client-server-contract-inventory/
-  server-contract-inventory.json
-  server-contract-inventory.md
+workflow run                     33778354480
+branch commit                    ae5bea4bd071fc3f42f570f7d33648a942da4e4a
+artifact                         final-client-server-contract-inventory
+artifact id                      9902546755
+artifact sha256                  1d6b8c768e1e64395393097eaf57fa8d40b63a54cf8c84b432c034b509712c5e
+NetworkTask descendants          502
+mapped task methods             1596
+request-role methods             402
+response-role methods            513
+tasks with contract literals     359
+tasks with zero mapped methods     0
 ```
 
-Schema 1 records:
+High-signal examples proven to be included in the broad pass:
 
-- all recoverable `NetworkTask` descendants;
-- inheritance;
-- method counts;
-- request-role methods such as `SetParameter` / `PreparePostData` / `CreateBody`;
-- response-role methods such as `Parse` / `SetResponseData` / `CheckResult`;
-- method RVAs/signatures;
-- only contract-like referenced literals:
-  - endpoint-shaped paths;
-  - snake_case field keys;
-  - header-shaped identifiers;
-  - bounded identifier-like strings.
+```text
+Cute.VersionCheckTask
+Stage.LoadTask
+Stage.HomeCustomizeUpdateTask
+Stage.LiveStartTask
+Stage.LiveEndTask
+Stage.StoryStartTask
+Stage.GachaExeTask
+```
 
-If a local complete `final_map.json` is available, pass `--api-map` to correlate
-task names/paths with `(group,key,path)` identities. Do not invent missing map rows.
+The first run did **not** load a complete API map, so endpoint candidate count was
+zero by design. Do not treat that as a static-analysis failure.
 
-## Next phases
+Detailed first-run evidence is recorded in:
 
-### C1 — endpoint binding
+```text
+docs/research/2026-09-03-server-contract-analysis-start.md
+```
 
-Bind every A/B `ApiType` entry to the responsible task(s). Preserve aliases by
-`(group,key)`; path is not a unique ID.
+## C1 — endpoint binding
+
+Status: **NEXT ACTIVE PHASE**
+
+Bind every final A/B `ApiType` identity to responsible task(s). Canonical endpoint
+identity is:
+
+```text
+(group, key)
+```
+
+not path, because legitimate aliases exist.
+
+Evidence priority:
+
+1. exact ApiType key flow / exact endpoint literal;
+2. task construction/call-site proof;
+3. exact path reference;
+4. normalized task/enum name only as `candidate`;
+5. runtime only where static evidence stays ambiguous.
 
 Target output:
 
@@ -106,33 +126,7 @@ Target output:
 contracts/endpoints.json
 ```
 
-Each row should contain evidence/confidence, never a guess presented as proof.
-
-### C2 — request schema extraction
-
-For each bound task, recover fields emitted by request construction / post params
-and classify required/conditional/default behavior where statically provable.
-
-### C3 — response schema extraction
-
-For each `Parse` path, recover hard reads, optional reads, arrays/nested maps,
-primitive type expectations and common parser helpers.
-
-### C4 — state mutation / consumer graph
-
-Trace parsed values into `Work*`, `Savedata*`, singleton state and immediate
-consumers. This is the step that lets the local server omit response fields that
-the final client never uses.
-
-### C5 — server generation
-
-Generate route/model/test skeletons from proven contracts, then implement only
-the stateful preservation semantics required for Home, cards/idols, commu,
-music/MV, LIVE, Room and other archival surfaces.
-
-## Evidence policy
-
-Use labels such as:
+Each row needs an evidence label such as:
 
 ```text
 proven-static
@@ -141,19 +135,46 @@ candidate
 unresolved
 ```
 
-Never turn a naming heuristic into a proven endpoint binding.
+Never promote a naming heuristic to proof.
+
+## C2 — request schema extraction
+
+For each bound task, recover fields emitted by request construction/post params and
+classify required/conditional/default behavior where statically provable.
+
+## C3 — response schema extraction
+
+For each `Parse` path, distinguish hard reads, optional reads, arrays/nested maps,
+primitive type expectations and shared helper literals.
+
+The C0 literal inventory is only a candidate field superset; do not directly turn
+all emitted literals into required response fields.
+
+## C4 — state mutation / consumer graph
+
+Trace parsed values into `Work*`, `Savedata*`, singleton state and immediate
+consumers. This lets the preservation server omit production fields that the final
+client never uses.
+
+## C5 — server generation
+
+Generate route/model/test skeletons from proven contracts, then implement only the
+stateful preservation semantics required for Home, cards/idols, commu, music/MV,
+LIVE, Room and other archival surfaces.
 
 ## Runtime role
 
-Rooted-device work remains necessary, but runtime should be used mainly to close
-ambiguities after the broad static contract map exists, not as the primary way to
-discover endpoints one at a time.
+Rooted-device work remains necessary, but runtime should close residual ambiguity and
+acceptance gaps after the broad static contract map exists. Do not regress to using
+runtime as the primary endpoint-discovery loop.
 
 ## Handoff checklist for the next agent
 
-1. Fetch this branch and read this file plus `AGENT_HANDOFF.md`.
-2. Inspect the latest `Analyze final 11.6.3 server contracts` workflow run.
-3. Download/read only the sanitized contract artifact.
-4. Record aggregate C0 results in `docs/research/2026-09-03-server-contract-analysis-start.md`.
-5. Fix broad-pass false negatives before hand-analyzing individual tasks.
-6. Start C1 endpoint binding using the already-established final ApiType map.
+1. Fetch `analysis/server-contracts-11.6.3`.
+2. Read this file, `AGENT_HANDOFF.md`, and the dated C0 research log.
+3. Inspect/download run `33778354480` sanitized artifact if still retained.
+4. Continue C1 endpoint binding; do not restart C0 or bootstrap research.
+5. If the complete delivered `final_map.json` is available locally, validate it with
+   the existing strict map validator and feed it to `--api-map`.
+6. Otherwise derive a sanitized `(group,key,name,path)` representation from the exact
+   final specimen before using naming heuristics broadly.
