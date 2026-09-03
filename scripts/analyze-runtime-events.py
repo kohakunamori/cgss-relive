@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Analyze sanitized cgss-relive runtime event logs and compare profile runs.
 
-Input must be JSONL emitted by ``server.safe_events.SafeEventLog``. The tool
-accepts only the documented sanitized event shape; raw request/response captures
-or unexpected fields are rejected instead of being copied into reports.
+Input must be JSONL emitted by ``server.safe_events.SafeEventLog``. Both control
+and resource servers use the same strict sanitized schema. Resource-plane routes
+are synthetic categories such as ``@resource/manifest``; raw filenames, hashes,
+query strings, request bodies and account/session values are never accepted.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 FINAL_RESOURCE_VERSION = "10133800"
+RESOURCE_ROUTE_PREFIX = "@resource/"
 
 _ALLOWED_EVENT_KEYS = {
     "time",
@@ -65,6 +67,19 @@ def validate_event(value: Any, *, line_number: int) -> dict[str, Any]:
         raise UnsafeEventLog(f"line {line_number}: time must be numeric")
     if "error" in value and not isinstance(value["error"], str):
         raise UnsafeEventLog(f"line {line_number}: error must be a string")
+
+    route = value["route"]
+    if route.startswith(RESOURCE_ROUTE_PREFIX):
+        allowed_resource_routes = {
+            "@resource/manifest",
+            "@resource/AssetBundles",
+            "@resource/Sound",
+            "@resource/Movie",
+            "@resource/Generic",
+            "@resource/unresolved",
+        }
+        if route not in allowed_resource_routes:
+            raise UnsafeEventLog(f"line {line_number}: unsupported sanitized resource route")
 
     headers = value.get("headers")
     if headers is not None:
@@ -154,10 +169,23 @@ def _has_later_event(indices: list[int], event_count: int) -> bool:
     return any(index + 1 < event_count for index in indices)
 
 
+def _has_later_index(first_indices: list[int], later_indices: list[int]) -> bool:
+    return any(later > first for first in first_indices for later in later_indices)
+
+
 def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
     routes = [str(event["route"]) for event in events]
     check_indices = [index for index, route in enumerate(routes) if route == "/load/check"]
     index_indices = [index for index, route in enumerate(routes) if route == "/load/index"]
+    resource_indices = [
+        index for index, route in enumerate(routes) if route.startswith(RESOURCE_ROUTE_PREFIX)
+    ]
+    resource_success_indices = [
+        index
+        for index in resource_indices
+        if routes[index] != "@resource/unresolved" and int(events[index]["status"]) < 400
+    ]
+    manifest_indices = [index for index, route in enumerate(routes) if route == "@resource/manifest"]
 
     resource_214_indices = [index for index in check_indices if _response_result(events[index]) == 214]
     final_check_indices = [
@@ -174,12 +202,16 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         and str(_response_header(events[index], "required_res_ver")) == FINAL_RESOURCE_VERSION
     ]
 
-    observed_later_control_after_214 = _has_later_event(resource_214_indices, len(events))
-    observed_later_final_check_after_214 = any(
-        final_index > result_index
-        for result_index in resource_214_indices
-        for final_index in final_check_indices
+    observed_later_control_after_214 = any(
+        later > first and not routes[later].startswith(RESOURCE_ROUTE_PREFIX)
+        for first in resource_214_indices
+        for later in range(len(events))
     )
+    observed_later_resource_after_214 = _has_later_index(resource_214_indices, resource_indices)
+    observed_later_successful_resource_after_214 = _has_later_index(
+        resource_214_indices, resource_success_indices
+    )
+    observed_later_final_check_after_214 = _has_later_index(resource_214_indices, final_check_indices)
     observed_followup_after_direct_success = _has_later_event(direct_success_indices, len(events))
     observed_followup_after_final_success = _has_later_event(final_success_indices, len(events))
 
@@ -212,9 +244,10 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
             if event.get("api_candidates"):
                 after_load_index["api_candidates"] = event["api_candidates"]
 
-    # Phase names represent only the current hard bootstrap mainline. /load/title
-    # is deliberately not a phase: final static analysis places it on a separate
-    # user-driven Title branch rather than between version check and /load/index.
+    # Phase names follow the statically closed hard mainline. /load/title remains
+    # user-driven and therefore does not advance this phase. A resource event is
+    # stronger evidence after 214 than waiting for a second /load/check, which the
+    # final coroutine does not automatically send.
     phase = "no_http_request"
     if events:
         phase = "http_reached"
@@ -228,6 +261,10 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         phase = "final_version_load_check_observed"
     if final_success_indices:
         phase = "final_version_load_check_responded"
+    if resource_indices:
+        phase = "resource_plane_observed"
+    if resource_success_indices:
+        phase = "resource_plane_served"
     if index_indices:
         phase = "load_index_reached"
     if after_load_index is not None:
@@ -239,6 +276,8 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         "resource_negotiation": {
             "server_returned_214": bool(resource_214_indices),
             "observed_later_control_request_after_214": observed_later_control_after_214,
+            "observed_resource_request_after_214": observed_later_resource_after_214,
+            "observed_successful_resource_response_after_214": observed_later_successful_resource_after_214,
             "observed_later_10133800_load_check_after_214": observed_later_final_check_after_214,
             "server_returned_direct_success_with_required_res_ver": bool(direct_success_indices),
             "observed_followup_request_after_direct_success": observed_followup_after_direct_success,
@@ -248,7 +287,14 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         "reached": {
             "load_check": bool(check_indices),
             "load_title": "/load/title" in routes,
+            "resource_plane": bool(resource_indices),
+            "resource_manifest": bool(manifest_indices),
             "load_index": bool(index_indices),
+        },
+        "resource_plane": {
+            "events": len(resource_indices),
+            "successful_events": len(resource_success_indices),
+            "routes": sorted({routes[index] for index in resource_indices}),
         },
         "first_failure": first_failure,
         "after_load_index": after_load_index,
@@ -323,7 +369,7 @@ def main() -> int:
         return 2
 
     report = {
-        "schema": 2,
+        "schema": 3,
         "final_resource_version": FINAL_RESOURCE_VERSION,
         "runs": {label: analyze_events(events) for label, events in loaded},
         "comparison": compare_runs(loaded),
