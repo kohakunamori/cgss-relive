@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyze sanitized cgss-relive runtime event logs and compare profile runs.
 
-Input must be JSONL emitted by ``server.safe_events.SafeEventLog``.  The tool
+Input must be JSONL emitted by ``server.safe_events.SafeEventLog``. The tool
 accepts only the documented sanitized event shape; raw request/response captures
 or unexpected fields are rejected instead of being copied into reports.
 """
@@ -120,25 +120,38 @@ def load_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _response_result(event: Mapping[str, Any]) -> int | None:
+def _response_header(event: Mapping[str, Any], name: str) -> Any:
     headers = event.get("response_data_headers")
     if isinstance(headers, Mapping):
-        value = headers.get("result_code")
-        if isinstance(value, int):
-            return value
+        return headers.get(name)
     return None
 
 
-def signature(event: Mapping[str, Any]) -> EventSignature:
+def _response_result(event: Mapping[str, Any]) -> int | None:
+    value = _response_header(event, "result_code")
+    return value if isinstance(value, int) else None
+
+
+def _request_res_ver(event: Mapping[str, Any]) -> str | None:
     headers = event.get("headers")
-    res_ver = headers.get("RES-VER") if isinstance(headers, Mapping) else None
+    if not isinstance(headers, Mapping):
+        return None
+    value = headers.get("RES-VER")
+    return str(value) if value is not None else None
+
+
+def signature(event: Mapping[str, Any]) -> EventSignature:
     return EventSignature(
         route=str(event["route"]),
         status=int(event["status"]),
         error=str(event["error"]) if "error" in event else None,
-        res_ver=str(res_ver) if res_ver is not None else None,
+        res_ver=_request_res_ver(event),
         result_code=_response_result(event),
     )
+
+
+def _has_later_event(indices: list[int], event_count: int) -> bool:
+    return any(index + 1 < event_count for index in indices)
 
 
 def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -146,34 +159,29 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
     check_indices = [index for index, route in enumerate(routes) if route == "/load/check"]
     index_indices = [index for index, route in enumerate(routes) if route == "/load/index"]
 
-    resource_214_indices = [
+    resource_214_indices = [index for index in check_indices if _response_result(events[index]) == 214]
+    final_check_indices = [
+        index for index in check_indices if _request_res_ver(events[index]) == FINAL_RESOURCE_VERSION
+    ]
+    final_success_indices = [
+        index for index in final_check_indices if _response_result(events[index]) == 1
+    ]
+    direct_success_indices = [
         index
         for index in check_indices
-        if _response_result(events[index]) == 214
+        if _response_result(events[index]) == 1
+        and _request_res_ver(events[index]) != FINAL_RESOURCE_VERSION
+        and str(_response_header(events[index], "required_res_ver")) == FINAL_RESOURCE_VERSION
     ]
-    final_retry_indices: list[int] = []
-    final_success_indices: list[int] = []
-    for index in check_indices:
-        event = events[index]
-        headers = event.get("headers")
-        res_ver = headers.get("RES-VER") if isinstance(headers, Mapping) else None
-        if str(res_ver) != FINAL_RESOURCE_VERSION:
-            continue
-        final_retry_indices.append(index)
-        if _response_result(event) == 1:
-            final_success_indices.append(index)
 
-    server_returned_214 = bool(resource_214_indices)
-    observed_retry_after_214 = any(
-        retry_index > result_index
+    observed_later_control_after_214 = _has_later_event(resource_214_indices, len(events))
+    observed_later_final_check_after_214 = any(
+        final_index > result_index
         for result_index in resource_214_indices
-        for retry_index in final_retry_indices
+        for final_index in final_check_indices
     )
-    server_returned_final_success = bool(final_success_indices)
-    observed_followup_after_final_success = any(
-        success_index + 1 < len(events)
-        for success_index in final_success_indices
-    )
+    observed_followup_after_direct_success = _has_later_event(direct_success_indices, len(events))
+    observed_followup_after_final_success = _has_later_event(final_success_indices, len(events))
 
     first_failure: dict[str, Any] | None = None
     for index, event in enumerate(events):
@@ -204,17 +212,22 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
             if event.get("api_candidates"):
                 after_load_index["api_candidates"] = event["api_candidates"]
 
+    # Phase names represent only the current hard bootstrap mainline. /load/title
+    # is deliberately not a phase: final static analysis places it on a separate
+    # user-driven Title branch rather than between version check and /load/index.
     phase = "no_http_request"
     if events:
         phase = "http_reached"
     if check_indices:
         phase = "load_check_reached"
-    if observed_retry_after_214:
-        phase = "resource_retry_observed"
-    if server_returned_final_success:
-        phase = "final_resource_check_responded"
-    if "/load/title" in routes:
-        phase = "load_title_reached"
+    if resource_214_indices:
+        phase = "resource_version_214_responded"
+    if direct_success_indices:
+        phase = "old_resource_direct_success_responded"
+    if final_check_indices:
+        phase = "final_version_load_check_observed"
+    if final_success_indices:
+        phase = "final_version_load_check_responded"
     if index_indices:
         phase = "load_index_reached"
     if after_load_index is not None:
@@ -224,9 +237,12 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         "events": len(events),
         "phase": phase,
         "resource_negotiation": {
-            "server_returned_214": server_returned_214,
-            "observed_10133800_retry_after_214": observed_retry_after_214,
-            "server_returned_success_for_10133800": server_returned_final_success,
+            "server_returned_214": bool(resource_214_indices),
+            "observed_later_control_request_after_214": observed_later_control_after_214,
+            "observed_later_10133800_load_check_after_214": observed_later_final_check_after_214,
+            "server_returned_direct_success_with_required_res_ver": bool(direct_success_indices),
+            "observed_followup_request_after_direct_success": observed_followup_after_direct_success,
+            "server_returned_success_for_10133800": bool(final_success_indices),
             "observed_followup_request_after_10133800_success": observed_followup_after_final_success,
         },
         "reached": {
@@ -307,7 +323,7 @@ def main() -> int:
         return 2
 
     report = {
-        "schema": 1,
+        "schema": 2,
         "final_resource_version": FINAL_RESOURCE_VERSION,
         "runs": {label: analyze_events(events) for label, events in loaded},
         "comparison": compare_runs(loaded),
