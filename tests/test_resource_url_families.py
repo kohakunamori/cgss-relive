@@ -115,17 +115,30 @@ class ResourceURLFamilyTests(unittest.TestCase):
                 {"foo.unity3d": "0123456789abcdef0123456789abcdef"},
             )
 
-    def test_bootstrap_manifest_path_is_version_scoped(self) -> None:
+    def test_bootstrap_manifest_paths_are_version_scoped(self) -> None:
         root = Path("cache")
-        self.assertEqual(
-            resolve_resource_request(root, "/dl/10133800/manifests/all_dbmanifest"),
-            (root / "manifests" / "all_dbmanifest", None),
-        )
-        self.assertIsNone(resolve_resource_request(root, "/dl/10133000/manifests/all_dbmanifest"))
+        for name in ("all_dbmanifest", "Android_AHigh_SHigh"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    resolve_resource_request(root, f"/dl/10133800/manifests/{name}"),
+                    (root / "manifests" / name, None),
+                )
+                self.assertIsNone(
+                    resolve_resource_request(root, f"/dl/10133000/manifests/{name}")
+                )
 
 
 class ResourceURLHTTPTests(unittest.TestCase):
-    def test_storage_filename_and_manifest_are_served_from_frozen_archive(self) -> None:
+    def _request(self, host: str, port: int, method: str, route: str):
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.request(method, route)
+        response = conn.getresponse()
+        body = response.read()
+        result = response.status, dict(response.getheaders()), body
+        conn.close()
+        return result
+
+    def test_storage_filename_and_both_bootstrap_manifests_are_served(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             payload = b"0123456789"
@@ -133,8 +146,14 @@ class ResourceURLHTTPTests(unittest.TestCase):
             path = object_path(root, digest)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
-            (root / "manifests").mkdir()
-            (root / "manifests" / "all_dbmanifest").write_bytes(b"manifest")
+            manifest_dir = root / "manifests"
+            manifest_dir.mkdir()
+            wire_payloads = {
+                "all_dbmanifest": b"synthetic-index",
+                "Android_AHigh_SHigh": b"synthetic-android-wire",
+            }
+            for name, wire_payload in wire_payloads.items():
+                (manifest_dir / name).write_bytes(wire_payload)
 
             server = create_server(
                 "127.0.0.1",
@@ -146,17 +165,28 @@ class ResourceURLHTTPTests(unittest.TestCase):
             thread.start()
             host, port = server.server_address[:2]
             try:
-                for route, expected in (
-                    ("/dl/10133800/High/AssetBundles/Android/foo.unity3d", payload),
-                    ("/dl/10133800/manifests/all_dbmanifest", b"manifest"),
-                ):
-                    conn = http.client.HTTPConnection(host, port, timeout=5)
-                    conn.request("GET", route)
-                    response = conn.getresponse()
-                    body = response.read()
-                    self.assertEqual(response.status, 200)
-                    self.assertEqual(body, expected)
-                    conn.close()
+                status, _, body = self._request(
+                    host,
+                    port,
+                    "GET",
+                    "/dl/10133800/High/AssetBundles/Android/foo.unity3d",
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body, payload)
+
+                for name, expected in wire_payloads.items():
+                    route = f"/dl/10133800/manifests/{name}"
+                    with self.subTest(name=name, method="GET"):
+                        status, headers, body = self._request(host, port, "GET", route)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(body, expected)
+                        self.assertEqual(headers["Cache-Control"], "no-cache")
+                        self.assertNotIn("ETag", headers)
+                    with self.subTest(name=name, method="HEAD"):
+                        status, headers, body = self._request(host, port, "HEAD", route)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(body, b"")
+                        self.assertEqual(headers["Content-Length"], str(len(expected)))
             finally:
                 server.shutdown()
                 server.server_close()
