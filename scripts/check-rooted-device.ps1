@@ -1,6 +1,7 @@
 param(
     [string]$Serial,
     [string]$Package = 'jp.co.bandainamcoent.BNEI0242',
+    [string]$ExpectedActivity = 'jp.co.cygames.stage.StageUnityPlayerActivity',
     [string]$ExpectedVersionName = '11.6.3',
     [int]$ExpectedVersionCode = 438,
     [int]$DevicePort = 443,
@@ -64,6 +65,26 @@ if ($packageResult.Text -match '(?m)^\s*versionCode=(\d+)\b') {
 $versionNameMatches = $versionName -eq $ExpectedVersionName
 $versionCodeMatches = $versionCode -eq $ExpectedVersionCode
 
+# Runtime cross-check of the exact launchable activity independently extracted
+# from the hash-verified final XAPK. Keep this read-only: PackageManager resolves
+# the installed MAIN/LAUNCHER component; no activity is started here.
+$launcherResult = Invoke-AdbCapture -Arguments @(
+    'shell', 'cmd', 'package', 'resolve-activity', '--brief',
+    '-a', 'android.intent.action.MAIN',
+    '-c', 'android.intent.category.LAUNCHER',
+    $Package
+) -AllowFailure
+$expectedComponent = "$Package/$ExpectedActivity"
+$launcherMatches = $false
+if ($launcherResult.ExitCode -eq 0) {
+    foreach ($line in ($launcherResult.Text -split "`r?`n")) {
+        if ($line.Trim() -eq $expectedComponent) {
+            $launcherMatches = $true
+            break
+        }
+    }
+}
+
 $reverseResult = Invoke-AdbCapture -Arguments @('reverse', '--list') -AllowFailure
 $reverseNeedle = "tcp:$DevicePort tcp:$HostPort"
 $reverseReady = $reverseResult.ExitCode -eq 0 -and $reverseResult.Text -match [regex]::Escape($reverseNeedle)
@@ -104,18 +125,20 @@ $ready = (
     $packagePresent -and
     $versionNameMatches -and
     $versionCodeMatches -and
+    $launcherMatches -and
     $reverseReady -and
     $apiHostReady -and
     $resourceHostReady
 )
 
 $report = [ordered]@{
-    schema = 1
+    schema = 2
     adb_state_ready = $adbReady
     root_available = $rootAvailable
     package_present = $packagePresent
     version_name_matches = $versionNameMatches
     version_code_matches = $versionCodeMatches
+    launchable_activity_matches = $launcherMatches
     reverse_443_to_tls_mux = $reverseReady
     api_host_loopback = $apiHostReady
     resource_host_loopback = $resourceHostReady
