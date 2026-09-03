@@ -202,6 +202,26 @@ class RuntimeTriageTests(unittest.TestCase):
         self.assertEqual(result["classification"], "load_index_response_failure")
         self.assertEqual(result["first_server_failure"]["route"], "/load/index")
 
+    def test_failed_load_index_retry_then_success_prefers_progress(self) -> None:
+        result = self.classification(
+            self.run(
+                phase="load_index_reached",
+                sequence=[
+                    {"route": "/load/index", "status": 500},
+                    {"route": "/load/index", "status": 200},
+                ],
+                reached={"load_index": True},
+                first_failure={
+                    "event_index": 0,
+                    "route": "/load/index",
+                    "status": 500,
+                    "error": "internal_error",
+                },
+            )
+        )
+        self.assertEqual(result["classification"], "load_index_reached_visual_gate")
+        self.assertFalse(result["visible_home_proven"])
+
     def test_first_failure_after_index_is_post_index_server_gap(self) -> None:
         result = self.classification(
             self.run(
