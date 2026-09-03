@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Discover final-client ApiType enum surfaces and related initializer methods.
+"""Discover final-client ApiType enum and initializer surfaces.
 
-This pass intentionally emits only sanitized derived metadata.  It is designed to
-locate the exact 516-key normal API enum and the 22-key VR/login enum directly from
-Il2CppDumper output so later endpoint->task binding does not depend on a naming
-heuristic alone.
+The normal A group is represented by one exact 516-value enum.  The separate
+VR/login B group is anchored primarily by `Common.ApiType::.cctor`; its enum shape
+need not be identical to the 22 delivered dictionary entries, so B discovery is
+reported as exact/superset evidence instead of blocking the normal API analysis.
 """
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-SCHEMA = 1
+SCHEMA = 2
 A_KEYS = frozenset(range(516))
 B_KEYS = frozenset({0, 1, 2, *range(8, 27)})
+EXPECTED_A_CCTOR = 0x4271C3C
+EXPECTED_B_CCTOR = 0x4DC8490
 MAX_ENUMS = 20000
 MAX_RELATED_METHODS = 256
 MAX_PATH_LITERALS = 4096
@@ -26,9 +28,6 @@ _ENUM_RE = re.compile(
     r"^\s*(?:public|private|internal|protected)?\s*"
     r"(?:(?:sealed|abstract|static|partial|readonly)\s+)*enum\s+([^\s:{]+)"
 )
-# Il2CppDumper emits enum values as fields such as:
-#   public const ApiType VersionCheck = 0;
-# Keep a fallback for ordinary decompiler-style `Name = value,` formatting too.
 _ENUM_CONST_RE = re.compile(
     r"^\s*(?:public|private|internal|protected)\s+const\s+[^\s]+\s+"
     r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?(?:0x[0-9A-Fa-f]+|\d+))\s*;\s*$"
@@ -66,8 +65,6 @@ def parse_enums(path: Path) -> list[dict[str, Any]]:
         full_name = f"{namespace}.{name}" if namespace else name
         entries: list[list[Any]] = []
         cursor = index + 1
-        # Il2CppDumper type blocks can contain comments/field metadata before the
-        # constants. Bound the scan but stop at the type's closing brace.
         for _ in range(8192):
             if cursor >= len(lines):
                 break
@@ -93,11 +90,28 @@ def parse_enums(path: Path) -> list[dict[str, Any]]:
     return enums
 
 
+def enum_values(enum: dict[str, Any]) -> list[int]:
+    return [int(entry[1]) for entry in enum["entries"]]
+
+
 def select_exact(enums: list[dict[str, Any]], expected: frozenset[int]) -> list[dict[str, Any]]:
     result = []
     for enum in enums:
-        values = [int(entry[1]) for entry in enum["entries"]]
+        values = enum_values(enum)
         if len(values) == len(expected) and len(values) == len(set(values)) and set(values) == expected:
+            result.append(enum)
+    return result
+
+
+def select_small_superset(
+    enums: list[dict[str, Any]], expected: frozenset[int], max_entries: int = 96
+) -> list[dict[str, Any]]:
+    result = []
+    for enum in enums:
+        values = enum_values(enum)
+        if len(values) > max_entries or len(values) != len(set(values)):
+            continue
+        if expected.issubset(set(values)):
             result.append(enum)
     return result
 
@@ -114,11 +128,7 @@ def load_related_methods(path: Path) -> list[dict[str, Any]]:
         if address <= 0:
             continue
         result.append(
-            {
-                "name": name,
-                "rva": address,
-                "signature": item.get("Signature"),
-            }
+            {"name": name, "rva": address, "signature": item.get("Signature")}
         )
         if len(result) > MAX_RELATED_METHODS:
             raise RuntimeError("unexpectedly many ApiType-related methods")
@@ -160,6 +170,11 @@ def compact_enum(enum: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def find_method(methods: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    matches = [item for item in methods if item["name"] == name]
+    return matches[0] if len(matches) == 1 else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dump-cs", type=Path, required=True)
@@ -170,37 +185,44 @@ def main() -> int:
 
     enums = parse_enums(args.dump_cs)
     a_candidates = select_exact(enums, A_KEYS)
-    b_candidates = select_exact(enums, B_KEYS)
+    b_exact = select_exact(enums, B_KEYS)
+    b_superset = select_small_superset(enums, B_KEYS)
     related_methods = load_related_methods(args.script_json)
     path_literals = load_path_literals(args.stringliteral_json)
+
+    a_cctor = find_method(related_methods, "ApiType$$.cctor")
+    b_cctor = find_method(related_methods, "Common.ApiType$$.cctor")
 
     report = {
         "schema": SCHEMA,
         "enum_count": len(enums),
         "a_expected_key_count": len(A_KEYS),
-        "b_expected_key_count": len(B_KEYS),
+        "b_delivered_key_count": len(B_KEYS),
         "a_candidates": [compact_enum(item) for item in a_candidates],
-        "b_candidates": [compact_enum(item) for item in b_candidates],
+        "b_exact_candidates": [compact_enum(item) for item in b_exact],
+        "b_superset_candidates": [compact_enum(item) for item in b_superset],
+        "a_cctor": a_cctor,
+        "b_cctor": b_cctor,
         "related_methods": related_methods,
         "api_shaped_literal_count": len(path_literals),
         "api_shaped_literals": path_literals,
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
-    # The final specimen is expected to identify these surfaces uniquely. Fail
-    # closed if it does not so later agents do not silently bind the wrong enum.
     if len(a_candidates) != 1:
         raise RuntimeError(
-            f"expected exactly one 516-key ApiType enum candidate, got {len(a_candidates)} "
+            f"expected exactly one 516-key normal ApiType enum, got {len(a_candidates)} "
             f"from {len(enums)} enums"
         )
-    if len(b_candidates) != 1:
-        raise RuntimeError(
-            f"expected exactly one 22-key VR ApiType enum candidate, got {len(b_candidates)} "
-            f"from {len(enums)} enums"
-        )
+    if a_cctor is None or int(a_cctor["rva"]) != EXPECTED_A_CCTOR:
+        raise RuntimeError(f"normal ApiType cctor mismatch: {a_cctor!r}")
+    if b_cctor is None or int(b_cctor["rva"]) != EXPECTED_B_CCTOR:
+        raise RuntimeError(f"VR ApiType cctor mismatch: {b_cctor!r}")
     return 0
 
 
