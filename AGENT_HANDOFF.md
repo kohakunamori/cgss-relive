@@ -2,7 +2,7 @@
 
 Authoritative continuation point for `kohakunamori/cgss-relive`.
 
-**Do not restart solved research.** Fetch actual `main`, verify CI, then continue
+**Do not restart solved research.** Fetch current `main`, verify CI, then continue
 from original-client runtime integration.
 
 ## Mission
@@ -14,184 +14,217 @@ offline endpoints/content one blocker at a time.
 Final specimen:
 
 ```text
-package:          jp.co.bandainamcoent.BNEI0242
-app version:      11.6.3
-versionCode:      438
-Unity:            2022.3.56f1
-runtime:          IL2CPP
-metadata version: 31
+package          jp.co.bandainamcoent.BNEI0242
+app version      11.6.3
+versionCode      438
+Unity            2022.3.56f1
+runtime          IL2CPP
+metadata version 31
 ```
 
 Exact frozen hashes:
 
 ```text
-XAPK SHA256
+XAPK
 609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d
 
-arm64 libil2cpp.so SHA256
+arm64 libil2cpp.so
 2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5
 
-global-metadata.dat SHA256
+global-metadata.dat
 2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586
 ```
 
-The repository contains an ephemeral exact-specimen GitHub Actions analysis
-workflow. It verifies the hashes, runs bounded targeted analysis, deletes raw
-binaries, and uploads only sanitized reports.
+Never commit APK/XAPK, `libil2cpp.so`, metadata, manifest/master DBs, resource
+bodies, production credentials/session values, plaintext static key/salt, raw
+sensitive captures, or bulk decompiler output.
 
-Never commit APK/XAPK, `libil2cpp.so`, metadata, master/manifest databases,
-resource bodies, production credentials/session values, plaintext client-static
-keys/salts, raw sensitive captures, or bulk decompiler output.
+The exact-specimen Actions workflow verifies the frozen hashes, runs bounded
+analysis, deletes raw binaries and uploads only sanitized derived reports.
 
-## Required reading
+## Read first
 
 ```text
+docs/rooted-device-integration.md
 docs/load-check-11.6.3.md
 docs/load-index-11.6.3.md
-docs/rooted-device-integration.md
 docs/runtime-event-analysis.md
 docs/local-resource-server.md
 docs/resource-bootstrap.md
 docs/protocol-11.6.3.md
-docs/research/2026-09-03-final-client-bootstrap-closure.md
 ```
 
 ## Protocol — solved
-
-Final request/response codec:
 
 ```text
 JSON -> MessagePack -> Base64 -> AES-256-CBC -> Base64(cipher || dynamic 32-byte key)
 IV = UDID-derived 16 bytes
 ```
 
-Implemented/tested in:
+Implemented/tested in `server/cgss_codec.py`, `server/header_codec.py`, and
+`server/bootstrap_core.py`.
+
+Result codes:
 
 ```text
-server/cgss_codec.py
-server/header_codec.py
-server/bootstrap_core.py
+1   success
+201 session error
+204 app-version error
+214 resource-version transition
 ```
 
-Final result codes:
+Do not rediscover crypto unless original-client runtime contradicts a concrete
+fixture.
+
+## Resource versions/freeze
 
 ```text
-success           1
-session error     201
-app-version error 204
-resource-version  214
+binary/default RES_VER 10133000
+final frozen revision  10133800
 ```
-
-Do not rediscover solved crypto unless original-client runtime contradicts a
-specific fixture.
-
-## Resource versions — keep both
-
-```text
-binary/default RES_VER: 10133000
-final frozen revision:  10133800
-```
-
-Issue #2 resource freeze is complete.
 
 Frozen facts:
 
 ```text
 manifest rows          220837
-unique resource hashes 220803
+unique hashes          220803
 archive planned        220803
 archive skipped        0
 master tables          909
 card_data rows          4314
 ```
 
-Archive:
+Archive layout:
 
 ```text
 resource-cache/10133800/objects/<hash[0:2]>/<hash>
 ```
 
-Before any real-device run, `scripts/preflight-local-resources.py` must report
-`ready=true`. It checks the final manifest DB, both wire manifests and every
-220803 expected object without emitting names/hashes.
-
-## `/load/check` — native 214 semantics
-
-Default server policy:
+Bootstrap wire files:
 
 ```text
-/load/check RES-VER=10133000
-  -> result_code=214
-  -> required_res_ver=10133800
-  -> data.isS3=false
+resource-cache/10133800/manifests/all_dbmanifest
+resource-cache/10133800/manifests/Android_AHigh_SHigh
 ```
 
-Final static evidence proves:
+## Resource filename resolver — final-manifest complete
 
-- 214 is accepted by the network result path;
-- `required_res_ver` is persisted to Savedata `RES_VER`;
-- no immediate `/load/check` resend occurs inside that network coroutine.
-
-Do **not** expect or require:
+Final `manifests.name` is not universally a basename. Aggregate final DB facts:
 
 ```text
-214 -> immediate /load/check 10133800
+names containing '/'          12317
+unique basenames              220652
+basename collision groups        137
+basename hash-conflict groups    130
 ```
 
-The diagnostic flag `--accept-old-resource-version` exists only for a controlled
-differential; it is not the native/default model.
+Therefore basename aliases are unsafe.
 
-## Bootstrap resource continuation — statically closed
+`server/resource_server.py` now resolves filename URLs by exact relative suffix,
+longest-first. `.lz4` stripping happens at the same suffix depth. No fuzzy
+basename alias is built.
 
-Exact final chain:
+The real final 10133800 DB is checked by
+`scripts/verify-final-manifest-resolution.py`. Closed aggregate result:
 
 ```text
-Stage.BootMain.<Initialize>d__14.MoveNext
-  -> Stage.ResourcesManager.GameInitialize        @ 0x037340ac
-  -> <GameInitialize>d__85.MoveNext               @ 0x0374ed34
-  -> Cute.BootNetwork.SetupNetwork                @ 0x050c6c84
-  -> <SetupNetworkCoroutine>d__11.MoveNext        @ 0x050c74dc
-  -> Cute.Certification.Login                     @ 0x050bdd9c
-  -> Cute.Certification.VersionCheckTaskExec      @ 0x050bde1c
-  -> <VersionCheckTaskExec>d__43.MoveNext         @ 0x050bf3c8
-  -> /load/check
-  -> 214 + required_res_ver=10133800
-  -> Savedata RES_VER=10133800
-  -> SetupNetwork becomes ready
-  -> GameInitialize resumes
-  -> Cute.AssetManager.InitializeManifest         @ 0x050a9000
-  -> DownloadOrLoadForInitialize resource work
-  -> GameInitialize completes
-  -> BootMain.Initialize resumes
-  -> BootMain.StartConnect                        @ 0x039c9a24
-  -> /load/index
+rows              220837
+resolved          220837
+unresolved             0
+mismatched             0
+unknown category        0
+path-shaped names   12317
+
+AssetBundles       207694
+Sound                11832
+Generic                826
+Movie                  485
 ```
 
-Critical RVA correction:
+Do not regress to leaf-only lookup or infer that a future runtime 404 is a
+basename problem.
+
+## Resource preflight — schema 3
+
+`scripts/preflight-local-resources.py` must report `ready=true` before a real
+device run. It emits only counts/booleans/failure codes.
+
+It checks:
 
 ```text
-0x0374ed34 = <GameInitialize>d__85.MoveNext entry
-0x0374eed8 = BL Cute.BootNetwork.SetupNetwork call site
+manifest SQLite quick_check
+manifest rows == 220837
+unique hashes == 220803
+all expected objects present/non-zero
+all_dbmanifest parses Android_AHigh_SHigh MD5
+Android_AHigh_SHigh bytes match that MD5
+CGSS wrapper/LZ4 decode succeeds
+decoded bytes are SQLite
+decoded SQLite bytes == supplied manifest DB
+master.mdb manifest entry exists
+master.mdb object exists
+master.mdb actual MD5 == manifest hash
 ```
 
-Never regress to labeling `0x0374eed8` as the coroutine entry.
+Do not replace these strong gates with existence-only checks.
 
-## Resource hosts / local server
+## `/load/check` — native semantics
 
-`VersionCheckTask.Parse` writes `data.isS3` into `NetworkUtil.isS3`.
+Untouched binary startup:
 
 ```text
-isS3=false -> storages.game.starlight-stage.jp
-isS3=true  -> asset-starlight-stage.akamaized.net
+request RES-VER=10133000
+ -> result_code=214
+ -> required_res_ver=10133800
+ -> data.isS3=false
 ```
 
-Compatibility server fixes `isS3=false` for deterministic local preservation.
+214 is accepted, the required version is persisted, and there is **no automatic
+same-task retry** of `/load/check`.
 
-`server/resource_server.py` supports the reconstructed final storages URL
-families, manifest DB filename resolution, wire manifests, GET/HEAD/ranges and a
-sanitized resource event log.
+Higher-level continuation:
 
-Only category routes are logged:
+```text
+/load/check 214
+ -> Savedata RES_VER=10133800
+ -> SetupNetwork ready
+ -> GameInitialize resumes
+ -> AssetManager.InitializeManifest
+ -> DownloadOrLoadForInitialize
+ -> resource work
+ -> GameInitialize completes
+ -> BootMain.StartConnect
+ -> /load/index
+```
+
+`--accept-old-resource-version` is diagnostic only.
+
+## Resource host / URL families
+
+Server fixes `isS3=false`:
+
+```text
+API      apis.game.starlight-stage.jp
+resource storages.game.starlight-stage.jp
+```
+
+Supported final families include:
+
+```text
+/dl/<ver>/manifests/<file>
+/dl/<ver>/[Low|High/]AssetBundles/<Platform>/<tail>
+/dl/resources/[Low|High/]AssetBundles/<Platform>/<tail>
+/dl/<ver>/[Low|High/]Sound/<Platform|Common>/<tail>
+/dl/resources/[Low|High/]Movie/<tail>
+/dl/<ver>/Generic/Blob|Master/<tail>
+resource/hush Generic forms
+per-bundle .../manifest/<file>
+```
+
+isS3=false appends filename/hash directly. Do not invent a universal CDN-style
+`<prefix2>/<hash>` route.
+
+Resource evidence is category-only:
 
 ```text
 @resource/manifest
@@ -202,62 +235,13 @@ Only category routes are logged:
 @resource/unresolved
 ```
 
-Filename/hash/query values are never written to the runtime evidence log or the
-resource server's default console access log.
+No name/hash/query is logged.
 
-## Endpoint map
+## `/load/index` reduced starter
 
-Final map:
+`Stage.LoadTask.Parse` RVA `0x04850a94`.
 
-```text
-A: 516 records, keys 0..515 continuous
-B: 22 records
-```
-
-Load routes:
-
-```text
-0   load/check
-1   load/set_cache_clear_flg
-10  load/title
-11  load/index
-12  load/get_external_site_url
-13  load/update_agreement_status
-```
-
-No final `home/index` or `home/load`. `home/update` is later.
-
-Implemented:
-
-```text
-/load/check
-/load/title
-/load/index
-/load/set_cache_clear_flg
-/load/update_agreement_status
-```
-
-`/load/get_external_site_url` remains deliberately un-faked until a real caller
-proves required business semantics.
-
-`/load/title` is a Title/user-driven branch, not a mandatory Home bootstrap link.
-
-## `/load/index` parser
-
-Target:
-
-```text
-Stage.LoadTask.Parse RVA 0x04850a94
-```
-
-Hard normal-path envelope:
-
-```text
-data
-└─ common_define
-```
-
-Required direct `common_define` ints:
+Required `common_define` ints:
 
 ```text
 expanding_count
@@ -269,62 +253,31 @@ room_lvup_shortening_time
 room_lvup_jewel
 ```
 
-Current direct synthetic `user_info` scalar set:
+Current `user_info` scalar core:
 
 ```text
-tutorial_flag
-viewer_id
-name
-comment
-max_card_num
-max_room_storage_num
-friend_pt
-jewel
-free_jewel
-gold
-stamina
-level
-exp
-fan
-producer_rank
-birth
-sum_of_money
-last_payment_date
-stamina_heal_time
+tutorial_flag viewer_id name comment
+max_card_num max_room_storage_num
+friend_pt jewel free_jewel gold stamina
+level exp fan producer_rank birth
+sum_of_money last_payment_date stamina_heal_time
 ```
 
-Most feature sections are guarded/empty safe. Do not add partially populated
-guarded objects: once a guarded parent is present, some child reads become hard.
-
-## Tutorial gate — closed
-
-Exact `Stage.BaseTask.setupTutorial @ 0x0476e1e4` proves:
+Completed tutorial is closed:
 
 ```text
-wire tutorial_flag=100
- -> TutorialData.set_step(1000)
- -> Save()
+wire tutorial_flag=100 -> local TutorialData.step=1000 -> Save
 ```
 
-If local step is already `1000`, the method normalizes the logical flag to `100`.
-Therefore:
+Do not send wire value 1000.
 
-```text
-COMPLETED_TUTORIAL_FLAG       = 100
-COMPLETED_TUTORIAL_LOCAL_STEP = 1000
-```
-
-Do not change the response value to `1000`; `1000` is the persisted local step.
-
-## Starter card/unit contract — closed enough for first runtime
-
-Card identity from final master:
+Final-master starter identity:
 
 ```text
 card_id 100001 = 島村卯月
 ```
 
-Synthetic ownership/unit state:
+Synthetic state:
 
 ```text
 serial_id        1
@@ -333,153 +286,134 @@ unit_id          1
 leader_serial_id 1
 ```
 
-Important card-container correction:
+Correct owned-card container:
 
 ```text
 user_card_list = []
+cs_gacha_data_cenere = [one card]
 ```
 
-The actual parser block that creates a WorkCardData object is the exact literal:
+A non-empty `cs_gacha_data_cenere` calls `WorkCardData.AddCardData` and hard-reads:
 
 ```text
-cs_gacha_data_cenere
+serial_id card_id exp step love skill_level protect
 ```
 
-A non-empty element calls `WorkCardData.AddCardData` and hard-reads:
+Home card predownload resolves unit serial through WorkCardData, so serial 1 must
+exist there.
+
+Unit contract:
 
 ```text
-serial_id
-card_id
-exp
-step
-love
-skill_level
-protect
+unit_slot + name
+serial_id_0 .. serial_id_4
+later: unit_id + name
 ```
 
-The starter puts serial `1` / card `100001` there.
+Current serial slots are `[1,0,0,0,0]`.
 
-`Stage.Home.CardDownloadList @ 0x03ec0d70` immediately resolves the unit serial via
-`WorkCardData.GetCardDataWithSerial`, so this correction is required before Home
-predownload state can work.
-
-For non-empty `user_unit_list`:
-
-```text
-first pass: unit_slot + name
-fixed loop: serial_id_0 .. serial_id_4 (exactly five)
-later pass: unit_id + name
-```
-
-The starter explicitly sets all five serial slots and uses `serial_id_0=1`.
-
-## `user_chara_list` — now closed for starter minimization
-
-The key is real. Exact string literal:
-
-```text
-user_chara_list = 0x085c6820
-```
-
-Final `LoadTask.Parse` xref is in the `0x0485d17c` region. The bounded block
-proves:
-
-```text
-JsonData.get_Count
-cmp w0,#1
-b.lt -> next block
-```
-
-so `user_chara_list=[]` is safe.
-
-If a row is supplied, it hard-reads exactly:
-
-```text
-chara_id
-fan
-```
-
-then calls `Stage.WorkCharaData.AddCharaData` at call site `0x0485d2b8`.
-
-The old synthetic `{chara_id:101, fan:0}` row was structurally valid but not
-needed for the first Home experiment. Bounded Home startup analysis contains no
-`WorkCharaData` consumer. The real card predownload worker instead obtains
-character identity directly from its WorkCardData card:
-
-```text
-WorkCardData.CardData.GetCharaId @ 0x03ec0fdc
-WorkCardData.CardData.GetCharaId @ 0x03ec1294
-```
-
-Therefore the current starter deliberately keeps:
+`user_chara_list` is a real parser block; empty array is proven safe. A row would
+hard-read `chara_id` + `fan` and create WorkCharaData, but bounded Home startup has
+no WorkCharaData consumer. Current starter therefore intentionally keeps:
 
 ```text
 user_chara_list = []
 ```
 
-Do not re-add the synthetic character row without runtime or bounded consumer
-evidence.
+Do not re-add it without runtime/consumer evidence.
 
 ## `/load/index` -> Home — statically closed
 
-Success tail:
-
 ```text
 /load/index
- -> Stage.LoadTask.Parse
+ -> LoadTask.Parse
  -> BootMain.CallbackOnSuccessLoad
  -> BootMain.LastInitialized
  -> BootMain.ChangeView
  -> SceneManager.ChangeView
 ```
 
-Final `StageSceneDefine.eViewId` mapping:
+View IDs:
 
 ```text
-BootMain       = 5
-Home           = 6
-Login_Bonus    = 7
-Asset_Download = 8
+BootMain       5
+Home           6
+Login_Bonus    7
+Asset_Download 8
 ```
 
-`BootMain.ChangeView` computes:
+Visible Home is still runtime-pending.
+
+## TLS / local topology
+
+Use one multi-SAN leaf containing at least:
 
 ```text
-next = LoginBonusData.IsExistLoginBonus() ? 7 : 6
+apis.game.starlight-stage.jp
+storages.game.starlight-stage.jp
 ```
 
-Independent call sites also use `ChangeView(6)` from Home UI/back navigation.
-Visible Home with the local stack is still runtime-pending because static control
-flow does not claim what an unrun original client rendered.
+Topology:
 
-## Home startup state analysis
+```text
+Android original names -> 127.0.0.1:443
+    adb reverse tcp:443 -> host tcp:8445
+    server.tls_mux :8445
+      API Host      -> HTTP :8080
+      storages Host -> HTTP :8081
+```
 
-Exact/bounded `Stage.Home.Start` and `StartViewProcess` analysis does not reveal a
-mandatory post-`/load/index` API call. Startup enters local/resource-facing
-helpers including `PreDownloadList`, banner/popup preparation and view setup.
+`scripts/run-rooted-local-stack.py` refuses readiness until:
 
-The real `CardDownloadList` is the most important starter dependency and is why a
-valid WorkCardData serial is kept. Optional campaign/lottery/questionnaire/MV
-WorkData observed through banner setup remains skip/default-safe; do not populate
-those `/load/index` sections without runtime evidence.
+1. resource preflight schema 3 passes;
+2. API/resource backend health passes;
+3. TLS mux starts;
+4. API hostname passes CA-chain + exact hostname SAN/SNI verification and Host
+   routing using `work/tls/ca.cert.pem`;
+5. storages hostname passes the same verification.
+
+This removes wrong CA/leaf/SAN as host-side unknowns. Android system-CA trust is
+still a device-side gate.
+
+## Device preparation
+
+`scripts/prepare-device-tunnel.ps1` default is now:
+
+```text
+device tcp:443 -> host tcp:8445
+```
+
+Do not regress to old 8443.
+
+After manual hosts/system-CA setup and after host stack readiness:
+
+```powershell
+.\scripts\prepare-device-tunnel.ps1 -RequireRoot
+.\scripts\check-rooted-device.ps1
+```
+
+`check-rooted-device.ps1` is read-only. Core `ready=true` requires:
+
+```text
+ADB state device
+root uid=0
+package jp.co.bandainamcoent.BNEI0242 installed
+versionName 11.6.3
+versionCode 438
+reverse tcp:443 -> tcp:8445 present
+API hostname -> 127.0.0.1 hosts entry
+storages hostname -> 127.0.0.1 hosts entry
+```
+
+Exact-byte local-CA presence in common system CA directories is advisory only;
+root managers may transform certificate files.
+
+CI now parses all `scripts/*.ps1` via the PowerShell AST parser without executing
+ADB commands.
 
 ## Runtime analyzer
 
-`scripts/analyze-runtime-events.py` report schema is **3**.
-
-Important resource-negotiation fields include:
-
-```text
-server_returned_214
-observed_later_control_request_after_214
-observed_resource_request_after_214
-observed_successful_resource_response_after_214
-observed_later_10133800_load_check_after_214
-server_returned_direct_success_with_required_res_ver
-server_returned_success_for_10133800
-```
-
-Hard phases include:
+`scripts/analyze-runtime-events.py` schema 3. Important phases:
 
 ```text
 resource_version_214_responded
@@ -489,101 +423,48 @@ load_index_reached
 post_load_index_observed
 ```
 
-Runtime logs must never contain UDID, SID, USER-ID, PARAM, viewer-id values,
-decoded request/response values, resource filenames, or object hashes.
+Do not require a second `/load/check`.
 
-## Rooted-device stack — preferred topology
+## First real-device sequence
 
-The untouched client reaches more than one original HTTPS hostname on port 443.
-Use one multi-SAN leaf certificate and a single local TLS mux:
+1. Generate multi-SAN test CA/leaf.
+2. Manually install CA into Android system trust and map both original names to
+   127.0.0.1.
+3. Start `scripts/run-rooted-local-stack.py`; require readiness.
+4. Run `scripts/prepare-device-tunnel.ps1 -RequireRoot`.
+5. Run `scripts/check-rooted-device.ps1`; require core `ready:true`.
+6. Launch untouched original 11.6.3.
+7. Preserve only sanitized control/resource logs and minimal relevant logcat.
+8. Analyze merged timeline.
 
-```text
-Android original client
-  -> hosts/DNS: API + storages names -> 127.0.0.1
-  -> adb reverse tcp:443 -> host tcp:8445
-  -> server.tls_mux :8445
-       ├─ apis.game.starlight-stage.jp     -> HTTP 127.0.0.1:8080
-       └─ storages.game.starlight-stage.jp -> HTTP 127.0.0.1:8081
-```
-
-The test CA must be installed as an Android **system CA** on the rooted device.
-The leaf SANs must include at least:
-
-```text
-apis.game.starlight-stage.jp
-storages.game.starlight-stage.jp
-```
-
-## First real-device run — use the supervisor
-
-Preferred launch is now one foreground command rather than three manually managed
-servers:
-
-```powershell
-python .\scripts\run-rooted-local-stack.py `
-  --resource-root .\resource-cache\10133800 `
-  --manifest-db .\work\resources\manifest_10133800.db `
-  --cert .\work\tls\server.chain.pem `
-  --key .\work\tls\server.key.pem `
-  --api-map .\work\final_map.json `
-  --viewer-id 1 `
-  --producer-name "Relive Producer"
-```
-
-The supervisor:
-
-1. runs the full 10133800 resource preflight and refuses to start on failure;
-2. starts control API on `127.0.0.1:8080` with starter-visible profile;
-3. health-checks it;
-4. starts resource backend on `127.0.0.1:8081` and health-checks it;
-5. starts the multi-SAN TLS mux on `127.0.0.1:8445`;
-6. tears down the whole stack if any child exits unexpectedly.
-
-Default is native 214 behavior. The supervisor exposes
-`--accept-old-resource-version` only as an explicit diagnostic differential.
-
-Then bridge the rooted device:
-
-```powershell
-.\scripts\prepare-device-tunnel.ps1 `
-  -DevicePort 443 `
-  -HostPort 8445 `
-  -RequireRoot
-```
-
-The device still needs both original hostnames redirected to `127.0.0.1` and the
-multi-SAN test CA installed as a system CA.
-
-Expected observable progression:
+Expected high-level progression:
 
 ```text
 /load/check 214
--> @resource/manifest and/or @resource/<category>
--> /load/index
--> static Home(6) / Login_Bonus(7) tail
+ -> resource bootstrap/work
+ -> /load/index
+ -> Home(6) or Login_Bonus(7) -> Home
 ```
 
-Do not wait for a second `/load/check` before diagnosing the resource plane.
+## Remaining blockers
 
-## Remaining real blockers
+Deterministic/static/server-side bootstrap work is now deliberately close to
+exhaustion. Decisive missing evidence is actual original-client runtime:
 
-Static high-value bootstrap gaps are now mostly closed. The decisive work is
-runtime integration:
-
-1. original untouched 11.6.3 trusts local TLS and reaches `/load/check`;
-2. native 214 causes actual resource-plane traffic using local 10133800 archive;
+1. untouched 11.6.3 trusts the system-installed CA and reaches `/load/check`;
+2. native 214 produces real resource-plane traffic;
 3. resource initialization completes and `/load/index` is reached;
-4. reduced starter-visible response is accepted and Home visibly renders;
-5. capture the first unsupported post-Home endpoint/state and implement only that.
+4. reduced starter is accepted and Home visibly renders;
+5. capture the first unsupported post-Home endpoint/local-state dependency and
+   implement only that.
 
-If no device is available, continue deterministic tooling/tests/docs and narrowly
-bounded exact-specimen analysis. Do not redo solved crypto/map/resource-freeze
-work and do not expand the starter payload without a demonstrated consumer.
+Do not manufacture success responses or claim Home acceptance from server 200s,
+CI, or static callgraphs.
 
-## Issue status
+## Issue state
 
 ```text
 #1 M0 final specimen: closed
 #2 M1 final 10133800 resource freeze: closed
-#3 M2 final-client transport/startup/Home acceptance: open
+#3 M2 final transport/startup/Home acceptance: open
 ```
