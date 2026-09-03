@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Bounded clean-room analysis of final 11.6.3 Stage.Home entrypoints.
 
-This helper intentionally avoids bulk decompiler output. It emits:
-- the method name/RVA index for the exact Stage.Home class, capped;
-- bounded disassembly only for lifecycle/entry-like methods;
-- named direct BL targets for those bounded methods.
+This helper intentionally avoids bulk decompiler output. It counts the exact
+Stage.Home method set but emits names/RVAs and bounded instructions only for a
+small lifecycle/entry-like selector.
 """
 from __future__ import annotations
 
@@ -21,7 +20,6 @@ from capstone.arm64 import ARM64_INS_BL, ARM64_OP_IMM
 from elftools.elf.elffile import ELFFile
 
 HOME_PREFIX = "Stage.Home$$"
-MAX_METHOD_INDEX = 160
 MAX_ENTRY_METHODS = 48
 MAX_ENTRY_SIZE = 0x200
 
@@ -195,16 +193,11 @@ def main() -> int:
         (method for method in methods if method.name.startswith(HOME_PREFIX)),
         key=lambda method: (method.address, method.name),
     )
-    if len(home_methods) > MAX_METHOD_INDEX:
-        raise RuntimeError(
-            f"Stage.Home method index unexpectedly large ({len(home_methods)} > {MAX_METHOD_INDEX}); "
-            "refine the selector before emitting output"
-        )
-
     entry_methods = [method for method in home_methods if is_entry_like(method)]
     if len(entry_methods) > MAX_ENTRY_METHODS:
         raise RuntimeError(
-            f"Stage.Home entry selector too broad ({len(entry_methods)} > {MAX_ENTRY_METHODS})"
+            f"Stage.Home entry selector too broad ({len(entry_methods)} > {MAX_ENTRY_METHODS}); "
+            "refine lifecycle patterns before emitting output"
         )
 
     view = BinaryView(args.lib)
@@ -213,14 +206,16 @@ def main() -> int:
     finally:
         view.close()
 
+    selected_index = [
+        {"name": method.name, "rva": method.address, "signature": method.signature}
+        for method in entry_methods
+    ]
     report = {
-        "schema": 1,
+        "schema": 2,
         "class": "Stage.Home",
-        "method_count": len(home_methods),
-        "method_index": [
-            {"name": method.name, "rva": method.address, "signature": method.signature}
-            for method in home_methods
-        ],
+        "class_method_count": len(home_methods),
+        "selected_method_count": len(entry_methods),
+        "selected_method_index": selected_index,
         "entry_candidates": entries,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -232,13 +227,13 @@ def main() -> int:
     lines = [
         "# Final 11.6.3 Stage.Home bounded entry analysis",
         "",
-        f"Exact Stage.Home methods indexed: {len(home_methods)}",
-        f"Lifecycle/entry candidates disassembled: {len(entries)}",
+        f"Exact Stage.Home method count (names not bulk-emitted): {len(home_methods)}",
+        f"Selected lifecycle/entry methods: {len(entries)}",
         "",
-        "## Method index",
+        "## Selected method index",
         "",
     ]
-    for method in home_methods:
+    for method in entry_methods:
         lines.append(f"- `0x{method.address:X}` `{method.name}`")
 
     lines += ["", "## Bounded entry candidates", ""]
