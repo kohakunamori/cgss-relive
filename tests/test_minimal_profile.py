@@ -10,7 +10,6 @@ from server.minimal_profile import (
     REQUIRED_COMMON_DEFINE_FIELDS,
     REQUIRED_USER_INFO_FIELDS,
     STARTER_CARD_ID,
-    STARTER_CHARA_ID,
     STARTER_SERIAL_ID,
     STARTER_UNIT_ID,
     STARTER_UNIT_SLOT,
@@ -68,7 +67,7 @@ class MinimalProfileTests(unittest.TestCase):
         data["user_info"]["tutorial_flag"] = 90
         self.assertIn("user_info.tutorial_flag", validate_home_candidate_profile(data))
 
-    def test_starter_visible_profile_populates_work_card_and_final_unit_contract(self) -> None:
+    def test_starter_visible_profile_populates_only_needed_card_and_unit_state(self) -> None:
         data = build_starter_visible_load_index_data(viewer_id=9, producer_name="Starter", now=10)
         self.assertEqual(validate_starter_visible_profile(data), [])
         self.assertEqual(validate_home_candidate_profile(data), [])
@@ -94,7 +93,9 @@ class MinimalProfileTests(unittest.TestCase):
         )
         self.assertNotIn("viewer_id", unit)
 
-        self.assertEqual(data["user_chara_list"], [{"chara_id": STARTER_CHARA_ID, "fan": 0}])
+        # Exact final parser proves user_chara_list [] is safe; bounded Home
+        # startup has no WorkCharaData consumer, so do not fabricate a row.
+        self.assertEqual(data["user_chara_list"], [])
         self.assertEqual(data["user_info"]["leader_serial_id"], STARTER_SERIAL_ID)
 
     def test_starter_visible_validator_rejects_broken_references(self) -> None:
@@ -103,20 +104,23 @@ class MinimalProfileTests(unittest.TestCase):
         data["user_unit_list"][0]["unit_slot"] = 2
         data["user_unit_list"][0]["unit_id"] = 2
         data["user_unit_list"][0]["serial_id_0"] = 2
-        data["user_chara_list"][0]["chara_id"] = 999
         data["user_info"]["leader_serial_id"] = 2
         errors = validate_starter_visible_profile(data)
         self.assertIn(f"{STARTER_WORK_CARD_SECTION}[0].card_id", errors)
         self.assertIn("user_unit_list[0].unit_slot", errors)
         self.assertIn("user_unit_list[0].unit_id", errors)
         self.assertIn("user_unit_list[0].serial_id_0", errors)
-        self.assertIn("user_chara_list[0].chara_id", errors)
         self.assertIn("user_info.leader_serial_id", errors)
 
     def test_starter_visible_validator_rejects_user_card_duplicate_path(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
         data["user_card_list"] = [dict(data[STARTER_WORK_CARD_SECTION][0])]
         self.assertIn("user_card_list", validate_starter_visible_profile(data))
+
+    def test_starter_visible_validator_rejects_unneeded_user_chara_state(self) -> None:
+        data = build_starter_visible_load_index_data(now=1)
+        data["user_chara_list"] = [{"chara_id": 101, "fan": 0}]
+        self.assertIn("user_chara_list", validate_starter_visible_profile(data))
 
     def test_starter_visible_validator_requires_work_card_section(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
