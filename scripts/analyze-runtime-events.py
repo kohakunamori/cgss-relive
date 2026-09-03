@@ -5,6 +5,11 @@ Input must be JSONL emitted by ``server.safe_events.SafeEventLog``. Both control
 and resource servers use the same strict sanitized schema. Resource-plane routes
 are synthetic categories such as ``@resource/manifest``; raw filenames, hashes,
 query strings, request bodies and account/session values are never accepted.
+
+Multiple sanitized files from one runtime can be merged by timestamp with
+repeated ``--merge-run LABEL=PATH`` arguments. This is the preferred way to
+combine independent control-server and resource-server logs without concurrent
+writes to one file.
 """
 from __future__ import annotations
 
@@ -135,6 +140,19 @@ def load_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def merge_event_streams(streams: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Merge sanitized streams by event timestamp with deterministic tie order."""
+    tagged: list[tuple[float, int, int, dict[str, Any]]] = []
+    for source_index, events in enumerate(streams):
+        for event_index, event in enumerate(events):
+            timestamp = event.get("time")
+            if not isinstance(timestamp, (int, float)):
+                raise UnsafeEventLog("merged event streams require numeric time on every event")
+            tagged.append((float(timestamp), source_index, event_index, event))
+    tagged.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [event for _, _, _, event in tagged]
+
+
 def _response_header(event: Mapping[str, Any], name: str) -> Any:
     headers = event.get("response_data_headers")
     if isinstance(headers, Mapping):
@@ -244,10 +262,6 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
             if event.get("api_candidates"):
                 after_load_index["api_candidates"] = event["api_candidates"]
 
-    # Phase names follow the statically closed hard mainline. /load/title remains
-    # user-driven and therefore does not advance this phase. A resource event is
-    # stronger evidence after 214 than waiting for a second /load/check, which the
-    # final coroutine does not automatically send.
     phase = "no_http_request"
     if events:
         phase = "http_reached"
@@ -350,20 +364,52 @@ def _parse_run(value: str) -> tuple[str, Path]:
     return path.stem, path
 
 
+def _parse_merge_run(value: str) -> tuple[str, Path]:
+    if "=" not in value:
+        raise argparse.ArgumentTypeError("--merge-run must be LABEL=PATH")
+    label, raw_path = value.split("=", 1)
+    if not label or not raw_path:
+        raise argparse.ArgumentTypeError("--merge-run must be LABEL=PATH")
+    return label, Path(raw_path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Analyze sanitized cgss-relive runtime event JSONL and compare profile runs"
     )
-    parser.add_argument("runs", nargs="+", type=_parse_run, metavar="[LABEL=]EVENTS.jsonl")
+    parser.add_argument("runs", nargs="*", type=_parse_run, metavar="[LABEL=]EVENTS.jsonl")
+    parser.add_argument(
+        "--merge-run",
+        action="append",
+        type=_parse_merge_run,
+        default=[],
+        metavar="LABEL=EVENTS.jsonl",
+        help="repeat with the same LABEL to merge control/resource logs by numeric event time",
+    )
     parser.add_argument("-o", "--output", type=Path, help="optional JSON report path")
     args = parser.parse_args()
 
     loaded: list[tuple[str, list[dict[str, Any]]]] = []
     try:
+        labels: set[str] = set()
         for label, path in args.runs:
-            if any(existing == label for existing, _ in loaded):
+            if label in labels:
                 raise UnsafeEventLog(f"duplicate run label: {label}")
+            labels.add(label)
             loaded.append((label, load_events(path)))
+
+        merge_paths: dict[str, list[Path]] = {}
+        for label, path in args.merge_run:
+            if label in labels:
+                raise UnsafeEventLog(f"run label used by both positional and --merge-run: {label}")
+            merge_paths.setdefault(label, []).append(path)
+        for label, paths in merge_paths.items():
+            streams = [load_events(path) for path in paths]
+            loaded.append((label, merge_event_streams(streams)))
+            labels.add(label)
+
+        if not loaded:
+            raise UnsafeEventLog("at least one run or --merge-run is required")
     except UnsafeEventLog as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
