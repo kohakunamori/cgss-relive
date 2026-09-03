@@ -9,9 +9,9 @@ It is **not** runtime acceptance evidence and it does not add fields to the
 
 ## Exact specimen result
 
-The hash-verified exact workflow run `33743831567` (run #40) completed
-successfully, including the clean-room artifact boundary. Its bounded derived
-reports establish:
+The hash-verified exact workflow run `33744105632` (run #41) completed
+successfully, including the clean-room artifact boundary. Its schema-4 bounded
+construction report establishes:
 
 ```text
 Stage.LoadTask.SetParameter @ 0x04877A14
@@ -31,7 +31,9 @@ pins the relevant type by the exact constructor reached from `SetParameter`:
 Stage.BaseParam::.ctor
 ```
 
-This avoids confusing it with unrelated same-name metadata types.
+This avoids confusing it with unrelated same-name metadata types. The report also
+labels only fields on `LoadTaskParam` as `load_state` / `next_api`; same numeric
+offsets on unrelated types are not promoted to target-field evidence.
 
 ## `SetParameter` construction flow
 
