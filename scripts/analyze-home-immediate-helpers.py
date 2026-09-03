@@ -6,6 +6,7 @@ Clean-room boundary:
 - only one-hop ``Stage.Home`` helpers with startup-like names are selected;
 - helper bodies are scanned to find direct named calls, but the report emits only
   dependency-related calls plus small instruction contexts;
+- framework/runtime calls are excluded before dependency-term matching;
 - no complete helper disassembly, global method list, strings, or binary data is
   emitted.
 """
@@ -37,6 +38,12 @@ MAX_HELPER_SIZE = 0x3000
 MAX_HELPERS = 40
 MAX_DEPENDENCY_CALLS_PER_HELPER = 64
 CONTEXT_INSTRUCTIONS = 4
+FRAMEWORK_PREFIXES = (
+    "UnityEngine.",
+    "System.",
+    "CodeStage.",
+    "Cysharp.",
+)
 
 DEPENDENCY_TERMS = (
     "User",
@@ -184,6 +191,12 @@ def is_immediate_helper(name: str) -> bool:
     return any(member.startswith(prefix) for prefix in HELPER_PREFIXES)
 
 
+def is_dependency_name(name: str) -> bool:
+    if name.startswith(FRAMEWORK_PREFIXES):
+        return False
+    return any(term in name for term in DEPENDENCY_TERMS)
+
+
 def format_instruction(instruction: Any) -> str:
     return f"0x{instruction.address:X}: {instruction.mnemonic} {instruction.op_str}"
 
@@ -224,7 +237,7 @@ def analyze_helper(
         if call is None:
             continue
         total_named_calls += 1
-        if not any(term in call["name"] for term in DEPENDENCY_TERMS):
+        if not is_dependency_name(call["name"]):
             continue
         lo = max(0, index - CONTEXT_INSTRUCTIONS)
         hi = min(len(instructions), index + CONTEXT_INSTRUCTIONS + 1)
@@ -273,7 +286,7 @@ def main() -> int:
         view.close()
 
     report = {
-        "schema": 1,
+        "schema": 2,
         "roots": [{"name": method.name, "rva": method.address} for method in roots],
         "helper_count": len(analyses),
         "helpers": analyses,
