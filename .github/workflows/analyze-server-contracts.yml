@@ -12,6 +12,7 @@ on:
       - 'scripts/analyze-networktask-api-field.py'
       - 'scripts/analyze-task-set-type-callsites.py'
       - 'scripts/analyze-arcade-convert-type.py'
+      - 'scripts/analyze-common-apitype-native.py'
       - 'scripts/discover-networktask-roots.py'
       - 'scripts/discover-common-apitype-consumers.py'
       - 'scripts/materialize-api-map.py'
@@ -34,9 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work reports
-          python scripts/materialize-api-map.py \
-            contracts/api-map-11.6.3.json.gz.b64 \
-            work/api-map-11.6.3.json
+          python scripts/materialize-api-map.py contracts/api-map-11.6.3.json.gz.b64 work/api-map-11.6.3.json
           python scripts/validate-api-map.py work/api-map-11.6.3.json -o reports/api-map-validation.json
 
       - name: Install .NET 6 for Il2CppDumper
@@ -49,9 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work/xapk
-          curl --fail --location --retry 4 --retry-all-errors \
-            --output work/final.xapk \
-            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          curl --fail --location --retry 4 --retry-all-errors --output work/final.xapk 'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
           echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
           unzip -q work/final.xapk -d work/xapk
 
@@ -74,8 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
-            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip 'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
           mkdir -p work/dumper work/dump
           unzip -q work/il2cppdumper.zip -d work/dumper
           python - <<'PY'
@@ -93,12 +89,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/analyze-api-type-enums.py \
-            --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
-            --stringliteral-json work/dump/stringliteral.json --output reports/api-type-enums.json
-          python scripts/discover-networktask-roots.py \
-            --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
-            --output reports/networktask-roots.json
+          python scripts/analyze-api-type-enums.py --dump-cs work/dump/dump.cs --script-json work/dump/script.json --stringliteral-json work/dump/stringliteral.json --output reports/api-type-enums.json
+          python scripts/discover-networktask-roots.py --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/networktask-roots.json
           python - <<'PY'
           import json
           a=json.load(open('reports/api-type-enums.json'))
@@ -112,32 +104,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/discover-common-apitype-consumers.py \
-            --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
-            --output reports/common-apitype-consumers.json
+          python scripts/discover-common-apitype-consumers.py --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/common-apitype-consumers.json
           python - <<'PY'
           import json
           d=json.load(open('reports/common-apitype-consumers.json'))
           assert d['schema']==1
-          print(json.dumps({
-            'consumer_type_count': d['consumer_type_count'],
-            'consumers': [
-              {'type':r['type'],'base':r['base'],'matches':r['matches'],'matched_script_methods':r['matched_script_methods'],'owner_method_sample':r['owner_method_sample'][:12]}
-              for r in d['consumers'][:30]
-            ],
-          },indent=2))
+          print(json.dumps({'consumer_type_count':d['consumer_type_count'],'consumers':d['consumers'][:20]},indent=2))
+          PY
+
+      - name: Inspect native Common.ApiType surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python scripts/analyze-common-apitype-native.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/common-apitype-native.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/common-apitype-native.json'))
+          assert d['schema']==1
+          print(json.dumps({'type_block':d['type_block'],'methods':d['methods'],'direct_callers':d['direct_callers'][:80]},indent=2))
           PY
 
       - name: Build normal NetworkTask inventory
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check capstone pyelftools
-          python scripts/analyze-server-contracts.py \
-            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs \
-            --script-json work/dump/script.json --stringliteral-json work/dump/stringliteral.json \
-            --output reports/server-contract-inventory.json \
-            --markdown-output reports/server-contract-inventory.md
+          python scripts/analyze-server-contracts.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --stringliteral-json work/dump/stringliteral.json --output reports/server-contract-inventory.json --markdown-output reports/server-contract-inventory.md
           python - <<'PY'
           import json
           d=json.load(open('reports/server-contract-inventory.json'))
@@ -149,10 +141,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/analyze-networktask-api-field.py \
-            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
-            --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json \
-            --output reports/networktask-api-field.json
+          python scripts/analyze-networktask-api-field.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json --output reports/networktask-api-field.json
           python - <<'PY'
           import json
           d=json.load(open('reports/networktask-api-field.json'))
@@ -164,28 +153,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/analyze-task-set-type-callsites.py \
-            --lib work/libil2cpp.so --script-json work/dump/script.json \
-            --inventory reports/server-contract-inventory.json \
-            --output reports/task-set-type-callsites.json
+          python scripts/analyze-task-set-type-callsites.py --lib work/libil2cpp.so --script-json work/dump/script.json --inventory reports/server-contract-inventory.json --output reports/task-set-type-callsites.json
           python - <<'PY'
           import json
           d=json.load(open('reports/task-set-type-callsites.json'))
           assert d['schema']==1
-          print(json.dumps({
-            'setter':d['setter'], 'setter_rva':hex(d['setter_rva']),
-            'observation_count':d['observation_count'], 'key_count':d['key_count'],
-            'observations':d['observations'][:80],
-          },indent=2))
+          print(json.dumps({'setter':d['setter'],'setter_rva':hex(d['setter_rva']),'observation_count':d['observation_count'],'key_count':d['key_count'],'observations':d['observations'][:80]},indent=2))
           PY
 
       - name: Close Arcade ConvertType bridge
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/analyze-arcade-convert-type.py \
-            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
-            --output reports/arcade-convert-type.json
+          python scripts/analyze-arcade-convert-type.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/arcade-convert-type.json
           python - <<'PY'
           import json
           d=json.load(open('reports/arcade-convert-type.json'))
@@ -200,13 +180,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/build-endpoint-contracts.py \
-            --api-map work/api-map-11.6.3.json \
-            --field-report reports/networktask-api-field.json \
-            --arcade-report reports/arcade-convert-type.json \
-            --set-type-report reports/task-set-type-callsites.json \
-            --output reports/endpoint-contracts.json \
-            --markdown-output reports/endpoint-contracts.md
+          python scripts/build-endpoint-contracts.py --api-map work/api-map-11.6.3.json --field-report reports/networktask-api-field.json --arcade-report reports/arcade-convert-type.json --set-type-report reports/task-set-type-callsites.json --output reports/endpoint-contracts.json --markdown-output reports/endpoint-contracts.md
           python - <<'PY'
           import json
           d=json.load(open('reports/endpoint-contracts.json'))
@@ -218,10 +192,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/analyze-task-api-keys.py \
-            --lib work/libil2cpp.so --script-json work/dump/script.json \
-            --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json \
-            --output reports/task-api-key-analysis.json
+          python scripts/analyze-task-api-keys.py --lib work/libil2cpp.so --script-json work/dump/script.json --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json --output reports/task-api-key-analysis.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
