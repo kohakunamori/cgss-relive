@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Bounded clean-room analysis of final 11.6.3 Stage.Home entrypoints.
 
-This helper intentionally avoids bulk decompiler output. It counts the exact
-Stage.Home method set but emits names/RVAs and bounded instructions only for a
-small lifecycle/entry-like selector.
+The helper deliberately avoids bulk decompiler output. It:
+- counts the exact Stage.Home method set without emitting all method names;
+- emits only a tiny lifecycle/entry selector;
+- keeps a bounded initial instruction window for each selected entry;
+- scans the selected function body for named direct calls, but emits only the
+  compact call list and small contexts around data/Home-related calls.
 """
 from __future__ import annotations
 
@@ -21,12 +24,11 @@ from elftools.elf.elffile import ELFFile
 
 HOME_PREFIX = "Stage.Home$$"
 MAX_ENTRY_METHODS = 32
-MAX_ENTRY_SIZE = 0x200
+INITIAL_DISASM_SIZE = 0x200
+FULL_SCAN_MAX_SIZE = 0x4000
+MAX_NAMED_CALLS_PER_ENTRY = 160
+CONTEXT_INSTRUCTIONS = 6
 
-# Keep this intentionally narrow. The class has 249 methods; substring selectors
-# for generic words such as Load/Refresh/Create/Setup pulled ordinary business
-# helpers into the report. Exact lifecycle names plus the view-entry family are
-# sufficient to identify immediate Home initialization dependencies.
 ENTRY_PATTERNS = (
     re.compile(r"^(?:Awake|Start|OnEnable|Initialize|Init|Setup|Create|Load|Refresh|Ready)$", re.I),
     re.compile(r"^(?:StartView|StartViewProcess|ViewProcess|HomeView)(?:$|[_<].*)", re.I),
@@ -55,6 +57,7 @@ DEPENDENCY_TERMS = (
     "Stamina",
     "Manager",
     "Data",
+    "ReleaseFlag",
 )
 
 
@@ -133,10 +136,36 @@ def is_entry_like(method: Method) -> bool:
     return any(pattern.search(member) for pattern in ENTRY_PATTERNS)
 
 
-def function_end(address: int, starts: list[int]) -> int:
+def function_end(address: int, starts: list[int], max_size: int) -> int:
     index = bisect.bisect_right(starts, address)
-    next_start = starts[index] if index < len(starts) else address + MAX_ENTRY_SIZE
-    return min(next_start, address + MAX_ENTRY_SIZE)
+    next_start = starts[index] if index < len(starts) else address + max_size
+    return min(next_start, address + max_size)
+
+
+def make_disassembler() -> Cs:
+    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
+    md.detail = True
+    return md
+
+
+def format_instruction(instruction: Any) -> str:
+    return f"0x{instruction.address:X}: {instruction.mnemonic} {instruction.op_str}"
+
+
+def direct_call(instruction: Any, by_addr: dict[int, Method]) -> dict[str, Any] | None:
+    if (
+        instruction.id != ARM64_INS_BL
+        or not instruction.operands
+        or instruction.operands[0].type != ARM64_OP_IMM
+    ):
+        return None
+    target = int(instruction.operands[0].imm)
+    method = by_addr.get(target)
+    return {
+        "site": instruction.address,
+        "target": target,
+        "name": method.name if method else None,
+    }
 
 
 def analyze_entry(
@@ -145,44 +174,53 @@ def analyze_entry(
     starts: list[int],
     by_addr: dict[int, Method],
 ) -> dict[str, Any]:
-    end = function_end(method.address, starts)
-    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
-    md.detail = True
-    instructions = list(md.disasm(view.read(method.address, end - method.address), method.address))
+    full_end = function_end(method.address, starts, FULL_SCAN_MAX_SIZE)
+    full_instructions = list(
+        make_disassembler().disasm(
+            view.read(method.address, full_end - method.address),
+            method.address,
+        )
+    )
 
-    calls: list[dict[str, Any]] = []
-    for instruction in instructions:
-        if (
-            instruction.id == ARM64_INS_BL
-            and instruction.operands
-            and instruction.operands[0].type == ARM64_OP_IMM
-        ):
-            target = int(instruction.operands[0].imm)
-            target_method = by_addr.get(target)
-            calls.append(
+    named_calls: list[dict[str, Any]] = []
+    dependency_contexts: list[dict[str, Any]] = []
+    for index, instruction in enumerate(full_instructions):
+        call = direct_call(instruction, by_addr)
+        if call is None or call["name"] is None:
+            continue
+        named_calls.append(call)
+        if any(term in call["name"] for term in DEPENDENCY_TERMS):
+            lo = max(0, index - CONTEXT_INSTRUCTIONS)
+            hi = min(len(full_instructions), index + CONTEXT_INSTRUCTIONS + 1)
+            dependency_contexts.append(
                 {
-                    "site": instruction.address,
-                    "target": target,
-                    "name": target_method.name if target_method else None,
+                    **call,
+                    "context": [format_instruction(item) for item in full_instructions[lo:hi]],
                 }
             )
 
-    named_dependencies = [
-        call
-        for call in calls
-        if call["name"] and any(term in call["name"] for term in DEPENDENCY_TERMS)
-    ]
+    if len(named_calls) > MAX_NAMED_CALLS_PER_ENTRY:
+        raise RuntimeError(
+            f"{method.name} has {len(named_calls)} named direct calls; "
+            "refine analysis before emitting a large call list"
+        )
+
+    initial_end = min(full_end, method.address + INITIAL_DISASM_SIZE)
+    initial_instructions = list(
+        make_disassembler().disasm(
+            view.read(method.address, initial_end - method.address),
+            method.address,
+        )
+    )
+
     return {
         "name": method.name,
         "rva": method.address,
         "signature": method.signature,
-        "size": end - method.address,
-        "calls": calls,
-        "named_dependencies": named_dependencies,
-        "disassembly": [
-            f"0x{instruction.address:X}: {instruction.mnemonic} {instruction.op_str}"
-            for instruction in instructions
-        ],
+        "scanned_size": full_end - method.address,
+        "named_calls": named_calls,
+        "dependency_contexts": dependency_contexts,
+        "initial_disassembly": [format_instruction(item) for item in initial_instructions],
     }
 
 
@@ -211,16 +249,15 @@ def main() -> int:
     finally:
         view.close()
 
-    selected_index = [
-        {"name": method.name, "rva": method.address, "signature": method.signature}
-        for method in entry_methods
-    ]
     report = {
-        "schema": 3,
+        "schema": 4,
         "class": "Stage.Home",
         "class_method_count": len(home_methods),
         "selected_method_count": len(entry_methods),
-        "selected_method_index": selected_index,
+        "selected_method_index": [
+            {"name": method.name, "rva": method.address, "signature": method.signature}
+            for method in entry_methods
+        ],
         "entry_candidates": entries,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -241,19 +278,28 @@ def main() -> int:
     for method in entry_methods:
         lines.append(f"- `0x{method.address:X}` `{method.name}`")
 
-    lines += ["", "## Bounded entry candidates", ""]
+    lines += ["", "## Entry dependency summary", ""]
     for entry in entries:
-        lines.append(f"### `{entry['name']}` @ `0x{entry['rva']:X}`")
-        if entry["named_dependencies"]:
-            lines.append("Named dependency calls:")
-            for call in entry["named_dependencies"]:
-                lines.append(
-                    f"- `0x{call['site']:X}` -> `0x{call['target']:X}` `{call['name']}`"
-                )
-        else:
-            lines.append("Named dependency calls: none in bounded window.")
-        lines.append("Bounded instructions:")
-        for instruction in entry["disassembly"]:
+        lines.append(
+            f"### `{entry['name']}` @ `0x{entry['rva']:X}` "
+            f"(scanned 0x{entry['scanned_size']:X} bytes)"
+        )
+        lines.append(f"Named direct calls: {len(entry['named_calls'])}")
+        for call in entry["named_calls"]:
+            lines.append(
+                f"- `0x{call['site']:X}` -> `0x{call['target']:X}` `{call['name']}`"
+            )
+        lines.append("Dependency call contexts:")
+        if not entry["dependency_contexts"]:
+            lines.append("- none")
+        for context in entry["dependency_contexts"]:
+            lines.append(
+                f"- `0x{context['site']:X}` -> `{context['name']}`"
+            )
+            for instruction in context["context"]:
+                lines.append(f"  - `{instruction}`")
+        lines.append("Initial bounded instructions:")
+        for instruction in entry["initial_disassembly"]:
             lines.append(f"- `{instruction}`")
         lines.append("")
 
