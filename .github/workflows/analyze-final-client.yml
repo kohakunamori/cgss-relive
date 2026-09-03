@@ -10,6 +10,7 @@ on:
       - 'scripts/analyze-home-entrypoints.py'
       - 'scripts/analyze-home-immediate-helpers.py'
       - 'scripts/analyze-home-state-dependencies.py'
+      - 'scripts/analyze-tutorial-flag.py'
 
 permissions:
   contents: read
@@ -94,7 +95,7 @@ jobs:
           test -s work/dump/dump.cs
           test -s work/dump/script.json
 
-      - name: Targeted callgraph, continuation and Home analysis
+      - name: Targeted callgraph, continuation, Home and tutorial analysis
         shell: bash
         run: |
           set -euo pipefail
@@ -119,6 +120,10 @@ jobs:
             --lib work/libil2cpp.so \
             --script-json work/dump/script.json \
             --output reports/home-state-dependencies.json
+          python scripts/analyze-tutorial-flag.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --output reports/tutorial-flag.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
