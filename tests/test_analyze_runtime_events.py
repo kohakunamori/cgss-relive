@@ -88,7 +88,31 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
         negotiation = report["resource_negotiation"]
         self.assertTrue(negotiation["server_returned_214"])
         self.assertFalse(negotiation["observed_later_control_request_after_214"])
+        self.assertFalse(negotiation["observed_resource_request_after_214"])
         self.assertFalse(negotiation["observed_later_10133800_load_check_after_214"])
+
+    def test_resource_plane_after_214_advances_without_second_load_check(self) -> None:
+        events = [
+            self.event(
+                "/load/check",
+                res_ver="10133000",
+                result=214,
+                required_res_ver="10133800",
+            ),
+            self.event("@resource/manifest", result=None),
+            self.event("@resource/AssetBundles", status=206, result=None),
+        ]
+        report = module.analyze_events(events)
+        self.assertEqual(report["phase"], "resource_plane_served")
+        negotiation = report["resource_negotiation"]
+        self.assertTrue(negotiation["observed_resource_request_after_214"])
+        self.assertTrue(negotiation["observed_successful_resource_response_after_214"])
+        self.assertFalse(negotiation["observed_later_10133800_load_check_after_214"])
+        self.assertTrue(report["reached"]["resource_manifest"])
+        self.assertEqual(
+            report["resource_plane"]["routes"],
+            ["@resource/AssetBundles", "@resource/manifest"],
+        )
 
     def test_direct_success_is_reported_separately_from_final_version_success(self) -> None:
         events = [
@@ -146,6 +170,10 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
             )
             with self.assertRaises(module.UnsafeEventLog):
                 module.load_events(path)
+
+    def test_unknown_resource_category_is_rejected(self) -> None:
+        with self.assertRaises(module.UnsafeEventLog):
+            module.validate_event({"route": "@resource/private-hash", "status": 200}, line_number=1)
 
     def test_request_key_names_are_allowed_but_values_are_not_part_of_schema(self) -> None:
         value = {
