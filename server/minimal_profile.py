@@ -7,6 +7,12 @@ The profiles are intentionally layered:
 * starter visible: one synthetic owned card/unit/character record using a card
   proven to exist in the independently verified final 10133800 master database.
 
+Final-client static analysis distinguishes the guarded ``user_card_list`` Cenere
+merge block from the separate seven-hard-field container whose literal key is
+``cs_gacha_data_cenere`` and which actually calls ``WorkCardData.AddCardData``.
+The starter card therefore lives in that latter container; ``user_card_list``
+remains empty to avoid a speculative duplicate insertion.
+
 No profile contains captured account data. Runtime acceptance by the original
 client remains a separate integration criterion.
 """
@@ -60,6 +66,9 @@ HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "master_plus_live_list",
 )
 
+# Exact literal at the 0x4858D70 guarded card parser that invokes
+# WorkCardData.AddCardData before reading the seven hard fields below.
+STARTER_WORK_CARD_SECTION = "cs_gacha_data_cenere"
 STARTER_CARD_REQUIRED_FIELDS = (
     "serial_id",
     "card_id",
@@ -165,7 +174,9 @@ def build_starter_visible_load_index_data(
         producer_name=producer_name,
         now=now,
     )
-    data["user_card_list"] = [
+    # user_card_list is intentionally left as the Home candidate's empty list.
+    # The final AddCardData path is guarded by the literal key below.
+    data[STARTER_WORK_CARD_SECTION] = [
         {
             "serial_id": STARTER_SERIAL_ID,
             "card_id": STARTER_CARD_ID,
@@ -242,16 +253,23 @@ def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
     """Validate the statically-derived one-card starter-visible contract."""
     errors = validate_home_candidate_profile(data)
 
-    cards = data.get("user_card_list")
+    # Keep the ambiguous/Cenere user_card_list path empty: the proven
+    # WorkCardData.AddCardData path is STARTER_WORK_CARD_SECTION.
+    user_cards = data.get("user_card_list")
+    if user_cards != []:
+        errors.append("user_card_list")
+
+    cards = data.get(STARTER_WORK_CARD_SECTION)
+    card_prefix = f"{STARTER_WORK_CARD_SECTION}[0]"
     if not isinstance(cards, list) or len(cards) != 1:
-        errors.append("user_card_list[1]")
+        errors.append(f"{STARTER_WORK_CARD_SECTION}[1]")
     else:
-        errors.extend(_missing_item_fields(cards[0], STARTER_CARD_REQUIRED_FIELDS, "user_card_list[0]"))
+        errors.extend(_missing_item_fields(cards[0], STARTER_CARD_REQUIRED_FIELDS, card_prefix))
         if isinstance(cards[0], dict):
             if cards[0].get("serial_id") != STARTER_SERIAL_ID:
-                errors.append("user_card_list[0].serial_id")
+                errors.append(f"{card_prefix}.serial_id")
             if cards[0].get("card_id") != STARTER_CARD_ID:
-                errors.append("user_card_list[0].card_id")
+                errors.append(f"{card_prefix}.card_id")
 
     units = data.get("user_unit_list")
     if not isinstance(units, list) or len(units) != 1:
