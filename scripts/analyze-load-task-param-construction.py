@@ -335,30 +335,19 @@ def main() -> int:
     lines = args.dump_cs.read_text(encoding="utf-8", errors="replace").splitlines()
     starts, method_names = load_script(args.script_json)
 
-    load_param = summarize_type(
-        lines,
-        "LoadTaskParam",
-        method_names=method_names,
-        constructor_name="Stage.LoadTaskParam$$.ctor",
-    )
+    # BaseParam is not globally unique in the metadata. Pin the Stage variant by
+    # its exact constructor name observed at the SetParameter call site. The
+    # other involved type names are unique in the exact specimen and are left
+    # unqualified deliberately so a future ambiguity fails closed.
+    load_param = summarize_type(lines, "LoadTaskParam")
     base_param = summarize_type(
         lines,
         "BaseParam",
         method_names=method_names,
         constructor_name="Stage.BaseParam$$.ctor",
     )
-    post_params = summarize_type(
-        lines,
-        "PostParams",
-        method_names=method_names,
-        constructor_name="PostParams$$.ctor",
-    )
-    network_task = summarize_type(
-        lines,
-        "NetworkTask",
-        method_names=method_names,
-        constructor_name="NetworkTask$$.ctor",
-    )
+    post_params = summarize_type(lines, "PostParams")
+    network_task = summarize_type(lines, "NetworkTask")
 
     end = next_function_start(starts, SET_PARAMETER_START)
     ctor_rvas = {int(item["rva"]) for item in load_param["constructors"]}
