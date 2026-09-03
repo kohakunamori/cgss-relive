@@ -195,12 +195,18 @@ jobs:
           [[ "$BASE_BADGING" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]]
           [[ "$BASE_BADGING" == *"versionCode='438'"* ]]
           [[ "$BASE_BADGING" == *"versionName='11.6.3'"* ]]
+          [[ "$BASE_BADGING" != *" split='"* ]]
 
           while IFS= read -r -d '' signed; do
             badging="$(aapt dump badging "$signed" | head -1)"
             [[ "$badging" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]]
             [[ "$badging" == *"versionCode='438'"* ]]
-            [[ "$badging" == *"versionName='11.6.3'"* ]]
+            if [[ "$signed" == 'work/install-set/base.apk' ]]; then
+              [[ "$badging" == *"versionName='11.6.3'"* ]]
+              [[ "$badging" != *" split='"* ]]
+            else
+              [[ "$badging" == *" split='"* ]]
+            fi
           done < <(find work/install-set -maxdepth 1 -type f -name '*.apk' -print0)
 
           signed_for_source() {
