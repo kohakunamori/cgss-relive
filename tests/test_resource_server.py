@@ -31,6 +31,144 @@ class ResourcePathTests(unittest.TestCase):
         self.assertIsNone(resolve_resource_request(root, f"/dl/resources/AssetBundles/ff/{digest}"))
         self.assertIsNone(resolve_resource_request(root, f"/dl/resources/Unknown/01/{digest}"))
 
+    def test_resolve_final_is_s3_false_storages_url_families(self) -> None:
+        root = Path("cache")
+        digest = "0123456789abcdef0123456789abcdef"
+        index = {
+            "ab_file": digest,
+            "sound_file": digest,
+            "movie_file": digest,
+            "master.mdb": digest,
+            "bundle_manifest": digest,
+        }
+        expected = (root / "objects" / "01" / digest, digest)
+
+        # Regular/versioned AssetBundle base:
+        # dl/<ver>/[Low|High/]AssetBundles/<Platform>/<filename>
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/High/AssetBundles/Android/ab_file",
+                manifest_index=index,
+            ),
+            expected,
+        )
+
+        # Hush/compressed storages AssetBundle base:
+        # dl/resources/[Low|High/]AssetBundles/<Platform>/<filename>.lz4
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/resources/High/AssetBundles/Android/ab_file.lz4",
+                manifest_index=index,
+            ),
+            expected,
+        )
+
+        # Per-bundle manifest is appended below the selected AssetBundle base.
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/High/AssetBundles/Android/manifest/bundle_manifest",
+                manifest_index=index,
+            ),
+            expected,
+        )
+
+        # Versioned Sound supports Platform/Common tails.
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/High/Sound/Android/sound_file",
+                manifest_index=index,
+            ),
+            expected,
+        )
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/Sound/Common/sound_file",
+                manifest_index=index,
+            ),
+            expected,
+        )
+
+        # Final-client Movie base is the unversioned /dl/resources family.
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/resources/High/Movie/movie_file",
+                manifest_index=index,
+            ),
+            expected,
+        )
+
+        # Generic Master/Blob directories remain filename-addressed tails.
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/Generic/Master/master.mdb",
+                manifest_index=index,
+            ),
+            expected,
+        )
+        self.assertEqual(
+            resolve_resource_request(
+                root,
+                "/dl/resources/Generic/Blob/master.mdb.lz4",
+                manifest_index=index,
+            ),
+            expected,
+        )
+
+    def test_rejects_nonfinal_or_wrong_family_resource_urls(self) -> None:
+        root = Path("cache")
+        digest = "0123456789abcdef0123456789abcdef"
+        index = {"file": digest}
+
+        self.assertIsNone(
+            resolve_resource_request(
+                root,
+                "/dl/10133799/High/AssetBundles/Android/file",
+                manifest_index=index,
+            )
+        )
+        self.assertIsNone(
+            resolve_resource_request(
+                root,
+                "/dl/High/AssetBundles/Android/file",
+                manifest_index=index,
+            )
+        )
+        self.assertIsNone(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/High/Movie/file",
+                manifest_index=index,
+            )
+        )
+        self.assertIsNone(
+            resolve_resource_request(
+                root,
+                "/dl/10133800/High/AssetBundles/Android/file",
+                manifest_index=None,
+            )
+        )
+
+    def test_bootstrap_manifest_route_is_versioned_wire_file(self) -> None:
+        root = Path("cache")
+        self.assertEqual(
+            resolve_resource_request(root, "/dl/10133800/manifests/all_dbmanifest"),
+            (root / "manifests" / "all_dbmanifest", None),
+        )
+        self.assertEqual(
+            resolve_resource_request(root, "/dl/10133800/manifests/Android_AHigh_SHigh"),
+            (root / "manifests" / "Android_AHigh_SHigh", None),
+        )
+        self.assertIsNone(
+            resolve_resource_request(root, "/dl/10133799/manifests/all_dbmanifest")
+        )
+
     def test_resource_event_route_never_contains_filename_or_hash(self) -> None:
         digest = "0123456789abcdef0123456789abcdef"
         self.assertEqual(
@@ -40,6 +178,10 @@ class ResourcePathTests(unittest.TestCase):
         self.assertEqual(
             resource_event_route("/dl/10133800/manifests/Android_AHigh_SHigh"),
             "@resource/manifest",
+        )
+        self.assertEqual(
+            resource_event_route("/dl/10133800/High/AssetBundles/Android/private_filename"),
+            "@resource/AssetBundles",
         )
         self.assertEqual(resource_event_route("/something/private"), "@resource/unresolved")
 
@@ -111,6 +253,44 @@ class ResourceHTTPServerTests(unittest.TestCase):
         serialized = json.dumps(event)
         self.assertNotIn(self.digest, serialized)
         self.assertNotIn(self.digest[:2], event["route"])
+
+    def test_final_client_filename_addressed_url_serves_archive_object(self) -> None:
+        event_path = self.root / "filename-events.jsonl"
+        server = create_server(
+            "127.0.0.1",
+            0,
+            root=self.root,
+            manifest_index={"bundle_file": self.digest},
+            event_log=SafeEventLog(event_path),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        try:
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request(
+                "GET",
+                "/dl/10133800/High/AssetBundles/Android/bundle_file",
+            )
+            response = conn.getresponse()
+            body = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(body, self.payload)
+            conn.close()
+
+            events = [
+                json.loads(line)
+                for line in event_path.read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["route"], "@resource/AssetBundles")
+            serialized = json.dumps(events[-1])
+            self.assertNotIn("bundle_file", serialized)
+            self.assertNotIn(self.digest, serialized)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_head_returns_headers_without_body(self) -> None:
         status, headers, body = self._request("HEAD", self.route)
