@@ -9,6 +9,7 @@ on:
       - 'scripts/analyze-common-apilist-xrefs.py'
       - 'scripts/analyze-common-apitype-native.py'
       - 'scripts/analyze-arcade-convert-map.py'
+      - 'scripts/resolve-arcade-convert-prefix.py'
 
 permissions:
   contents: read
@@ -56,6 +57,7 @@ jobs:
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
           test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
           python -m pip install --disable-pip-version-check capstone pyelftools
 
       - name: Trace Common.ApiType static surface and ApiList consumers
@@ -85,23 +87,27 @@ jobs:
           },indent=2))
           PY
 
-      - name: Inspect Arcade conversion owner for static map initialization
+      - name: Inspect Arcade conversion algorithm and prefix
         shell: bash
         run: |
           set -euo pipefail
           python scripts/analyze-arcade-convert-map.py \
             --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
             --output reports/arcade-convert-map.json
+          python scripts/resolve-arcade-convert-prefix.py \
+            --lib work/libil2cpp.so --stringliteral-json work/dump/stringliteral.json \
+            --output reports/arcade-convert-prefix.json
           python - <<'PY'
           import json
           d=json.load(open('reports/arcade-convert-map.json'))
-          assert d['schema']==1
+          p=json.load(open('reports/arcade-convert-prefix.json'))
+          assert d['schema']==1 and p['schema']==1
           print(json.dumps({
-            'type_block': d['type_block'],
-            'methods': [
+            'convert_methods': [
               {'name':m['name'],'rva':hex(m['rva']),'signature':m['signature'],'api_range_immediates':m['api_range_immediates'],'calls':m['calls']}
               for m in d['methods']
             ],
+            'prefix_resolution': p,
           },indent=2))
           PY
 
@@ -111,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf work
-          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
             echo 'raw specimen escaped report boundary' >&2; exit 1
           fi
 
