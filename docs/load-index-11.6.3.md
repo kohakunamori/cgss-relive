@@ -217,18 +217,20 @@ that invariant. `server/minimal_profile.py` now keeps `user_card_list=[]` and
 puts the one starter card only in `cs_gacha_data_cenere`; the validator rejects a
 second copy in `user_card_list`.
 
-## `user_unit_list`: conservative final contract
+## `user_unit_list`: exact starter contract
 
-Top-level `user_unit_list` is guarded and may be omitted or empty.
+Top-level `user_unit_list` is guarded and may be omitted or empty. The
+starter-visible profile intentionally supplies one non-empty unit because Home
+immediately resolves its card serial.
 
-For a non-empty unit element, the first confirmed pass directly reads:
+The primary non-empty-unit pass hard-reads:
 
 ```text
 unit_slot   # 1-based; client stores value-1
 name
 ```
 
-It then scans exactly five formatted keys:
+and iterates the five formatted serial keys:
 
 ```text
 serial_id_0
@@ -238,17 +240,58 @@ serial_id_3
 serial_id_4
 ```
 
-Missing/zero serial values are safe in this pass.
-
-A later independent pass directly reads:
+The exact secondary unit region around `0x0485de00..0x0485e10c` has now been
+re-analyzed directly from the hash-verified final binary. Once the guarded
+`user_unit_list` path is entered it hard-reads `data`, `user_info`, the unit list,
+and for a non-empty unit again requires the unit structure used by the starter.
+Direct element reads include:
 
 ```text
+unit_slot
 unit_id
 name
 ```
 
-The starter-visible unit therefore conservatively supplies both IDs and all five
-serial keys:
+The same bounded region also resolves `serial_id_{0}`, formats serial keys,
+performs `JsonData.get_Item`, converts the value, and calls
+`WorkUnitData.UnitData.SetUnitSerial`. Therefore the older note that the secondary
+entry had no fixed serial-loop evidence is superseded. Keeping all five serial
+keys explicit remains the conservative final contract.
+
+### Cosmetic/dress fields are optional
+
+The primary and secondary unit paths invoke:
+
+```text
+Stage.LoadTask.ParseUnitCostume        @ 0x04878524
+Stage.LoadTask.ParseUnitDressCustomize @ 0x04878820
+```
+
+Exact bounded analysis of those two helpers shows that the formatted cosmetic
+keys are **guarded**, not hard requirements:
+
+```text
+dress_type_{0}
+dress_2d_type_{0}
+dress_storage_id_{0}
+```
+
+For each family the helper formats the key, calls `JsonData.get_Keys`, performs a
+key-membership virtual call, and branches over the `get_Item` when the membership
+check is false. Only an existing key is read/converted. Consequently the starter
+must **not** invent costume, 2D costume or closet/storage ids merely to satisfy
+these helpers.
+
+### `pose_list` correction
+
+`pose_list` does exist in the final managed string-literal table, but an
+exact-specimen xref pass over the entire actual `LoadTask.Parse` body
+`0x04852398..0x0486fab4` finds **zero references** to that literal. It is therefore
+not a requirement of this `/load/index` parser body and must not be attached to
+the secondary starter-unit contract. The older bounded report that associated it
+with this block is superseded by the exact full-body xref result.
+
+The resulting starter unit remains deliberately small:
 
 ```json
 {
@@ -263,8 +306,8 @@ serial keys:
 }
 ```
 
-The serial `1` reference is now backed by the WorkCardData record described
-above.
+No pose/costume/dress fields are added. Serial `1` is backed by the WorkCardData
+record described above.
 
 ## `user_chara_list`: exact parser block and starter decision
 
@@ -376,6 +419,8 @@ python -m server.http_server --experimental-home-load-index
 - keeps `user_card_list=[]`;
 - one unit with `unit_slot=1`, `unit_id=1`, name and five serial slots, with
   `serial_id_0=1`;
+- deliberately omits pose/costume/dress keys because the final parser evidence
+  does not require them;
 - keeps the exact-parser-safe `user_chara_list=[]` because Home startup has no
   proven WorkCharaData consumer;
 - guarded `leader_serial_id=1`.
@@ -457,8 +502,12 @@ Statically proven/strongly closed for final 11.6.3:
   `user_card_list` merge block;
 - Home's card predownload path immediately resolves unit serial through
   `WorkCardData.GetCardDataWithSerial`;
-- non-empty unit `unit_slot + name`, fixed five serial slots, and later
-  `unit_id + name` pass;
+- non-empty starter unit hard fields are covered by `unit_slot`, `unit_id`,
+  `name`, and the explicit five serial keys;
+- unit costume/2D costume/storage-id families are key-membership guarded and can
+  be omitted;
+- `pose_list` has zero xrefs in the actual final `LoadTask.Parse` body and is not
+  part of the starter unit contract;
 - `user_chara_list` is real, empty-array safe, and non-empty rows require exactly
   `chara_id + fan`; current Home startup does not justify creating one;
 - guard-heavy optional feature sections;
