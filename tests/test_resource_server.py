@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import json
 import tempfile
 import threading
 import unittest
@@ -13,7 +14,9 @@ from server.resource_server import (
     object_path,
     parse_single_range,
     resolve_resource_request,
+    resource_event_route,
 )
+from server.safe_events import SafeEventLog
 
 
 class ResourcePathTests(unittest.TestCase):
@@ -27,6 +30,18 @@ class ResourcePathTests(unittest.TestCase):
         self.assertEqual(resolved, (root / "objects" / "01" / digest, digest))
         self.assertIsNone(resolve_resource_request(root, f"/dl/resources/AssetBundles/ff/{digest}"))
         self.assertIsNone(resolve_resource_request(root, f"/dl/resources/Unknown/01/{digest}"))
+
+    def test_resource_event_route_never_contains_filename_or_hash(self) -> None:
+        digest = "0123456789abcdef0123456789abcdef"
+        self.assertEqual(
+            resource_event_route(f"/dl/resources/AssetBundles/01/{digest}?secret=query"),
+            "@resource/AssetBundles",
+        )
+        self.assertEqual(
+            resource_event_route("/dl/10133800/manifests/Android_AHigh_SHigh"),
+            "@resource/manifest",
+        )
+        self.assertEqual(resource_event_route("/something/private"), "@resource/unresolved")
 
     def test_single_range_parser(self) -> None:
         self.assertIsNone(parse_single_range(None, 10))
@@ -50,8 +65,14 @@ class ResourceHTTPServerTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.payload)
         self.route = f"/dl/resources/Generic/{self.digest[:2]}/{self.digest}"
+        self.event_path = self.root / "events.jsonl"
 
-        self.server = create_server("127.0.0.1", 0, root=self.root)
+        self.server = create_server(
+            "127.0.0.1",
+            0,
+            root=self.root,
+            event_log=SafeEventLog(self.event_path),
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.host, self.port = self.server.server_address[:2]
@@ -71,6 +92,11 @@ class ResourceHTTPServerTests(unittest.TestCase):
         conn.close()
         return result
 
+    def _events(self) -> list[dict]:
+        if not self.event_path.exists():
+            return []
+        return [json.loads(line) for line in self.event_path.read_text().splitlines() if line.strip()]
+
     def test_get_full_object(self) -> None:
         status, headers, body = self._request("GET", self.route)
         self.assertEqual(status, 200)
@@ -78,6 +104,13 @@ class ResourceHTTPServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Length"], str(len(self.payload)))
         self.assertEqual(headers["Accept-Ranges"], "bytes")
         self.assertEqual(headers["ETag"], f'"{self.digest}"')
+
+        event = self._events()[-1]
+        self.assertEqual(event["route"], "@resource/Generic")
+        self.assertEqual(event["status"], 200)
+        serialized = json.dumps(event)
+        self.assertNotIn(self.digest, serialized)
+        self.assertNotIn(self.digest[:2], event["route"])
 
     def test_head_returns_headers_without_body(self) -> None:
         status, headers, body = self._request("HEAD", self.route)
@@ -101,12 +134,14 @@ class ResourceHTTPServerTests(unittest.TestCase):
         self.assertEqual(status, 416)
         self.assertEqual(body, b"")
         self.assertEqual(headers["Content-Range"], "bytes */10")
+        self.assertEqual(self._events()[-1]["status"], 416)
 
     def test_missing_and_noncanonical_paths_are_not_served(self) -> None:
         status, _, _ = self._request("GET", self.route.replace(f"/{self.digest[:2]}/", "/ff/"))
         self.assertEqual(status, 404)
         status, _, _ = self._request("GET", "/dl/resources/Generic/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         self.assertEqual(status, 404)
+        self.assertEqual(self._events()[-1]["route"], "@resource/Generic")
 
     def test_healthz(self) -> None:
         status, _, body = self._request("GET", "/healthz")
