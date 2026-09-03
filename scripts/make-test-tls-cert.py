@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Generate a local test CA and API certificate for cgss-relive integration.
+"""Generate a local test CA and server certificate for cgss-relive integration.
 
 All private material is written under ``work/`` by default and is ignored by
-Git.  This is for a dedicated rooted test device only; it is not a production
-PKI helper.
+Git. This is for a dedicated rooted test device only; it is not a production PKI
+helper. One leaf may contain multiple DNS/IP SANs so a single TLS mux can serve
+the original API and resource hostnames on device port 443.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import ipaddress
+from collections.abc import Iterable
 from pathlib import Path
 
 from cryptography import x509
@@ -30,8 +32,26 @@ def _write_private_key(path: Path, key: rsa.RSAPrivateKey) -> None:
     )
 
 
-def generate(output: Path, hostname: str = DEFAULT_HOSTNAME, *, days: int = 30) -> dict[str, Path]:
+def _unique_hostnames(primary: str, additional: Iterable[str] | None) -> list[str]:
+    names: list[str] = []
+    for value in [primary, *(additional or ())]:
+        value = str(value).strip()
+        if not value:
+            raise ValueError("certificate hostname must not be empty")
+        if value not in names:
+            names.append(value)
+    return names
+
+
+def generate(
+    output: Path,
+    hostname: str = DEFAULT_HOSTNAME,
+    *,
+    additional_hostnames: Iterable[str] | None = None,
+    days: int = 30,
+) -> dict[str, Path]:
     output.mkdir(parents=True, exist_ok=True)
+    hostnames = _unique_hostnames(hostname, additional_hostnames)
     now = dt.datetime.now(dt.timezone.utc)
 
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -64,12 +84,14 @@ def generate(output: Path, hostname: str = DEFAULT_HOSTNAME, *, days: int = 30) 
     )
 
     leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
-    san_entries: list[x509.GeneralName] = [x509.DNSName(hostname)]
-    try:
-        san_entries.append(x509.IPAddress(ipaddress.ip_address(hostname)))
-    except ValueError:
-        pass
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostnames[0])])
+    san_entries: list[x509.GeneralName] = []
+    for value in hostnames:
+        try:
+            san_entries.append(x509.IPAddress(ipaddress.ip_address(value)))
+        except ValueError:
+            san_entries.append(x509.DNSName(value))
+
     leaf_cert = (
         x509.CertificateBuilder()
         .subject_name(leaf_name)
@@ -116,13 +138,29 @@ def generate(output: Path, hostname: str = DEFAULT_HOSTNAME, *, days: int = 30) 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate cgss-relive rooted-device TLS test material")
-    parser.add_argument("--hostname", default=DEFAULT_HOSTNAME)
+    parser.add_argument(
+        "--hostname",
+        action="append",
+        dest="hostnames",
+        help=(
+            "DNS/IP SAN; repeat for a multi-SAN certificate. "
+            f"Default: {DEFAULT_HOSTNAME}"
+        ),
+    )
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("-o", "--output", type=Path, default=Path("work/tls"))
     args = parser.parse_args()
 
-    paths = generate(args.output, args.hostname, days=args.days)
-    print(f"generated local test CA + server certificate for {args.hostname}")
+    hostnames = args.hostnames or [DEFAULT_HOSTNAME]
+    paths = generate(
+        args.output,
+        hostnames[0],
+        additional_hostnames=hostnames[1:],
+        days=args.days,
+    )
+    print("generated local test CA + server certificate for:")
+    for hostname in hostnames:
+        print(f"  SAN: {hostname}")
     for name, path in paths.items():
         print(f"{name}: {path}")
     print("keep ca.key.pem and server.key.pem local; work/ and *.pem are gitignored")
