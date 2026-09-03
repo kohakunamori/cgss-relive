@@ -11,6 +11,7 @@ on:
       - 'scripts/analyze-home-immediate-helpers.py'
       - 'scripts/analyze-home-state-dependencies.py'
       - 'scripts/analyze-tutorial-flag.py'
+      - 'scripts/find-exact-stringliteral.py'
 
 permissions:
   contents: read
@@ -94,8 +95,9 @@ jobs:
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
           test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
 
-      - name: Targeted callgraph, continuation, Home and tutorial analysis
+      - name: Targeted callgraph, continuation, Home, tutorial and literal analysis
         shell: bash
         run: |
           set -euo pipefail
@@ -124,6 +126,10 @@ jobs:
             --lib work/libil2cpp.so \
             --script-json work/dump/script.json \
             --output reports/tutorial-flag.json
+          python scripts/find-exact-stringliteral.py \
+            --input work/dump/stringliteral.json \
+            --target user_chara_list \
+            --output reports/user-chara-literal.json
 
       - name: Enforce clean-room artifact boundary
         if: always()
@@ -133,7 +139,7 @@ jobs:
           rm -rf work
           test ! -e work/final.xapk
           find reports -maxdepth 1 -type f -print
-          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'global-metadata.dat' -o -name 'dump.cs' -o -name 'script.json' \) | grep -q .; then
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'global-metadata.dat' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' \) | grep -q .; then
             echo 'proprietary/bulk analysis output escaped report boundary' >&2
             exit 1
           fi
