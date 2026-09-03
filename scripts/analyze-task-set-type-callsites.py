@@ -162,14 +162,7 @@ def new_token(counter: list[int]) -> int:
     return counter[0]
 
 
-def analyze_caller(
-    view: BinaryView,
-    starts: list[int],
-    method: Method,
-    setter_rva: int,
-    ctor_owner_by_rva: dict[int, str],
-    task_types: set[str],
-) -> list[dict[str, Any]]:
+def analyze_caller(view: BinaryView, starts: list[int], method: Method, setter_rva: int, ctor_owner_by_rva: dict[int, str], task_types: set[str]) -> list[dict[str, Any]]:
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
     md.detail = True
     end = function_end(starts, method.address)
@@ -231,7 +224,10 @@ def analyze_caller(
             dst = reg_name(md, ops[0])
             if ops[1].type == ARM64_OP_REG and ops[2].type == ARM64_OP_IMM:
                 src = reg_name(md, ops[1]); imm = int(ops[2].imm)
-                constants[dst] = constants[src] + imm if src in constants else constants.pop(dst, None)
+                if src in constants:
+                    constants[dst] = constants[src] + imm
+                else:
+                    constants.pop(dst, None)
                 token_for_reg[dst] = token_for_reg.get(src, new_token(counter)) if imm == 0 else new_token(counter)
             else:
                 invalidate(dst)
@@ -246,13 +242,7 @@ def analyze_caller(
                 token = token_for_reg.get("x0"); key = constants.get("x1")
                 types = sorted(type_for_token.get(token, set())) if token is not None else []
                 if key is not None and 0 <= key <= MAX_KEY and types:
-                    observations.append({
-                        "caller": method.name,
-                        "caller_rva": method.address,
-                        "set_type_call_rva": int(ins.address),
-                        "key": int(key),
-                        "task_types": types,
-                    })
+                    observations.append({"caller":method.name,"caller_rva":method.address,"set_type_call_rva":int(ins.address),"key":int(key),"task_types":types})
             clobber_callers()
             continue
         if ins.id == ARM64_INS_BLR:
@@ -281,10 +271,7 @@ def main() -> int:
     if len(setter_matches) != 1:
         raise RuntimeError(f"expected one {SETTER_NAME}, got {len(setter_matches)}")
     setter_rva = setter_matches[0].address
-    ctor_owner_by_rva = {
-        m.address: m.owner for m in methods
-        if m.owner in task_types and m.member in {".ctor", "ctor"}
-    }
+    ctor_owner_by_rva = {m.address: m.owner for m in methods if m.owner in task_types and m.member in {".ctor", "ctor"}}
 
     view = BinaryView(args.lib)
     raw_observations: list[dict[str, Any]] = []
@@ -307,14 +294,7 @@ def main() -> int:
     for row in raw_observations:
         for task in row["task_types"]:
             marker = (task, row["key"], row["caller"], row["set_type_call_rva"])
-            dedup[marker] = {
-                "task": task,
-                "key": row["key"],
-                "caller": row["caller"],
-                "caller_rva": row["caller_rva"],
-                "set_type_call_rva": row["set_type_call_rva"],
-                "evidence": "branch-local-object-provenance-to-NetworkTask.set_type",
-            }
+            dedup[marker] = {"task":task,"key":row["key"],"caller":row["caller"],"caller_rva":row["caller_rva"],"set_type_call_rva":row["set_type_call_rva"],"evidence":"branch-local-object-provenance-to-NetworkTask.set_type"}
     rows = sorted(dedup.values(), key=lambda row: (row["key"], row["task"], row["caller_rva"], row["set_type_call_rva"]))
     if len(rows) > MAX_OBSERVATIONS:
         raise RuntimeError("unexpectedly many set_type observations")
