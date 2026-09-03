@@ -17,7 +17,7 @@ from typing import Any
 SCHEMA = 1
 A_KEYS = frozenset(range(516))
 B_KEYS = frozenset({0, 1, 2, *range(8, 27)})
-MAX_ENUMS = 4096
+MAX_ENUMS = 20000
 MAX_RELATED_METHODS = 256
 MAX_PATH_LITERALS = 4096
 
@@ -26,7 +26,16 @@ _ENUM_RE = re.compile(
     r"^\s*(?:public|private|internal|protected)?\s*"
     r"(?:(?:sealed|abstract|static|partial|readonly)\s+)*enum\s+([^\s:{]+)"
 )
-_ENUM_VALUE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?(?:0x[0-9A-Fa-f]+|\d+))\s*,?\s*$")
+# Il2CppDumper emits enum values as fields such as:
+#   public const ApiType VersionCheck = 0;
+# Keep a fallback for ordinary decompiler-style `Name = value,` formatting too.
+_ENUM_CONST_RE = re.compile(
+    r"^\s*(?:public|private|internal|protected)\s+const\s+[^\s]+\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?(?:0x[0-9A-Fa-f]+|\d+))\s*;\s*$"
+)
+_ENUM_SIMPLE_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?(?:0x[0-9A-Fa-f]+|\d+))\s*,?\s*$"
+)
 _API_PATH_RE = re.compile(r"^[a-z0-9_]+(?:/[a-z0-9_]+)+$")
 
 
@@ -57,14 +66,13 @@ def parse_enums(path: Path) -> list[dict[str, Any]]:
         full_name = f"{namespace}.{name}" if namespace else name
         entries: list[list[Any]] = []
         cursor = index + 1
-        # Il2CppDumper enum declarations have a short braced block.  Stop on the
-        # next closing brace after collecting values; fail bounded rather than
-        # walking arbitrary decompiler output.
-        for _ in range(4096):
+        # Il2CppDumper type blocks can contain comments/field metadata before the
+        # constants. Bound the scan but stop at the type's closing brace.
+        for _ in range(8192):
             if cursor >= len(lines):
                 break
             line = lines[cursor]
-            value_match = _ENUM_VALUE_RE.match(line)
+            value_match = _ENUM_CONST_RE.match(line) or _ENUM_SIMPLE_RE.match(line)
             if value_match:
                 entries.append([value_match.group(1), int(value_match.group(2), 0)])
             if line.strip() == "}" and cursor > index + 1:
@@ -80,7 +88,7 @@ def parse_enums(path: Path) -> list[dict[str, Any]]:
             }
         )
         if len(enums) > MAX_ENUMS:
-            raise RuntimeError("unexpected enum count")
+            raise RuntimeError(f"unexpected enum count > {MAX_ENUMS}")
         index = max(cursor + 1, index + 1)
     return enums
 
@@ -181,12 +189,18 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    # The final specimen is expected to identify these surfaces uniquely.  Fail
+    # The final specimen is expected to identify these surfaces uniquely. Fail
     # closed if it does not so later agents do not silently bind the wrong enum.
     if len(a_candidates) != 1:
-        raise RuntimeError(f"expected exactly one 516-key ApiType enum candidate, got {len(a_candidates)}")
+        raise RuntimeError(
+            f"expected exactly one 516-key ApiType enum candidate, got {len(a_candidates)} "
+            f"from {len(enums)} enums"
+        )
     if len(b_candidates) != 1:
-        raise RuntimeError(f"expected exactly one 22-key VR ApiType enum candidate, got {len(b_candidates)}")
+        raise RuntimeError(
+            f"expected exactly one 22-key VR ApiType enum candidate, got {len(b_candidates)} "
+            f"from {len(enums)} enums"
+        )
     return 0
 
 
