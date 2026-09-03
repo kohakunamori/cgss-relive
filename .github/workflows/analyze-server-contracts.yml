@@ -184,16 +184,17 @@ jobs:
           import json
           from pathlib import Path
           d = json.loads(Path('reports/arcade-convert-type.json').read_text())
-          assert d['schema'] == 1
-          assert d['target_rva'] == 0x4769CB0
+          assert d['schema'] == 2
+          assert d['target_rva'] == 0x4769CC0
           assert len(d['constructors']) == 5
-          assert all(len(row['convert_calls']) == 1 for row in d['constructors'])
+          assert {row['convert_input_key'] for row in d['constructors']} == {352, 353, 354, 355, 356}
+          assert all(row['convert_input_key'] == row['expected_api_key'] for row in d['constructors'])
           print(json.dumps({
               'target': d['target'],
               'target_rva': hex(d['target_rva']),
               'signature': d['dump_signature'],
+              'semantics': d['semantics'],
               'constructors': d['constructors'],
-              'instructions': d['instructions'],
           }, indent=2))
           PY
 
