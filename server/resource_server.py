@@ -14,6 +14,10 @@ events. It never records a resource filename, object hash, query string, account
 identifier, or request body. Routes are reduced to categories such as
 ``@resource/manifest`` and ``@resource/AssetBundles``. Health checks are excluded
 from evidence logging so monitoring traffic cannot advance runtime phases.
+
+Raw BaseHTTPRequestHandler access logging is also suppressed so terminal output
+cannot accidentally expose resource filenames or hashes when pasted into an
+issue/debug transcript.
 """
 from __future__ import annotations
 
@@ -189,8 +193,13 @@ def make_handler(
     sanitized_event_log = event_log
 
     class CGSSResourceHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive-resource/0.3"
+        server_version = "cgss-relive-resource/0.4"
         protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            # BaseHTTPRequestHandler embeds the raw request line/path here. Keep
+            # console output clean; --event-log is the supported runtime trace.
+            return
 
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
             path = urlsplit(self.path).path
@@ -202,7 +211,8 @@ def make_handler(
                 sanitized_event_log.append(
                     build_event(route=resource_event_route(self.path), status=code)
                 )
-            super().log_request(code, size)
+            # Intentionally do not call super().log_request(): it would print the
+            # raw URL, including proprietary resource filenames/hashes.
 
         def _send_plain(self, status: int, body: bytes) -> None:
             self.send_response(status)
