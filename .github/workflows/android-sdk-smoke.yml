@@ -1,4 +1,4 @@
-name: Android SDK build-tools smoke
+name: Android reverse-build smoke
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   android-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +69,7 @@ jobs:
           echo "$BUILD_TOOLS" >> "$GITHUB_PATH"
           echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
 
-      - name: Verify tools needed by reverse-client acceptance
+      - name: Verify Android tools
         shell: bash
         run: |
           set -euo pipefail
@@ -78,3 +78,81 @@ jobs:
           aapt2 version
           command -v zipalign
           apksigner version
+
+      - name: Download exact final specimen and select base APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+
+          BASE_APK=''
+          while IFS= read -r -d '' apk; do
+            first_line="$(aapt dump badging "$apk" | head -1)"
+            if [[ "$first_line" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]] && [[ "$first_line" != *" split='"* ]]; then
+              BASE_APK="$apk"
+              break
+            fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+
+          if [[ -z "$BASE_APK" ]]; then
+            echo 'Base APK was not found in exact final XAPK' >&2
+            exit 1
+          fi
+
+          echo "BASE_APK=$BASE_APK" >> "$GITHUB_ENV"
+          aapt dump badging "$BASE_APK" | head -1
+
+      - name: Rebuild base APK with Apktool 2.12.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output work/apktool.jar \
+            'https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar'
+          test "$(java -jar work/apktool.jar --version)" = '2.12.1'
+          java -jar work/apktool.jar d -f "$BASE_APK" -o work/decompiled
+          java -jar work/apktool.jar b work/decompiled -o work/rebuilt-unsigned.apk
+          test -s work/rebuilt-unsigned.apk
+
+      - name: Align, sign, and verify rebuilt APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          zipalign -f 4 work/rebuilt-unsigned.apk work/rebuilt-aligned.apk
+          keytool -genkeypair \
+            -keystore work/ci-signing.jks \
+            -storepass changeit \
+            -keypass changeit \
+            -alias ci \
+            -dname 'CN=CGSS Relive CI' \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 1 \
+            -noprompt
+          apksigner sign \
+            --ks work/ci-signing.jks \
+            --ks-pass pass:changeit \
+            --key-pass pass:changeit \
+            --out work/rebuilt-signed.apk \
+            work/rebuilt-aligned.apk
+          apksigner verify --verbose work/rebuilt-signed.apk
+
+          badging="$(aapt dump badging work/rebuilt-signed.apk | head -1)"
+          echo "$badging"
+          [[ "$badging" == *"package: name='jp.co.bandainamcoent.BNEI0242'"* ]]
+          [[ "$badging" == *"versionCode='438'"* ]]
+          [[ "$badging" == *"versionName='11.6.3'"* ]]
+
+      - name: Enforce no proprietary artifact escape
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          test ! -e work/final.xapk
+          test ! -e work/rebuilt-signed.apk
