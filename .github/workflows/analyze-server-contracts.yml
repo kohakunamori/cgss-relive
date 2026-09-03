@@ -157,8 +157,8 @@ jobs:
           python - <<'PY'
           import json
           d=json.load(open('reports/task-set-type-callsites.json'))
-          assert d['schema']==1
-          print(json.dumps({'setter':d['setter'],'setter_rva':hex(d['setter_rva']),'observation_count':d['observation_count'],'key_count':d['key_count'],'observations':d['observations'][:80]},indent=2))
+          assert d['schema']==2
+          print(json.dumps({'setter':d['setter'],'setter_rva':hex(d['setter_rva']),'exact_bl_xref_count':d['exact_bl_xref_count'],'mapped_caller_method_count':d['mapped_caller_method_count'],'unmapped_bl_xrefs':d['unmapped_bl_xrefs'],'observation_count':d['observation_count'],'key_count':d['key_count'],'observations':d['observations'][:80]},indent=2))
           PY
 
       - name: Close Arcade ConvertType bridge
