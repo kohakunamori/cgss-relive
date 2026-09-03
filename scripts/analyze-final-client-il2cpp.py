@@ -5,9 +5,10 @@ import argparse
 import bisect
 import json
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_INS_BL, ARM64_INS_BLR, ARM64_OP_IMM
@@ -37,11 +38,19 @@ INTEREST = (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class Method:
     address: int
     name: str
     signature: str | None
+
+
+def as_int(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value, 0)
+    raise TypeError(f"unsupported address value: {value!r}")
 
 
 class BinaryView:
@@ -49,6 +58,7 @@ class BinaryView:
         self.stream = path.open("rb")
         self.elf = ELFFile(self.stream)
         self.segments: list[tuple[int, int, int, int]] = []
+        self._exec_ranges: list[tuple[int, bytes]] | None = None
         for seg in self.elf.iter_segments():
             if seg["p_type"] != "PT_LOAD":
                 continue
@@ -71,33 +81,40 @@ class BinaryView:
         return b""
 
     def exec_ranges(self) -> list[tuple[int, bytes]]:
-        out = []
-        for seg in self.elf.iter_segments():
-            if seg["p_type"] != "PT_LOAD" or not (int(seg["p_flags"]) & 1):
-                continue
-            out.append((int(seg["p_vaddr"]), seg.data()))
-        return out
+        if self._exec_ranges is None:
+            self._exec_ranges = []
+            for seg in self.elf.iter_segments():
+                if seg["p_type"] != "PT_LOAD" or not (int(seg["p_flags"]) & 1):
+                    continue
+                self._exec_ranges.append((int(seg["p_vaddr"]), seg.data()))
+        return self._exec_ranges
 
 
-def load_methods(script_path: Path) -> tuple[list[Method], dict[int, Method], list[int]]:
+def load_methods(script_path: Path) -> tuple[list[Method], dict[int, Method], list[int], list[int]]:
     data = json.loads(script_path.read_text(encoding="utf-8"))
-    methods = [
-        Method(int(x["Address"]), str(x["Name"]), x.get("Signature"))
-        for x in data.get("ScriptMethod", [])
-        if int(x.get("Address", 0)) > 0
-    ]
+    methods: list[Method] = []
+    for item in data.get("ScriptMethod", []):
+        address = as_int(item.get("Address", 0))
+        if address <= 0:
+            continue
+        methods.append(Method(address, str(item["Name"]), item.get("Signature")))
+
     by_addr: dict[int, Method] = {}
     for method in methods:
         by_addr.setdefault(method.address, method)
-    addresses = sorted({int(x) for x in data.get("Addresses", []) if int(x) > 0} | set(by_addr))
-    return methods, by_addr, addresses
+    method_starts = sorted(by_addr)
+
+    function_starts = set(method_starts)
+    for value in data.get("Addresses", []):
+        address = as_int(value)
+        if address > 0:
+            function_starts.add(address)
+    return methods, by_addr, method_starts, sorted(function_starts)
 
 
-def method_at(address: int, by_addr: dict[int, Method], starts: list[int]) -> Method | None:
-    if address in by_addr:
-        return by_addr[address]
-    i = bisect.bisect_right(starts, address) - 1
-    return by_addr.get(starts[i]) if i >= 0 else None
+def method_at(address: int, by_addr: dict[int, Method], method_starts: list[int]) -> Method | None:
+    i = bisect.bisect_right(method_starts, address) - 1
+    return by_addr.get(method_starts[i]) if i >= 0 else None
 
 
 def function_bounds(address: int, starts: list[int], max_size: int = 0x10000) -> tuple[int, int]:
@@ -106,12 +123,15 @@ def function_bounds(address: int, starts: list[int], max_size: int = 0x10000) ->
     return address, min(end, address + max_size)
 
 
-def disasm_function(view: BinaryView, address: int, starts: list[int]):
-    start, end = function_bounds(address, starts)
-    blob = view.read(start, end - start)
+def make_disassembler() -> Cs:
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
     md.detail = True
-    return list(md.disasm(blob, start))
+    return md
+
+
+def disasm_function(view: BinaryView, address: int, starts: list[int]):
+    start, end = function_bounds(address, starts)
+    return list(make_disassembler().disasm(view.read(start, end - start), start))
 
 
 def direct_calls(
@@ -125,48 +145,46 @@ def direct_calls(
         if ins.id == ARM64_INS_BL and ins.operands and ins.operands[0].type == ARM64_OP_IMM:
             target = int(ins.operands[0].imm)
             method = by_addr.get(target)
-            calls.append({
-                "site": ins.address,
-                "target": target,
-                "name": method.name if method else None,
-            })
+            calls.append({"site": ins.address, "target": target, "name": method.name if method else None})
         elif ins.id == ARM64_INS_BLR:
             calls.append({"site": ins.address, "target": None, "name": "<indirect blr>"})
     return calls
 
 
-def scan_callers(
+def infer_w1(context: Iterable[Any]) -> int | None:
+    for prev in reversed(list(context)):
+        ops = prev.op_str.replace(" ", "")
+        match = re.match(r"(?:mov|movz)w1,#(0x[0-9a-f]+|\d+)$", ops, re.I)
+        if match:
+            return int(match.group(1), 0)
+    return None
+
+
+def build_caller_index(
     view: BinaryView,
-    target: int,
+    targets: set[int],
     by_addr: dict[int, Method],
-    starts: list[int],
-) -> list[dict[str, Any]]:
-    md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
-    md.detail = True
-    found = []
+    method_starts: list[int],
+) -> dict[int, list[dict[str, Any]]]:
+    """Scan executable ranges once and retain only calls to targeted RVAs."""
+    found: dict[int, list[dict[str, Any]]] = {target: [] for target in targets}
+    md = make_disassembler()
     for base, blob in view.exec_ranges():
-        insns = list(md.disasm(blob, base))
-        for idx, ins in enumerate(insns):
-            if ins.id != ARM64_INS_BL or not ins.operands or ins.operands[0].type != ARM64_OP_IMM:
-                continue
-            if int(ins.operands[0].imm) != target:
-                continue
-            parent = method_at(ins.address, by_addr, starts)
-            context = insns[max(0, idx - 8): idx + 1]
-            inferred = None
-            for prev in reversed(context[:-1]):
-                ops = prev.op_str.replace(" ", "")
-                match = re.match(r"(?:mov|movz)w1,#(0x[0-9a-f]+|\d+)$", ops, re.I)
-                if match:
-                    inferred = int(match.group(1), 0)
-                    break
-            found.append({
-                "site": ins.address,
-                "parent": parent.name if parent else None,
-                "parent_rva": parent.address if parent else None,
-                "inferred_w1": inferred,
-                "context": [f"0x{x.address:X}: {x.mnemonic} {x.op_str}" for x in context],
-            })
+        history: deque[Any] = deque(maxlen=8)
+        for ins in md.disasm(blob, base):
+            if ins.id == ARM64_INS_BL and ins.operands and ins.operands[0].type == ARM64_OP_IMM:
+                target = int(ins.operands[0].imm)
+                if target in targets:
+                    parent = method_at(ins.address, by_addr, method_starts)
+                    context = list(history) + [ins]
+                    found[target].append({
+                        "site": ins.address,
+                        "parent": parent.name if parent else None,
+                        "parent_rva": parent.address if parent else None,
+                        "inferred_w1": infer_w1(history),
+                        "context": [f"0x{x.address:X}: {x.mnemonic} {x.op_str}" for x in context],
+                    })
+            history.append(ins)
     return found
 
 
@@ -181,9 +199,9 @@ def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
     pattern = re.compile(r"(?:public|private|internal|protected)?\s*enum\s+([\w.<>]+)\s*\{(.*?)\n\}", re.S)
     for match in pattern.finditer(dump_text):
         name, body = match.group(1), match.group(2)
-        if not any(key.lower() in name.lower() for key in ("view", "scene", "stage", "main")):
+        if not any(key in name.lower() for key in ("view", "scene", "stage", "main")):
             continue
-        values = {}
+        values: dict[str, int] = {}
         for line in body.splitlines():
             value_match = re.search(
                 r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\s*[,;]?",
@@ -196,13 +214,6 @@ def enum_candidates(dump_text: str) -> list[dict[str, Any]]:
     return out
 
 
-def select_method(methods: list[Method], rva: int) -> Method | None:
-    for method in methods:
-        if method.address == rva:
-            return method
-    return None
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lib", type=Path, required=True)
@@ -211,35 +222,35 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    methods, by_addr, starts = load_methods(args.script_json)
+    methods, by_addr, method_starts, function_starts = load_methods(args.script_json)
     dump_text = args.dump_cs.read_text(encoding="utf-8", errors="replace")
     view = BinaryView(args.lib)
     try:
-        known = {}
+        caller_index = build_caller_index(view, set(KNOWN_RVAS.values()), by_addr, method_starts)
+        known: dict[str, Any] = {}
         for label, rva in KNOWN_RVAS.items():
-            method = select_method(methods, rva)
+            method = by_addr.get(rva)
             known[label] = {
                 "rva": rva,
                 "resolved_name": method.name if method else None,
                 "signature": method.signature if method else None,
                 "dump_signature": dump_method_signature(dump_text, rva),
-                "calls": direct_calls(view, rva, starts, by_addr),
-                "callers": scan_callers(view, rva, by_addr, starts),
+                "calls": direct_calls(view, rva, function_starts, by_addr),
+                "callers": caller_index[rva],
             }
 
         change_calls = known["Stage.SceneManager.ChangeView"]["callers"]
-        interesting_edges = {}
+        interesting_edges: dict[str, Any] = {}
         for label, record in known.items():
             edges = [
-                edge
-                for edge in record["calls"]
+                edge for edge in record["calls"]
                 if edge["name"] and any(key in edge["name"] for key in INTEREST)
             ]
             if edges:
                 interesting_edges[label] = edges
 
         report = {
-            "schema": 1,
+            "schema": 2,
             "method_count": len(methods),
             "known": known,
             "change_view_callsites": change_calls,
@@ -250,47 +261,33 @@ def main() -> int:
         view.close()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     markdown = [
-        "# Final 11.6.3 targeted IL2CPP analysis",
-        "",
-        "Generated from an ephemeral verified specimen; no game binary is retained.",
-        "",
-        "## Known method resolution",
-        "",
+        "# Final 11.6.3 targeted IL2CPP analysis", "",
+        "Generated from an ephemeral hash-verified specimen; no game binary is retained.", "",
+        "## Known method resolution", "",
     ]
     for label, record in report["known"].items():
-        markdown.append(
-            f"- `{label}` @ `0x{record['rva']:X}` → `{record['resolved_name'] or 'unresolved'}`"
-        )
+        markdown.append(f"- `{label}` @ `0x{record['rva']:X}` → `{record['resolved_name'] or 'unresolved'}`")
         if record["dump_signature"]:
             markdown.append(f"  - dump: `{record['dump_signature']}`")
 
     markdown += ["", "## SceneManager.ChangeView callsites", ""]
     for call in change_calls:
-        markdown.append(
-            f"- `0x{call['site']:X}` in `{call['parent']}`; inferred `w1={call['inferred_w1']}`"
-        )
+        markdown.append(f"- `0x{call['site']:X}` in `{call['parent']}`; inferred `w1={call['inferred_w1']}`")
         for line in call["context"]:
             markdown.append(f"  - `{line}`")
 
     markdown += ["", "## View/scene enum candidates containing 6 or 7", ""]
     for enum in report["enum_candidates"]:
-        markdown.append(
-            f"- `{enum['enum']}`: " + ", ".join(f"{key}={value}" for key, value in enum["values"].items())
-        )
+        markdown.append(f"- `{enum['enum']}`: " + ", ".join(f"{key}={value}" for key, value in enum["values"].items()))
 
     markdown += ["", "## Interesting direct edges from bootstrap seeds", ""]
     for label, edges in report["interesting_direct_edges"].items():
         markdown.append(f"### {label}")
         for edge in edges:
-            markdown.append(
-                f"- `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`"
-            )
+            markdown.append(f"- `0x{edge['site']:X}` → `0x{edge['target']:X}` `{edge['name']}`")
 
     args.output.with_suffix(".md").write_text("\n".join(markdown) + "\n", encoding="utf-8")
     return 0
