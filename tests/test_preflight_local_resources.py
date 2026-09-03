@@ -45,15 +45,15 @@ class LocalResourcePreflightTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "cache"
         self.root.mkdir(parents=True)
         self.db = Path(self.temp.name) / "manifest.db"
-        self.hashes = (
-            "0123456789abcdef0123456789abcdef",
-            "fedcba9876543210fedcba9876543210",
-        )
+        self.master_payload = b"synthetic-master-object"
+        self.master_digest = hashlib.md5(self.master_payload).hexdigest()
+        self.other_digest = "fedcba9876543210fedcba9876543210"
+        self.hashes = (self.master_digest, self.other_digest)
         with sqlite3.connect(self.db) as connection:
             connection.execute("CREATE TABLE manifests (name TEXT, hash TEXT)")
             connection.executemany(
                 "INSERT INTO manifests(name, hash) VALUES (?, ?)",
-                [("a", self.hashes[0]), ("b", self.hashes[1])],
+                [("master.mdb", self.master_digest), ("b", self.other_digest)],
             )
             connection.commit()
 
@@ -67,10 +67,13 @@ class LocalResourcePreflightTests(unittest.TestCase):
         )
         (wire / "Android_AHigh_SHigh").write_bytes(compressed)
 
-        for digest in self.hashes:
-            path = self.root / "objects" / digest[:2] / digest
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"object")
+        master_path = self.root / "objects" / self.master_digest[:2] / self.master_digest
+        master_path.parent.mkdir(parents=True, exist_ok=True)
+        master_path.write_bytes(self.master_payload)
+
+        other_path = self.root / "objects" / self.other_digest[:2] / self.other_digest
+        other_path.parent.mkdir(parents=True, exist_ok=True)
+        other_path.write_bytes(b"object")
 
         self.old_rows = module.EXPECTED_MANIFEST_ROWS
         self.old_hashes = module.EXPECTED_UNIQUE_HASHES
@@ -86,7 +89,7 @@ class LocalResourcePreflightTests(unittest.TestCase):
         report = module.run_preflight(self.root, self.db, version=module.FINAL_RESOURCE_VERSION)
         self.assertTrue(report["ready"])
         self.assertEqual(report["failures"], [])
-        self.assertEqual(report["schema"], 2)
+        self.assertEqual(report["schema"], 3)
         self.assertEqual(report["manifest"]["quick_check"], ["ok"])
         self.assertEqual(report["manifest"]["rows"], 2)
         self.assertEqual(report["manifest"]["unique_hashes"], 2)
@@ -103,10 +106,18 @@ class LocalResourcePreflightTests(unittest.TestCase):
         )
         self.assertEqual(report["objects"]["present"], 2)
         self.assertEqual(report["objects"]["missing"], 0)
+        self.assertEqual(
+            report["master_object"],
+            {
+                "manifest_entry_present": True,
+                "object_present": True,
+                "md5_matches_manifest": True,
+            },
+        )
 
     def test_missing_wire_and_object_are_sanitized_failures(self) -> None:
         (self.root / "manifests" / module.WIRE_MANIFESTS[0]).unlink()
-        missing_digest = self.hashes[1]
+        missing_digest = self.other_digest
         (self.root / "objects" / missing_digest[:2] / missing_digest).unlink()
 
         report = module.run_preflight(self.root, self.db, version=module.FINAL_RESOURCE_VERSION)
@@ -133,7 +144,7 @@ class LocalResourcePreflightTests(unittest.TestCase):
             connection.execute("CREATE TABLE manifests (name TEXT, hash TEXT)")
             connection.execute(
                 "INSERT INTO manifests(name, hash) VALUES (?, ?)",
-                ("different", self.hashes[0]),
+                ("different", self.master_digest),
             )
             connection.commit()
         compressed = wrap_lz4(other_db.read_bytes())
@@ -150,9 +161,20 @@ class LocalResourcePreflightTests(unittest.TestCase):
         self.assertTrue(report["wire_chain"]["decoded_is_sqlite"])
         self.assertFalse(report["wire_chain"]["decoded_matches_manifest_db"])
 
+    def test_master_object_hash_mismatch_is_rejected(self) -> None:
+        path = self.root / "objects" / self.master_digest[:2] / self.master_digest
+        path.write_bytes(b"same-path-wrong-content")
+        report = module.run_preflight(self.root, self.db, version=module.FINAL_RESOURCE_VERSION)
+        self.assertFalse(report["ready"])
+        self.assertIn("master_object_md5_mismatch", report["failures"])
+        self.assertTrue(report["master_object"]["manifest_entry_present"])
+        self.assertTrue(report["master_object"]["object_present"])
+        self.assertFalse(report["master_object"]["md5_matches_manifest"])
+        self.assertNotIn(self.master_digest, repr(report))
+
     def test_wrong_version_and_invalid_hash_are_rejected(self) -> None:
         with sqlite3.connect(self.db) as connection:
-            connection.execute("UPDATE manifests SET hash='not-a-hash' WHERE name='a'")
+            connection.execute("UPDATE manifests SET hash='not-a-hash' WHERE name='b'")
         report = module.run_preflight(self.root, self.db, version="10133000")
         self.assertFalse(report["ready"])
         self.assertIn("resource_version_mismatch", report["failures"])
