@@ -80,7 +80,7 @@ def make_handler(routes: Mapping[str, Backend]) -> Type[BaseHTTPRequestHandler]:
     normalized_routes = {host.lower(): backend for host, backend in routes.items()}
 
     class TLSMuxHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive-tls-mux/0.1"
+        server_version = "cgss-relive-tls-mux/0.2"
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: object) -> None:
@@ -124,6 +124,7 @@ def make_handler(routes: Mapping[str, Backend]) -> Type[BaseHTTPRequestHandler]:
 
             backend = normalized_routes[host]
             connection = http.client.HTTPConnection(backend.host, backend.port, timeout=60)
+            response_started = False
             try:
                 connection.request(
                     self.command,
@@ -145,6 +146,7 @@ def make_handler(routes: Mapping[str, Backend]) -> Type[BaseHTTPRequestHandler]:
                     self.send_header("Content-Length", "0")
                 self.send_header("Connection", "close")
                 self.end_headers()
+                response_started = True
 
                 if self.command != "HEAD":
                     while True:
@@ -153,9 +155,10 @@ def make_handler(routes: Mapping[str, Backend]) -> Type[BaseHTTPRequestHandler]:
                             break
                         self.wfile.write(chunk)
             except (OSError, http.client.HTTPException):
-                if not self.wfile.closed:
-                    # If headers have already been sent this connection will just
-                    # terminate; otherwise provide a generic path-free 502.
+                # Before response headers, return a generic path-free 502. Once
+                # a backend response has started, terminate the connection; a
+                # second HTTP status line would corrupt the response stream.
+                if not response_started and not self.wfile.closed:
                     try:
                         self._send_error_without_path(502, b"backend unavailable\n")
                     except OSError:
