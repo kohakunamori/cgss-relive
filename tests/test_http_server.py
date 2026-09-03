@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import http.client
+import io
 import json
 import pathlib
 import tempfile
@@ -165,6 +167,27 @@ class HTTPBootstrapServerTests(unittest.TestCase):
                 event["api_candidates"],
                 [{"group": "A", "key": 14, "name": "BnContentGetState", "literal_index": 23438}],
             )
+
+    def test_raw_request_line_is_not_written_to_stderr(self) -> None:
+        # BaseHTTPRequestHandler normally logs the complete request line, which
+        # would bypass SafeEventLog if a future API carries sensitive query
+        # values. Keep the terminal clean even for unsupported routes.
+        secret = "must-not-escape-terminal"
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+            conn.request(
+                "POST",
+                f"/load/unknown?opaque={secret}",
+                body=b"",
+                headers={"Content-Length": "0"},
+            )
+            response = conn.getresponse()
+            self.assertEqual(response.status, 404)
+            response.read()
+            conn.close()
+        self.assertEqual(captured.getvalue(), "")
+        self.assertNotIn(secret, captured.getvalue())
 
     def test_health_and_unknown_route(self) -> None:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
