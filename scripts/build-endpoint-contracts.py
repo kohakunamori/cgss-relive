@@ -2,9 +2,9 @@
 """Build an evidence-graded final-client endpoint/task contract table.
 
 `proven-static` requires concrete key flow into the typed `Cute.NetworkTask.type`
-field. Accepted evidence includes direct field writes, the proven Arcade ConvertType
-input/output chain, or caller-side object provenance into `NetworkTask.set_type`.
-Naming alone remains candidate evidence only.
+field. Accepted evidence includes direct field writes, proven conditional/constant-
+pool ctor writes, Arcade ConvertType input/output chains, or caller-side object
+provenance into `NetworkTask.set_type`. Naming alone remains candidate evidence.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-SCHEMA = 3
+SCHEMA = 4
 CONVERT_TARGET = "Stage.ArcadePhaseBaseTask$$ConvertType"
 _SUFFIXES = ("NetworkTask", "Task", "Api", "Request", "Response")
 
@@ -85,6 +85,35 @@ def direct_bindings(field_report: dict[str, Any]) -> tuple[dict[int, list[dict[s
     return bindings, converted_tasks
 
 
+def add_dynamic_ctor_bindings(bindings: dict[int, list[dict[str, Any]]], proof: dict[str, Any]) -> None:
+    if proof.get("schema") != 1:
+        raise RuntimeError("dynamic NetworkTask proof schema mismatch")
+    for row in proof.get("bindings", []):
+        task = str(row["task"])
+        ctor_rva = int(row["ctor_rva"])
+        if int(row.get("field_offset", -1)) != 0x50:
+            raise RuntimeError(f"dynamic binding field offset mismatch: {row!r}")
+        if "cases" in row:
+            for case in row["cases"]:
+                key = int(case["key"])
+                bindings[key].append({
+                    "task": task,
+                    "evidence": "conditional-ctor-write-to-networktask-type",
+                    "ctor_rva": ctor_rva,
+                    "condition": str(case["condition"]),
+                })
+        else:
+            key = int(row["key"])
+            if int(row.get("constant_u64", key)) & 0xFFFFFFFF != key:
+                raise RuntimeError(f"constant-pool low dword mismatch: {row!r}")
+            bindings[key].append({
+                "task": task,
+                "evidence": "constant-pool-ctor-write-to-networktask-type",
+                "ctor_rva": ctor_rva,
+                "constant_va": int(row["constant_va"]),
+            })
+
+
 def add_arcade_bindings(bindings: dict[int, list[dict[str, Any]]], arcade_report: dict[str, Any]) -> dict[int, str]:
     task_by_input: dict[int, str] = {}
     for row in arcade_report.get("constructors", []):
@@ -145,6 +174,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--api-map", type=Path, required=True)
     p.add_argument("--field-report", type=Path, required=True)
+    p.add_argument("--dynamic-writer-proof", type=Path)
     p.add_argument("--arcade-report", type=Path, required=True)
     p.add_argument("--arcade-garden-report", type=Path)
     p.add_argument("--set-type-report", type=Path)
@@ -161,6 +191,8 @@ def main() -> int:
         raise RuntimeError("Arcade ConvertType proof report schema mismatch")
 
     bindings, converted_tasks = direct_bindings(field_report)
+    if args.dynamic_writer_proof:
+        add_dynamic_ctor_bindings(bindings, json.loads(args.dynamic_writer_proof.read_text(encoding="utf-8")))
     task_by_input = add_arcade_bindings(bindings, arcade_report)
     if args.arcade_garden_report:
         add_arcade_garden_bindings(bindings, api_map, task_by_input, json.loads(args.arcade_garden_report.read_text(encoding="utf-8")))
@@ -176,7 +208,7 @@ def main() -> int:
             unique = []
             seen = set()
             for binding in raw_bindings:
-                marker = (binding["task"], binding["evidence"], binding.get("caller_rva"), binding.get("set_type_call_rva"), binding.get("input_key"))
+                marker = (binding["task"], binding["evidence"], binding.get("caller_rva"), binding.get("set_type_call_rva"), binding.get("input_key"), binding.get("condition"), binding.get("constant_va"))
                 if marker not in seen:
                     seen.add(marker)
                     unique.append(binding)
