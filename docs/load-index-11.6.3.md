@@ -266,22 +266,59 @@ serial keys:
 The serial `1` reference is now backed by the WorkCardData record described
 above.
 
-## Character and leader state
+## `user_chara_list`: exact parser block and starter decision
 
-The synthetic character row currently remains:
+The final client does contain this real `/load/index` section. Exact string
+literal discovery gives:
 
-```json
-{"chara_id": 101, "fan": 0}
+```text
+user_chara_list literal = 0x085c6820
+LoadTask.Parse xref      = 0x0485d17c / 0x0485d188 area
 ```
 
-and guarded `user_info.leader_serial_id=1` is supplied for the initial leader.
-These are synthetic local state; no captured account payload is copied.
+The bounded parser block then proves an empty array is safe:
 
-Unlike the WorkCardData and unit chains, the current accumulated static report
-does not yet contain a closed `user_chara_list` parser/consumer proof. An exact
-single-literal/xref pass is therefore being used to decide whether this row is
-actually necessary or should be removed from the starter profile. Do not treat
-its current presence as a proven requirement.
+```text
+0x0485d230  JsonData.get_Count
+0x0485d234  cmp w0,#1
+0x0485d238  b.lt 0x0485d2c8
+```
+
+For a non-empty element the block hard-reads exactly:
+
+```text
+chara_id   -> ToInt
+fan        -> ToLong
+```
+
+and then calls:
+
+```text
+Stage.WorkCharaData.AddCharaData @ call site 0x0485d2b8
+```
+
+Thus the old synthetic row `{"chara_id":101,"fan":0}` was structurally valid,
+but structural validity is not the same as necessity.
+
+The bounded Home startup reports (`Start`, `StartViewProcess`, immediate Home
+helpers, and the targeted state-facing helpers) contain no `WorkCharaData`
+consumer. When the actual Home `CardDownloadList` worker needs a character id, it
+uses:
+
+```text
+WorkCardData.CardData.GetCharaId @ 0x03ec0fdc
+WorkCardData.CardData.GetCharaId @ 0x03ec1294
+```
+
+So the starter no longer fabricates WorkCharaData merely because the master card
+corresponds to `chara_id=101`. It intentionally keeps:
+
+```json
+"user_chara_list": []
+```
+
+This reduces the first Home experiment to state with a demonstrated startup
+consumer. `leader_serial_id=1` remains supplied as a guarded initial leader.
 
 ## Optional feature sections and Home banner data
 
@@ -339,8 +376,8 @@ python -m server.http_server --experimental-home-load-index
 - keeps `user_card_list=[]`;
 - one unit with `unit_slot=1`, `unit_id=1`, name and five serial slots, with
   `serial_id_0=1`;
-- currently one `user_chara_list` row for `chara_id=101`, pending exact necessity
-  closure;
+- keeps the exact-parser-safe `user_chara_list=[]` because Home startup has no
+  proven WorkCharaData consumer;
 - guarded `leader_serial_id=1`.
 
 ```powershell
@@ -422,15 +459,16 @@ Statically proven/strongly closed for final 11.6.3:
   `WorkCardData.GetCardDataWithSerial`;
 - non-empty unit `unit_slot + name`, fixed five serial slots, and later
   `unit_id + name` pass;
+- `user_chara_list` is real, empty-array safe, and non-empty rows require exactly
+  `chara_id + fan`; current Home startup does not justify creating one;
 - guard-heavy optional feature sections;
 - `/load/index` success callback chain;
 - `Home=6`, `Login_Bonus=7`, `Asset_Download=8`;
 - 214 continues into resource initialization before `/load/index`;
 - `/load/title` is not a hard Home prerequisite.
 
-Still pending or being closed:
+Still runtime-pending:
 
-- exact necessity/shape of synthetic `user_chara_list`;
-- original-client acceptance of the corrected synthetic starter profile;
+- original-client acceptance of the reduced synthetic starter profile;
 - visible Home rendering with the local TLS/resource stack;
 - first unsupported endpoint/local-state blocker after Home.
