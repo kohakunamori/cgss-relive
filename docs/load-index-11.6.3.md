@@ -1,27 +1,49 @@
 # CGSS Android 11.6.3 `/load/index` parser reduction
 
-This note records static schema work against the supplied final Android 11.6.3
-XAPK. It deliberately separates direct final-client reads from optional fields,
-historical response examples, and synthetic compatibility choices.
+This note records the current clean-room reduction of final Android 11.6.3
+`Stage.LoadTask.Parse` and the synthetic profiles implemented by the server.
+Static evidence from the final IL2CPP specimen supersedes earlier historical
+response-shape assumptions.
 
-## Specimen
+## Final parser target
 
-- runtime: Unity IL2CPP, metadata v31
-- arm64 `libil2cpp.so` SHA-256:
-  `2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5`
-- `global-metadata.dat` SHA-256:
-  `2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586`
-- `Stage.LoadTask.Parse` starts at RVA `0x04850a94`; analyzed return is near
-  `0x0486fab0`
+- `Stage.LoadTask.Parse`: RVA `0x04850a94`
+- parser body begins near `0x04852398`
+- the earlier `0x04850a94..0x04852397` region is largely static key setup rather
+  than ordinary response reads
+- missing hard children commonly branch to the shared early exit near
+  `0x0486fa88`
 
-The function references more than 400 unique managed strings. That is **not** the
-number of mandatory response fields: much of the final accumulated schema is
-behind `ContainsKey` and feature/state branches.
+A critical semantic detail is that an early hard-key miss can stop the remainder
+of this parser while the framework still sees the common/base success result.
+Therefore “server returned result_code=1” is not evidence that the entire
+`/load/index` state was populated.
 
-## Required `data.common_define` prefix
+## Parser primitives
 
-The observed branch directly indexes these seven members before switching to
-presence-guarded additions:
+The final parser repeatedly uses three patterns:
+
+1. **hard read** — direct `JsonData.get_Item(key)` followed by a null check;
+   missing value can jump to the shared early exit;
+2. **guard read** — key enumeration/ContainsKey-style check; missing key skips
+   that feature block safely;
+3. **array guard** — count `< 1` skips the element loop, so an explicitly empty
+   array is safe for that block.
+
+The function references hundreds of strings. That is not the number of mandatory
+response fields.
+
+## Required envelope and `common_define`
+
+For the established-account/non-newbie path used by preservation tests, the
+server should provide:
+
+```text
+data
+└─ common_define
+```
+
+with these seven direct integer children:
 
 ```text
 expanding_count
@@ -33,12 +55,13 @@ room_lvup_shortening_time
 room_lvup_jewel
 ```
 
-## `user_info` bootstrap and player reads
+`producer_capability_reset_item_jewel` is guarded and may be omitted.
 
-The completed-tutorial bootstrap uses server-side `tutorial_flag=100`, which the
-final client normalizes to local completed tutorial step `1000`.
+## `user_info`
 
-Observed direct `user_info` reads on the reduced bootstrap/player path are:
+The normal path hard-reads `tutorial_flag`, and when `user_info` is present the
+observed scalar passes require the full synthetic set currently emitted by
+`build_minimal_load_index_data()`:
 
 ```text
 tutorial_flag
@@ -62,34 +85,66 @@ last_payment_date
 stamina_heal_time
 ```
 
-`leader_serial_id` is presence-guarded and therefore not globally mandatory. The
-starter-visible profile supplies it as a functional Home choice.
+The actual date key is `birth`; `birthday` and `last_login` are not parser keys in
+the analyzed function. `leader_serial_id`, emblem/support serial additions and
+similar trailing fields are guarded.
 
-There is one important conditional dependency: if `user_unit_list` is present,
-even as an empty list, the final parser reads `user_info.unit_slot` before
-iterating units. Therefore `unit_slot` belongs to the Home candidate layer, not
-the strict-minimal layer.
+The earlier repository note that an empty `user_unit_list` required
+`user_info.unit_slot` was incorrect. Final static evidence shows the top-level
+unit list is guarded and an empty list is safe. `unit_slot` belongs to each
+**non-empty unit element**, not `user_info`.
 
-## `user_card_list`: final item contract
+## `user_unit_list`: corrected final contract
 
-`data.user_card_list` is top-level presence-guarded. Once an item exists, final
-11.6.3 directly reads the following core fields:
+Top-level `user_unit_list` is presence-guarded and may be omitted or empty.
+
+For a non-empty unit element, the first confirmed pass directly reads:
 
 ```text
-serial_id
-card_id
-exp
-step
-love
-skill_level
-protect
+unit_slot   # 1-based; client stores value-1
+name
 ```
 
-`join_type`, custom-card state and related additions are separately guarded.
-Historical item field `level` is not part of the direct core reads observed in
-the final loops, so it is not copied merely to imitate old responses.
+It then checks formatted keys `serial_id_0` through `serial_id_4` in a loop whose
+upper bound is statically fixed by `cmp w20,#5`. Missing/zero serial keys are
+safe in this pass.
 
-Minimal synthetic card shape:
+A later independent unit-processing entry also directly reads `unit_id` and
+`name`. To satisfy both known passes, the starter-visible profile deliberately
+uses the conservative shape:
+
+```json
+{
+  "unit_slot": 1,
+  "unit_id": 1,
+  "name": "Relive Unit",
+  "serial_id_0": 1,
+  "serial_id_1": 0,
+  "serial_id_2": 0,
+  "serial_id_3": 0,
+  "serial_id_4": 0
+}
+```
+
+This is synthetic preservation state. `unit_slot=1` and `unit_id=1` are not
+copied from an account capture.
+
+The exact second-pass requirements for optional pose/costume/dress-customize
+substructures remain below the threshold for claiming them mandatory; the
+server does not invent them without runtime/static evidence.
+
+## Card/chara starter state
+
+The frozen `10133800` master independently proves:
+
+```text
+card_id 100001 = 島村卯月
+chara_id 101
+```
+
+The synthetic ownership serial is `1`.
+
+Current starter card core:
 
 ```json
 {
@@ -103,139 +158,115 @@ Minimal synthetic card shape:
 }
 ```
 
-The ownership serial is synthetic. `card_id=100001` is independently proven to
-exist in the frozen final `10133800` master database and maps to 島村卯月,
-`chara_id=101`.
-
-## `user_unit_list`: final contract and correction
-
-The final client contains more than one unit-processing pass. The first observed
-pass reads `name` and traverses the formatted key `serial_id_{0}` in a loop whose
-tail is statically bounded by `cmp w20,#5`. Therefore the unit has exactly five
-serial slots:
-
-```text
-serial_id_0
-serial_id_1
-serial_id_2
-serial_id_3
-serial_id_4
-```
-
-A later independent final-client pass also directly reads `unit_id` and `name`
-before traversing the same five serial slots. Consequently **`unit_id` is
-mandatory for a non-empty `user_unit_list`**. This supersedes the earlier note
-that inferred unit numbering solely from list position.
-
-Current minimum non-empty unit shape:
-
-```json
-{
-  "unit_id": 1,
-  "name": "Relive Unit",
-  "serial_id_0": 1,
-  "serial_id_1": 0,
-  "serial_id_2": 0,
-  "serial_id_3": 0,
-  "serial_id_4": 0
-}
-```
-
-`unit_id=1`, ownership serial `1`, selected `unit_slot=1`, and progress values are
-synthetic preservation state. No historical account payload is copied into the
-profile.
-
-## `user_chara_list`
-
-This section is top-level presence-guarded. When an item exists, final 11.6.3
-directly reads:
-
-```text
-chara_id
-fan
-```
-
-For the verified starter card the synthetic state therefore uses:
+Current synthetic character row:
 
 ```json
 {"chara_id": 101, "fan": 0}
 ```
 
-## Profile layers implemented
+The server also sets guarded `leader_serial_id=1` as a functional Home choice.
 
-`server/minimal_profile.py` exposes three intentionally separate contracts.
+## Other sections
+
+Most observed feature/data sections are top-level guarded and may be omitted.
+Examples include item, room, live, event, story, login-bonus, popup, panel mission
+and many campaign sections.
+
+The safe rule is:
+
+> if a whole guarded feature is not needed, omit the key instead of sending a
+> partially populated object.
+
+Some guarded keys have hard children once present. For example `music_list`, if
+provided, must contain `normal` (which may itself be an empty array).
+
+## Implemented profile layers
+
+`server/minimal_profile.py` keeps three distinct profiles so runtime differentials
+remain interpretable.
 
 ### 1. Strict minimal
 
-`build_minimal_load_index_data()` supplies only the reduced direct
-`common_define` / `user_info` requirements.
+`build_minimal_load_index_data()` provides the common/user bootstrap scalars only.
 
-```bash
-python -m server.http_server \
-  --experimental-minimal-load-index \
-  --viewer-id 1 \
-  --producer-name "Relive Producer"
+```powershell
+python -m server.http_server --experimental-minimal-load-index
 ```
 
 ### 2. Empty Home candidate
 
-`build_home_candidate_load_index_data()` adds parser-safe empty Home-facing
-containers, `music_list={"normal": []}`, and the required `user_info.unit_slot`
-dependency introduced by the presence of `user_unit_list`.
+`build_home_candidate_load_index_data()` adds selected explicit empty manager
+containers plus `music_list={"normal": []}`. It no longer adds a synthetic
+`user_info.unit_slot`.
 
-```bash
+```powershell
 python -m server.http_server --experimental-home-load-index
 ```
 
-### 3. Starter-visible candidate
+### 3. Starter-visible candidate — first runtime choice
 
-`build_starter_visible_load_index_data()` adds only:
+`build_starter_visible_load_index_data()` adds:
 
 - one synthetic owned serial `1` for final-master card `100001`;
-- one unit with `unit_id=1`, the owned serial in slot 0, and slots 1..4 empty;
-- one `user_chara_list` row for final-master `chara_id=101`;
-- functional `leader_serial_id=1`.
+- one corrected unit carrying `unit_slot=1`, `unit_id=1`, name and five serial
+  slots;
+- one `user_chara_list` row for `chara_id=101`;
+- guarded `leader_serial_id=1`.
 
-```bash
-python -m server.http_server \
-  --experimental-starter-load-index \
-  --viewer-id 1 \
+```powershell
+python -m server.http_server `
+  --experimental-starter-load-index `
+  --viewer-id 1 `
   --producer-name "Relive Producer"
 ```
 
-Builders and validators are unit-tested. The starter-visible response also has a
-real TCP/HTTP -> CGSS encrypted response -> decode round-trip test. That proves
-server-side transport integrity, **not yet original-client acceptance**.
+The starter-visible profile should be the first real-device test. Empty/strict
+profiles are differential fallbacks only.
 
-## Proven vs pending
+## `/load/index` success -> Home control flow
 
-Statically proven for this exact final 11.6.3 specimen:
+The final static call graph closes the success side as:
 
-- reduced direct `common_define` prefix;
-- observed direct `user_info` reads;
-- `user_unit_list` presence implies direct `user_info.unit_slot` access;
-- core non-empty `user_card_list` item reads;
-- exactly five unit serial slots;
-- a later final unit pass makes `unit_id` mandatory for non-empty units;
-- direct `user_chara_list` item fields;
-- many other accumulated fields are presence/state guarded;
-- `/load/index` uses the reconstructed common CGSS response envelope.
+```text
+BootMain.StartConnect
+  -> new Stage.LoadTask (type 11 = /load/index)
+  -> NetworkManager.Connect
+  -> UnityWebRequest response/decrypt/JsonData
+  -> NetworkTask.CheckResult
+  -> virtual Stage.LoadTask.Parse (0x04850a94)
+  -> Parse == 1
+  -> BootMain.CallbackOnSuccessLoad
+  -> BootMain.LastInitialized
+  -> BootMain.ChangeView
+  -> Stage.SceneManager.ChangeView(next = loginBonus ? 7 : 6)
+  -> Home semantics
+```
 
-Independently proven from frozen final resource version `10133800`:
+There is no statically proven mandatory network request immediately after
+successful `/load/index`. `/load/update_agreement_status` is driven by a Home UI
+interaction; `/load/title` is a Title-screen user-driven task rather than a hard
+Home prerequisite.
 
-- manifest/master hash chain and SQLite integrity;
-- 220,837 manifest rows / 220,803 unique resource hashes;
-- 4,314 `card_data` rows;
-- `100001` / 島村卯月 / `chara_id=101` exists in the final master.
+The exact enum names behind view IDs `6` and `7` remain unclosed statically, so a
+real-device transition is still required before labeling that mapping as fully
+confirmed.
 
-Still pending runtime proof:
+## Proven vs runtime-pending
 
-- original 11.6.3 acceptance of the synthetic profile layers;
-- successful transition from `/load/index` into the Home scene;
-- exact first endpoint requested after successful `/load/index`;
-- any additional non-network local-state/content requirement discovered at Home;
-- the next compatibility-server blocker after Home entry.
+Statically proven or strongly closed for final 11.6.3:
 
-The next device run should start with the starter-visible profile plus sanitized
-server event logging and ADB logcat. Fall back to empty-Home or strict-minimal only
-as controlled differential tests.
+- hard `data/common_define` prefix and seven direct integers;
+- established-account `user_info` scalar set;
+- optional/guard-heavy nature of the accumulated schema;
+- non-empty unit `unit_slot + name` first pass;
+- fixed five serial slots;
+- later unit pass requiring `unit_id + name`;
+- `/load/index` success callback chain toward Home;
+- `/load/title` is not a mandatory link in that chain.
+
+Still runtime-pending:
+
+- original-client acceptance of the synthetic starter profile;
+- visible identity of ChangeView IDs 6/7;
+- whether a local resource prerequisite blocks BootMain before `/load/index`;
+- first unsupported/local-state blocker after Home transition.
