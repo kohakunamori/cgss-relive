@@ -9,6 +9,7 @@ on:
       - '.github/workflows/analyze-server-contracts.yml'
       - 'scripts/analyze-server-contracts.py'
       - 'scripts/analyze-api-type-enums.py'
+      - 'scripts/analyze-task-api-keys.py'
 
 permissions:
   contents: read
@@ -131,6 +132,32 @@ jobs:
               'request_role_method_count': d['request_role_method_count'],
               'response_role_method_count': d['response_role_method_count'],
               'tasks_with_contract_literals': d['tasks_with_contract_literals'],
+          }, indent=2))
+          PY
+
+      - name: Infer constructor ApiType key flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-task-api-keys.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --inventory reports/server-contract-inventory.json \
+            --api-type-enums reports/api-type-enums.json \
+            --output reports/task-api-key-analysis.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d = json.loads(Path('reports/task-api-key-analysis.json').read_text())
+          assert d['schema'] == 1
+          assert d['task_count'] > 0
+          print(json.dumps({
+              'anchor_count': d['anchor_count'],
+              'strong_feature_count': len(d['strong_features']),
+              'proven_static_pattern_count': d['proven_static_pattern_count'],
+              'conflict_count': d['conflict_count'],
+              'unresolved_count': d['unresolved_count'],
+              'strong_features': d['strong_features'][:8],
           }, indent=2))
           PY
 
