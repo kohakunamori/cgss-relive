@@ -1,0 +1,89 @@
+name: Build C16 full-service implementation backlog
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/build-service-implementation-backlog.py
+      - tests/test_service_implementation_backlog.py
+      - .github/workflows/build-service-implementation-backlog.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download fixed C14 runtime contract catalog
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33847577801
+          name: final-client-c14-effective-runtime-contract-catalog
+          path: artifacts/c14
+
+      - name: Locate and verify frozen C14 input
+        shell: bash
+        run: |
+          set -euo pipefail
+          C14=$(find artifacts/c14 -type f -name '*effective-runtime-contract-catalog.json' -print -quit)
+          test -n "$C14"
+          echo "de42e8340458c96a66dcf798bd47965638efcb082c5bbb1b37c149520a7e18b8  $C14" | sha256sum -c -
+          echo "C14=$C14" >> "$GITHUB_ENV"
+
+      - name: Run C16 unit tests
+        run: python -m unittest discover -s tests -p 'test_service_implementation_backlog.py' -v
+
+      - name: Build real final-client service backlog
+        run: |
+          python scripts/build-service-implementation-backlog.py \
+            --effective-runtime-catalog "$C14" \
+            --output out/c16-service-implementation-backlog.json
+
+      - name: Verify frozen tier counts
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          doc = json.loads(Path('out/c16-service-implementation-backlog.json').read_text())
+          expected = {
+              'ambiguous-route': 9,
+              'bootstrap-owned': 5,
+              'c15-empty-baseline': 154,
+              'complex-state': 102,
+              'envelope-only': 1,
+              'large-shape': 26,
+              'shape-only-low': 76,
+              'shape-plus-base-low': 24,
+              'state-light-no-unknown': 115,
+              'unknown-cfg': 14,
+          }
+          if doc['tier_counts'] != expected:
+              raise SystemExit(f"C16 tier mismatch: {doc['tier_counts']!r}")
+          if sum(doc['tier_counts'].values()) != 526:
+              raise SystemExit('C16 route accounting mismatch')
+          print(doc['tier_counts'])
+          PY
+
+      - name: Hash output
+        run: sha256sum out/* | tee out/SHA256SUMS
+
+      - name: Upload C16 backlog
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c16-service-implementation-backlog
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
