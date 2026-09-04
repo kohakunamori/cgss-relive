@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Refine C7b direct state-consumer evidence after the first exact-specimen run.
 
-This pass consumes only the sanitized C7b JSON. It keeps the raw direct-xref
-counts unchanged, but removes direct-B self loops from promoted consumer
-relations, separates unresolved BL from unresolved tail branches, and labels
-compiler-generated consumer wrappers so later subsystem classification can use
-the enclosing feature name without pretending the wrapper itself is a feature.
+This pass consumes only the sanitized C7b JSON. It preserves all promoted direct
+reader->consumer relations from schema 1, separates unresolved BL from unresolved
+tail branches, labels compiler-generated consumer wrappers, and explicitly marks
+direct-B tail thunks that begin at the consumer method start.
+
+The first exact run showed three zero-offset B-tail thunks. They are evidence, not
+self loops: their consumer RVA equals the branch callsite RVA, while the target
+reader RVA is different. Therefore this refinement annotates them rather than
+silently deleting them.
 """
 from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -32,18 +36,21 @@ def generated_kind(name: str) -> str:
     return "regular"
 
 
-def rel_key(row: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        row.get("state_type"), row.get("reader_full_name"), row.get("reader_rva"),
-        row.get("consumer_method"), row.get("consumer_rva"), row.get("edge_kind"),
-    )
-
-
 def ep_key(endpoint: dict[str, Any]) -> tuple[Any, ...]:
     return (
         endpoint.get("route"), endpoint.get("enum"), endpoint.get("group"),
         endpoint.get("key"), endpoint.get("status"),
     )
+
+
+def zero_offset_tail_thunk(row: dict[str, Any]) -> bool:
+    if row.get("edge_kind") != "B-tail":
+        return False
+    consumer_rva = int(row.get("consumer_rva", -1))
+    reader_rva = int(row.get("reader_rva", -2))
+    if consumer_rva == reader_rva:
+        return False
+    return consumer_rva in {int(x) for x in row.get("callsite_rvas", [])}
 
 
 def main() -> int:
@@ -57,34 +64,44 @@ def main() -> int:
     if int(src.get("schema", 0)) != 1:
         raise RuntimeError(f"expected C7b schema 1, got {src.get('schema')!r}")
 
-    suppressed = []
     relations = []
+    zero_offset_tail_relations = []
     for row in src.get("relations", []):
-        if (
-            row.get("edge_kind") == "B-tail"
-            and int(row.get("consumer_rva", -1)) == int(row.get("reader_rva", -2))
-        ):
-            suppressed.append(row)
-            continue
         item = dict(row)
         item["consumer_generated_kind"] = generated_kind(str(item.get("consumer_method") or ""))
+        item["zero_offset_tail_thunk"] = zero_offset_tail_thunk(item)
+        if item["zero_offset_tail_thunk"]:
+            zero_offset_tail_relations.append(item)
         relations.append(item)
 
-    keep_keys = {rel_key(row) for row in relations}
+    relation_by_key = {
+        (
+            row.get("state_type"), row.get("reader_full_name"), row.get("reader_rva"),
+            row.get("consumer_method"), row.get("consumer_rva"), row.get("edge_kind"),
+        ): row
+        for row in relations
+    }
     state_docs = []
     endpoint_state_consumer = set()
     for state in src.get("state_types", []):
         state_type = state["state_type"]
-        readers = []
         state_relations = [row for row in relations if row.get("state_type") == state_type]
+        readers = []
         for reader in state.get("readers", []):
             r = dict(reader)
             consumers = []
             for consumer in reader.get("consumers", []):
-                if rel_key(consumer) not in keep_keys:
-                    continue
-                c = dict(consumer)
-                c["consumer_generated_kind"] = generated_kind(str(c.get("consumer_method") or ""))
+                key = (
+                    consumer.get("state_type"), consumer.get("reader_full_name"), consumer.get("reader_rva"),
+                    consumer.get("consumer_method"), consumer.get("consumer_rva"), consumer.get("edge_kind"),
+                )
+                canonical = relation_by_key.get(key)
+                if canonical is None:
+                    c = dict(consumer)
+                    c["consumer_generated_kind"] = generated_kind(str(c.get("consumer_method") or ""))
+                    c["zero_offset_tail_thunk"] = zero_offset_tail_thunk(c)
+                else:
+                    c = dict(canonical)
                 consumers.append(c)
             r["consumers"] = consumers
             readers.append(r)
@@ -129,15 +146,15 @@ def main() -> int:
         "source_schema": 1,
         "scope": "C7b refined direct state-reader consumer graph; BL high confidence, direct B tail medium, indirect BR/BLR unrecovered",
         "refinement_notes": [
-            "direct B self loops are suppressed from promoted consumer relations",
+            "zero-offset direct-B tail thunks are annotated, not deleted",
             "unresolved xrefs are separated by BL vs B-tail evidence kind",
             "compiler-generated lambda/async/iterator wrappers are explicitly labeled",
             "shared reader/caller RVAs remain ambiguous rather than guessed apart",
         ],
         "relations": relations,
         "state_types": state_docs,
-        "suppressed_self_tail_relations": suppressed,
-        "self_tail_relation_suppressed_count": len(suppressed),
+        "zero_offset_tail_relations": zero_offset_tail_relations,
+        "zero_offset_tail_relation_count": len(zero_offset_tail_relations),
         "unique_reader_consumer_relation_count": len(relations),
         "consumer_method_count": len(consumer_methods),
         "game_owned_consumer_count": len(game_consumers),
@@ -165,7 +182,7 @@ def main() -> int:
             f"- game-owned consumer methods: **{out['game_owned_consumer_count']}**",
             f"- state types with consumers: **{out['state_types_with_consumers']}**",
             f"- endpoint→state→consumer relations: **{out['endpoint_state_consumer_relation_count']}**",
-            f"- suppressed direct-B self loops: **{out['self_tail_relation_suppressed_count']}**",
+            f"- zero-offset direct-B tail thunks: **{out['zero_offset_tail_relation_count']}**",
             f"- unresolved by edge kind: `{out['unresolved_xref_edge_kind_counts']}`", "",
             "## Generated consumer wrappers", "",
         ]
@@ -176,7 +193,7 @@ def main() -> int:
         "state_type_count", "reader_method_count", "reader_xref_count",
         "unique_reader_consumer_relation_count", "consumer_method_count",
         "game_owned_consumer_count", "state_types_with_consumers",
-        "endpoint_state_consumer_relation_count", "self_tail_relation_suppressed_count",
+        "endpoint_state_consumer_relation_count", "zero_offset_tail_relation_count",
         "unresolved_xref_edge_kind_counts", "ambiguous_xref_edge_kind_counts",
         "relation_edge_kind_counts", "consumer_generated_kind_counts",
     )}, indent=2, sort_keys=True))
