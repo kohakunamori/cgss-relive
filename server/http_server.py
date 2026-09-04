@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -74,15 +75,9 @@ def make_handler(
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
-            # BaseHTTPRequestHandler's default access log includes the complete
-            # raw request line. A future API may place sensitive values in the
-            # query string, so never let that line escape to stderr. The
-            # sanitized JSONL event log is the supported runtime trace.
             return
 
         def _safe_headers(self) -> dict[str, str]:
-            # Passing the mapping into build_event is safe: build_event copies
-            # only its explicit version-header allow-list into persisted output.
             return {key: value for key, value in self.headers.items()}
 
         def _contract_candidates(self, route: str) -> list[dict[str, Any]]:
@@ -426,7 +421,7 @@ def main() -> int:
     if args.semantic_db:
         try:
             semantic_index = SemanticContractIndex(args.semantic_db)
-        except (OSError, ValueError, sqlite3.Error) as exc:  # type: ignore[name-defined]
+        except (OSError, ValueError, sqlite3.Error) as exc:
             parser.error(f"failed to load --semantic-db: {exc}")
 
     response_templates = None
