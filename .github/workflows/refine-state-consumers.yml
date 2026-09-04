@@ -50,13 +50,14 @@ jobs:
           assert d['state_type_count']==171
           assert d['reader_method_count']==2235
           assert d['reader_xref_count']==10416
-          assert d['self_tail_relation_suppressed_count']>=1
+          assert d['unique_reader_consumer_relation_count']==7522
+          assert d['zero_offset_tail_relation_count']==3, d['zero_offset_tail_relation_count']
           assert d['unresolved_xref_edge_kind_counts'].get('BL',0)==0
-          assert d['unresolved_xref_edge_kind_counts'].get('B-tail',0)>=1
+          assert d['unresolved_xref_edge_kind_counts'].get('B-tail',0)==5
           print(json.dumps({k:d[k] for k in (
             'unique_reader_consumer_relation_count','consumer_method_count','game_owned_consumer_count',
             'state_types_with_consumers','endpoint_state_consumer_relation_count',
-            'self_tail_relation_suppressed_count','unresolved_xref_edge_kind_counts',
+            'zero_offset_tail_relation_count','unresolved_xref_edge_kind_counts',
             'relation_edge_kind_counts','consumer_generated_kind_counts')}, indent=2))
           PY
 
