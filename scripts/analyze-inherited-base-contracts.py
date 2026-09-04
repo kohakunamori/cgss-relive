@@ -3,7 +3,7 @@
 
 C11 direct-xref evidence cannot see a virtual method call when a concrete task
 inherits a base ``Parse`` implementation without emitting a native callsite to
-that method.  This analyzer uses Il2CppDumper ``dump.cs`` only as a type-metadata
+that method. This analyzer uses Il2CppDumper ``dump.cs`` only as a type-metadata
 source and ``script.json`` as the concrete managed-method inventory.
 
 A residual base Parse contract is proposed for a C6-bound task only when:
@@ -28,45 +28,79 @@ from typing import Any
 
 SCHEMA = 1
 
-NAMESPACE_RE = re.compile(r"^namespace\s+([A-Za-z0-9_.]+)\s*$")
+# Il2CppDumper dump.cs normally emits ``// Namespace: Foo.Bar`` rather than a
+# syntactic C# namespace block. Keep ordinary C# namespace support as a fallback
+# because reconstructed/dummy variants may use it.
+DUMPER_NAMESPACE_RE = re.compile(r"^//\s*Namespace:\s*(.*?)\s*$")
+CS_NAMESPACE_RE = re.compile(r"^namespace\s+([A-Za-z0-9_.]+)\s*$")
 TYPE_RE = re.compile(
     r"^(?:\[[^]]+\]\s*)*(?:(?:public|private|protected|internal|abstract|sealed|static|partial|new)\s+)*"
     r"(?:class|struct)\s+([A-Za-z_][A-Za-z0-9_]*(?:`\d+)?)"
-    r"(?:<[^>{}]+>)?\s*(?::\s*([^\{]+))?\s*$"
+    r"(?:<[^>{}]+>)?\s*(?::\s*(.+?))?\s*$"
 )
 
 
 def normalize_type_token(value: str) -> str:
     value = value.strip()
-    value = re.sub(r"<.*>", "", value)
     value = value.replace("global::", "")
-    return value.strip()
+    # Strip a generic argument list while retaining the declaring type token.
+    value = re.sub(r"<.*>", "", value)
+    value = value.rstrip("{").strip()
+    return value
+
+
+def _strip_dumper_trailing_comment(line: str) -> str:
+    # Type lines look like:
+    #   public class Foo : Bar // TypeDefIndex: 123
+    # Only the declaration before the comment is type metadata for our purpose.
+    if "//" in line:
+        line = line.split("//", 1)[0]
+    return line.strip()
 
 
 def parse_inheritance(path: Path) -> dict[str, str | None]:
-    """Extract best-effort full type -> direct base from Il2CppDumper dump.cs."""
+    """Extract full type -> direct base from Il2CppDumper ``dump.cs`` metadata.
+
+    Nested types are not needed for the residual Stage task families handled by
+    C12; type names are therefore keyed by the current dumper namespace plus the
+    declaration name. The parser intentionally ignores interfaces after the first
+    base token because C12 only asks for the concrete class inheritance chain.
+    """
     namespace = ""
-    pending_namespace = False
+    pending_cs_namespace = False
     inheritance: dict[str, str | None] = {}
     for raw in path.read_text(encoding="utf-8", errors="strict").splitlines():
         line = raw.strip()
-        match = NAMESPACE_RE.match(line)
-        if match:
-            namespace = match.group(1)
-            pending_namespace = True
+
+        dumper_namespace = DUMPER_NAMESPACE_RE.match(line)
+        if dumper_namespace:
+            namespace = dumper_namespace.group(1).strip()
+            pending_cs_namespace = False
             continue
-        if pending_namespace and line == "{":
-            pending_namespace = False
+
+        cs_namespace = CS_NAMESPACE_RE.match(line)
+        if cs_namespace:
+            namespace = cs_namespace.group(1)
+            pending_cs_namespace = True
             continue
-        match = TYPE_RE.match(line)
+        if pending_cs_namespace and line == "{":
+            pending_cs_namespace = False
+            continue
+
+        declaration = _strip_dumper_trailing_comment(line).rstrip("{").strip()
+        match = TYPE_RE.match(declaration)
         if not match:
             continue
+
         short_name = normalize_type_token(match.group(1))
         full_name = f"{namespace}.{short_name}" if namespace else short_name
         raw_bases = match.group(2)
         base: str | None = None
         if raw_bases:
             first = normalize_type_token(raw_bases.split(",", 1)[0])
+            # A simple unqualified class base in dump.cs resolves in the current
+            # namespace for all Stage residual task families. Qualified framework
+            # bases stay qualified and are not rewritten.
             if first and "." not in first and namespace:
                 first = f"{namespace}.{first}"
             base = first or None
@@ -242,8 +276,6 @@ def main() -> int:
         if existing is None:
             grouped[key] = row
         else:
-            # Same endpoint/task may have multiple binding evidence strings; keep the stronger-looking
-            # exact row only when all endpoint identity fields agree, otherwise fail closed.
             for field in ("route", "enum", "group", "key", "status", "task"):
                 if existing["endpoint"].get(field) != endpoint.get(field):
                     raise RuntimeError(f"endpoint identity drift for inherited relation: {key}")
