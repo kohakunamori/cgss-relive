@@ -8,12 +8,14 @@ on:
     paths:
       - server/conservative_templates.py
       - server/optional_omission_templates.py
+      - server/dead_value_templates.py
       - server/response_templates.py
       - server/template_response.py
       - scripts/prepare-runtime-response-templates.py
       - scripts/run-rooted-full-service-stack.py
       - tests/test_conservative_runtime_templates.py
       - tests/test_optional_omission_templates.py
+      - tests/test_dead_value_templates.py
       - tests/test_full_service_stack_wrapper.py
       - tests/test_template_response.py
       - .github/workflows/compile-c15-runtime-templates.yml
@@ -53,23 +55,36 @@ jobs:
           name: final-client-c9-client-semantic-db-tail-aware
           path: artifacts/c9
 
+      - name: Download fixed C27 dead-value proof
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33859000248
+          name: final-client-c27-dead-json-response-value
+          path: artifacts/c27
+
       - name: Locate and verify frozen evidence inputs
         shell: bash
         run: |
           set -euo pipefail
           C14=$(find artifacts/c14 -type f -name '*effective-runtime-contract-catalog.json' -print -quit)
           C9=$(find artifacts/c9 -type f -name '*.sqlite' -print -quit)
+          C27=$(find artifacts/c27 -type f -name 'c27-dead-json-response-value.json' -print -quit)
           test -n "$C14"
           test -n "$C9"
+          test -n "$C27"
           echo "de42e8340458c96a66dcf798bd47965638efcb082c5bbb1b37c149520a7e18b8  $C14" | sha256sum -c -
           echo "a85922db2c106de3412cac511c8183ea34559eed8f844ef5186467f76dcdd8fd  $C9" | sha256sum -c -
+          echo "e5b70bf461bd7926233971ebfc0c6604d453af50ca93b53947db0b54dc48debb  $C27" | sha256sum -c -
           echo "C14=$C14" >> "$GITHUB_ENV"
           echo "C9=$C9" >> "$GITHUB_ENV"
+          echo "C27=$C27" >> "$GITHUB_ENV"
 
       - name: Run static runtime template tests
         run: |
           python -m unittest discover -s tests -p 'test_conservative_runtime_templates.py' -v
           python -m unittest discover -s tests -p 'test_optional_omission_templates.py' -v
+          python -m unittest discover -s tests -p 'test_dead_value_templates.py' -v
           python -m unittest discover -s tests -p 'test_template_response.py' -v
           python -m unittest discover -s tests -p 'test_full_service_stack_wrapper.py' -v
 
@@ -79,6 +94,7 @@ jobs:
           python scripts/prepare-runtime-response-templates.py \
             --semantic-db "$C9" \
             --effective-runtime-catalog "$C14" \
+            --dead-value-evidence "$C27" \
             --output out/static-runtime-response-templates.json \
             | tee out/static-runtime-compile-summary.json
 
@@ -96,8 +112,8 @@ jobs:
               Path('out/static-runtime-response-templates.json'),
               semantic_index=semantic,
           )
-          if store.count != 155:
-              raise SystemExit(f'expected 155 compiled static routes, got {store.count}')
+          if store.count != 156:
+              raise SystemExit(f'expected 156 compiled static routes, got {store.count}')
           for route in ('/account_notice/accept', '/birthday/save', '/card_storage/setting'):
               template = store.get(route)
               if template is None or template.data != {}:
@@ -107,12 +123,18 @@ jobs:
               raise SystemExit('missing C18 /producer_rank/index optional-omission template')
           if 'parser-proven omission' not in (optional.evidence or ''):
               raise SystemExit('C18 provenance was not retained')
+          dead = store.get('/stream/telescope_view/send_action')
+          if dead is None or dead.endpoint_id != 414 or dead.data != {}:
+              raise SystemExit('missing C27 dead-value template')
+          if 'dead-value proof' not in (dead.evidence or ''):
+              raise SystemExit('C27 provenance was not retained')
           summary = json.loads(Path('out/static-runtime-compile-summary.json').read_text())
           expected = {
               'c15_baseline_routes': 154,
               'c18_optional_omission_routes': 1,
-              'static_baseline_routes': 155,
-              'compiled_template_routes': 155,
+              'c27_dead_value_routes': 1,
+              'static_baseline_routes': 156,
+              'compiled_template_routes': 156,
               'device_acceptance': False,
           }
           for key, value in expected.items():
@@ -127,7 +149,7 @@ jobs:
       - name: Upload compiled static runtime baseline
         uses: actions/upload-artifact@v4
         with:
-          name: final-client-static-runtime-response-templates-c15-c18
+          name: final-client-static-runtime-response-templates-c15-c18-c27
           path: out/
           if-no-files-found: error
           retention-days: 30
