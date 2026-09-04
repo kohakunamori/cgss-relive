@@ -9,6 +9,7 @@ on:
       - "client/research/**"
       - "scripts/build-research-client.ps1"
       - "scripts/install-research-client.ps1"
+      - "scripts/extract-xapk-specimen.py"
       - "scripts/run-research-trace.py"
       - ".github/workflows/research-client-static.yml"
 
@@ -18,8 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compile Python trace launcher
-        run: python -m py_compile scripts/run-research-trace.py
+      - name: Compile Python research helpers
+        run: |
+          python -m py_compile scripts/extract-xapk-specimen.py
+          python -m py_compile scripts/run-research-trace.py
 
       - name: Parse Frida JavaScript
         run: node --check client/research/frida/cgss-trace.js
