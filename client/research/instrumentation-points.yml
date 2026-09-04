@@ -1,0 +1,50 @@
+baseline:
+  id: cgss-android-11.6.3-arm64
+  package: jp.co.bandainamcoent.BNEI0242
+  version_name: 11.6.3
+  version_code: 438
+  unity: 2022.3.56f1
+  metadata_version: 31
+  libil2cpp_sha256: 2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5
+  global_metadata_sha256: 2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586
+
+# Entry-point instrumentation only. These are observation points, not semantic
+# bypass patches. Any future byte patch must additionally record expected
+# original bytes before modification.
+points:
+  - id: network.prepare_headers
+    symbol: Cute.NetworkTask.PrepareHeaders
+    rva: 0x050c9f90
+  - id: network.prepare_post_data
+    symbol: Cute.NetworkTask.PreparePostData
+    rva: 0x050cae4c
+  - id: network.create_body
+    symbol: Cute.NetworkTask.CreateBody
+    rva: 0x050cb93c
+  - id: network.add_header_session_id
+    symbol: Cute.NetworkTask.AddHeaderSessionId
+    rva: 0x050ca1c8
+  - id: network.add_header_param
+    symbol: Cute.NetworkTask.AddHeaderParam
+    rva: 0x050ca264
+  - id: network.add_header_version
+    symbol: Cute.NetworkTask.AddHeaderVersion
+    rva: 0x050ca64c
+  - id: crypto.encrypt_rj256
+    symbol: Cute.CryptAES.EncryptRJ256
+    rva: 0x050c1c9c
+  - id: crypto.decrypt_rj256
+    symbol: Cute.CryptAES.DecryptRJ256
+    rva: 0x050c2438
+  - id: boot.version_check_exec
+    symbol: Cute.Certification.VersionCheckTaskExec
+    rva: 0x050bde1c
+  - id: boot.version_check_set_parameter
+    symbol: Cute.VersionCheckTask.SetParameter
+    rva: 0x050bf6b8
+  - id: boot.setup_network_certification
+    symbol: Cute.BootNetwork.SetupNetworkCertification
+    rva: 0x050c7208
+  - id: load.parse
+    symbol: Stage.LoadTask.Parse
+    rva: 0x04850a94
