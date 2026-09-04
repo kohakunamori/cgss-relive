@@ -17,47 +17,58 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-SYNTHETIC_DUMP = """
-namespace UnityEngine.UI
+IL2CPP_DUMPER_STYLE = """
+// Namespace: UnityEngine.UI
+public class Text : MaskableGraphic
 {
-    public class Text : MaskableGraphic
-    {
-        // RVA: 0x1234 Offset: 0x1234 VA: 0x1234
-        public string get_text() { }
-        // RVA: 0x1250 Offset: 0x1250 VA: 0x1250
-        public void set_text(string value) { }
-        // RVA: 0x1270 Offset: 0x1270 VA: 0x1270
-        public void Unrelated() { }
-    }
+    // RVA: 0x1234 Offset: 0x1234 VA: 0x1234
+    public string get_text() { }
+    // RVA: 0x1250 Offset: 0x1250 VA: 0x1250
+    public void set_text(string value) { }
+    // RVA: 0x1270 Offset: 0x1270 VA: 0x1270
+    public void Unrelated() { }
 }
 
-namespace TMPro
+// Namespace: TMPro
+public abstract class TMP_Text : MaskableGraphic
 {
-    public abstract class TMP_Text : MaskableGraphic
-    {
-        // RVA: 0x2200 Offset: 0x2200 VA: 0x2200
-        public virtual string get_text() { }
-        // RVA: 0x2210 Offset: 0x2210 VA: 0x2210
-        public virtual void set_text(string value) { }
-        // RVA: 0x2220 Offset: 0x2220 VA: 0x2220
-        public void SetText(string sourceText) { }
-    }
+    // RVA: 0x2200 Offset: 0x2200 VA: 0x2200
+    public virtual string get_text() { }
+    // RVA: 0x2210 Offset: 0x2210 VA: 0x2210
+    public virtual void set_text(string value) { }
+    // RVA: 0x2220 Offset: 0x2220 VA: 0x2220
+    public void SetText(string sourceText) { }
+}
 
-    public class TMP_FontAsset : TMP_Asset
+public class TMP_FontAsset : TMP_Asset
+{
+    // RVA: 0x3300 Offset: 0x3300 VA: 0x3300
+    public List<TMP_FontAsset> get_fallbackFontAssetTable() { }
+}
+"""
+
+STANDARD_CS_STYLE = """
+namespace UnityEngine
+{
+    public class Font
     {
-        // RVA: 0x3300 Offset: 0x3300 VA: 0x3300
-        public List<TMP_FontAsset> get_fallbackFontAssetTable() { }
+        // RVA: 0x4400 Offset: 0x4400 VA: 0x4400
+        public int get_fontSize() { }
     }
 }
 """
 
 
 class AnalyzeTextRenderingMetadataTests(unittest.TestCase):
-    def test_extracts_only_targeted_interfaces(self) -> None:
+    def analyze(self, content: str):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "dump.cs"
-            path.write_text(SYNTHETIC_DUMP, encoding="utf-8")
-            report = MODULE.analyze_dump_cs(path)
+            path.write_text(content, encoding="utf-8")
+            return MODULE.analyze_dump_cs(path)
+
+    def test_extracts_il2cppdumper_namespace_comment_format(self) -> None:
+        report = self.analyze(IL2CPP_DUMPER_STYLE)
+        self.assertEqual(report["schema_version"], 2)
 
         text = report["targets"]["UnityEngine.UI.Text"]
         self.assertTrue(text["present"])
@@ -82,8 +93,16 @@ class AnalyzeTextRenderingMetadataTests(unittest.TestCase):
             font["interesting_methods"],
             [{"name": "get_fallbackFontAssetTable", "rva": "0x3300"}],
         )
-
         self.assertFalse(report["targets"]["TMPro.TextMeshProUGUI"]["present"])
+
+    def test_also_accepts_standard_csharp_namespace_blocks(self) -> None:
+        report = self.analyze(STANDARD_CS_STYLE)
+        font = report["targets"]["UnityEngine.Font"]
+        self.assertTrue(font["present"])
+        self.assertEqual(
+            font["interesting_methods"],
+            [{"name": "get_fontSize", "rva": "0x4400"}],
+        )
 
 
 if __name__ == "__main__":
