@@ -1,17 +1,17 @@
 """Local response-template injection for reconstructed non-bootstrap endpoints.
 
-Templates are deliberately data-only and stay outside the repository when they
-contain reconstructed/proprietary payload bodies.  The server supplies the common
-success envelope and encryption.  A template cannot target an ambiguous HTTP path:
-final 11.6.3 has several duplicate routes, and path-only HTTP dispatch cannot prove
-which endpoint record the client intended.
+Templates stay data-only.  The server supplies the common success envelope and
+CGSS encryption.  Final 11.6.3 endpoints do not universally use an object-shaped
+``data`` value, so templates preserve any JSON value decoded from their schema-1
+document (object, array, scalar or null).
 
-Template stores can be composed.  This allows a conservative static baseline to
-be overlaid by stronger explicit reconstructions while preserving exact endpoint
-identity.  Overrides for a route are accepted only when endpoint_id is identical.
+A template cannot target an ambiguous HTTP path.  Template stores can be
+composed so a conservative static baseline can be overlaid by stronger explicit
+reconstructions while preserving exact endpoint identity.
 """
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +26,7 @@ SCHEMA = 1
 class ResponseTemplate:
     route: str
     endpoint_id: int
-    data: Mapping[str, Any]
+    data: Any
     evidence: str | None = None
 
 
@@ -65,9 +65,9 @@ class ResponseTemplateStore:
             endpoint_id = value["endpoint_id"]
             if not isinstance(endpoint_id, int):
                 raise ValueError(f"response template {route} endpoint_id must be an integer")
-            data = value.get("data")
-            if not isinstance(data, dict):
-                raise ValueError(f"response template {route} data must be an object")
+            if "data" not in value:
+                raise ValueError(f"response template {route} must declare data")
+            data = copy.deepcopy(value["data"])
             evidence = value.get("evidence")
             if evidence is not None and not isinstance(evidence, str):
                 raise ValueError(f"response template {route} evidence must be a string")
@@ -89,7 +89,7 @@ class ResponseTemplateStore:
             parsed[route] = ResponseTemplate(
                 route=route,
                 endpoint_id=endpoint_id,
-                data=dict(data),
+                data=data,
                 evidence=evidence,
             )
         return cls(parsed)
