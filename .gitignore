@@ -24,6 +24,11 @@ il2cpp-out/
 asset-cache/
 resource-cache/
 
+# Localization generated/proprietary working data
+localization/catalogs/source/
+localization/generated/
+localization/cache/
+
 # Captures can contain credentials; only sanitized fixtures should be committed
 captures/raw/
 *.pcap

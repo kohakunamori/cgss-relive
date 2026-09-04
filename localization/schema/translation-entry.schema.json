@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cgss-relive.local/schema/translation-entry.schema.json",
+  "title": "CGSS localization translation entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "source_sha256",
+    "locale",
+    "translation",
+    "status"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "locale": {
+      "type": "string",
+      "pattern": "^[a-z]{2,3}-[A-Z]{2}$"
+    },
+    "translation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "machine",
+        "translated",
+        "reviewed",
+        "approved"
+      ]
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "integer", "number", "boolean", "null"]
+      }
+    },
+    "format_tokens": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "description": "Optional local working-copy source text. Bulk source catalogs are not intended for repository commits."
+    }
+  }
+}
