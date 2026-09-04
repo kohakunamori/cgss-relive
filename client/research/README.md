@@ -30,6 +30,15 @@ versionCode      438
 Unity            2022.3.56f1
 IL2CPP metadata  31
 
+XAPK SHA-256
+609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d
+
+base APK SHA-256
+c73fc868bcaaccb7912eddb4d6651189d52526c5df5c31ec9b12de8c06c19cee
+
+arm64 split SHA-256
+da2d09804bdc33a586e684599a42f496db4f43ceedc4359f45b89f8fc571d3c7
+
 libil2cpp.so SHA-256
 2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5
 
@@ -39,21 +48,42 @@ global-metadata.dat SHA-256
 
 Do not reuse the RVAs on another build.
 
-## Build the first research APK set
+## Prepare a research specimen
 
-Acquire the installed original package first:
+### From an installed original client
+
+Acquire the installed package:
 
 ```powershell
 ./scripts/pull-installed-apk.ps1
 ```
 
 This creates a timestamped specimen directory under `work/apk/` containing
-`manifest.json`, `base.apk`, and every installed split.
+`manifest.json`, `base.apk`, and the splits actually installed for that device.
 
-Build a research copy from that exact specimen:
+### From the frozen XAPK
+
+The repository also supports the exact frozen XAPK hash above without committing
+it to Git:
 
 ```powershell
-./scripts/build-research-client.ps1 -SpecimenDir work/apk/<timestamp>
+python ./scripts/extract-xapk-specimen.py \
+  "C:/path/to/デレステ-11.6.3.xapk" \
+  -o work/apk/frozen-11.6.3
+```
+
+By default this extracts only the base APK and arm64 split, which is the useful
+set for the arm64 research device. The helper verifies the XAPK, base, arm64
+split, `libil2cpp.so`, and `global-metadata.dat` hashes before declaring the
+specimen exact. Use `--include-armeabi-v7a` only when a 32-bit split is actually
+needed.
+
+## Build the first research APK set
+
+Build a research copy from either specimen layout:
+
+```powershell
+./scripts/build-research-client.ps1 -SpecimenDir work/apk/<specimen>
 ```
 
 The first research build deliberately makes only Android-shell changes:
@@ -63,7 +93,7 @@ android:debuggable=true
 android:usesCleartextTraffic=true
 android:networkSecurityConfig=@xml/relive_network_security_config
 trust system + user CA stores through Android Network Security Config
-re-sign base + every split with one local research key
+re-sign base + every selected split with one local research key
 ```
 
 Output is written under:
