@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""C18b: trace C17 response values into task instance fields and direct consumers.
+"""C18b: trace C17 parser values into task fields and direct consumers.
 
-C17 proves parser-side JSON shapes but intentionally does not claim that an empty
-object/collection is accepted by the task's success callback.  This pass narrows
-that gap using only exact final-client native/type evidence:
+This is a structural final-client pass. It deliberately distinguishes two
+cardinalities that must not be collapsed:
 
-1. parse Il2CppDumper ``dump.cs`` instance field offsets for C17 task types;
-2. follow the result of each exact C3 JsonData field access/conversion and record
-   stores into the parser's ``this`` object at a known task field offset;
-3. find task-owned managed methods that directly read the same instance offset;
-4. find exact ARM64 BL/B direct xrefs to those reader methods and map each xref to
-   its managed caller method.
+* route-field relations: one C17 response-field relation per endpoint/route;
+* native parser-field origins: a shared parser can back multiple routes.
 
-The output contains no native bytes, disassembly or response values.  Direct
-reader/caller relations are structural evidence only; they are not automatically
-interpreted as empty-container acceptance.
+For each unique native origin the pass follows exact C3 JsonData access results
+through optional conversions, records direct stores into known task instance
+fields from Il2CppDumper ``dump.cs``, finds task-owned methods that directly read
+those offsets, then finds exact ARM64 BL/B-tail callers of those readers.
+
+Nested JsonData accesses are handled conservatively: a conversion call preserves
+the provenance currently carried in x0 instead of unioning every C3 row that
+happens to share the same conversion RVA. This prevents a parent ``data`` access
+from being mislabelled as the scalar value of a nested child access.
+
+No response value, empty-container safety, or untouched-client acceptance is
+inferred by this pass.
 """
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_INS_BL, ARM64_INS_MOV, ARM64_INS_ORR, ARM64_OP_MEM, ARM64_OP_REG
 from elftools.elf.elffile import ELFFile
 
-SCHEMA = 1
+SCHEMA = 2
 MAX_FUNCTION_SIZE = 0x20000
 DUMPER_NAMESPACE_RE = re.compile(r"^//\s*Namespace:\s*(.*?)\s*$")
 TYPE_RE = re.compile(
@@ -44,6 +48,8 @@ FIELD_RE = re.compile(
     r"^(?:(?:public|private|protected|internal|readonly|volatile|static|const|new)\s+)+"
     r"(.+?)\s+([^\s;]+)\s*;\s*//\s*0x([0-9A-Fa-f]+)\s*$"
 )
+
+Origin = tuple[str, str, str]
 
 
 @dataclass(frozen=True)
@@ -75,10 +81,8 @@ class BinaryView:
             if seg["p_type"] != "PT_LOAD":
                 continue
             row = (
-                int(seg["p_vaddr"]),
-                int(seg["p_memsz"]),
-                int(seg["p_offset"]),
-                int(seg["p_filesz"]),
+                int(seg["p_vaddr"]), int(seg["p_memsz"]),
+                int(seg["p_offset"]), int(seg["p_filesz"]),
             )
             self.loads.append(row)
             if int(seg["p_flags"]) & 1 and row[3]:
@@ -93,13 +97,11 @@ class BinaryView:
                 rel = address - vaddr
                 if rel >= filesz:
                     return b""
-                count = min(size, filesz - rel)
                 self.stream.seek(offset + rel)
-                return self.stream.read(count)
+                return self.stream.read(min(size, filesz - rel))
         return b""
 
     def direct_branches_to(self, targets: set[int]) -> list[tuple[int, int, str]]:
-        """Return exact ARM64 BL/B xrefs whose decoded target is in ``targets``."""
         if not targets:
             return []
         out: list[tuple[int, int, str]] = []
@@ -147,9 +149,9 @@ def parse_dump_fields(path: Path, wanted_types: set[str]) -> dict[str, dict[int,
             in_fields = False
             continue
         decl = _strip_type_comment(line).rstrip("{").strip()
-        tm = TYPE_RE.match(decl)
-        if tm:
-            short = tm.group(1)
+        match = TYPE_RE.match(decl)
+        if match:
+            short = match.group(1)
             current_type = f"{namespace}.{short}" if namespace else short
             in_fields = False
             continue
@@ -160,12 +162,10 @@ def parse_dump_fields(path: Path, wanted_types: set[str]) -> dict[str, dict[int,
             in_fields = False
         if not in_fields or current_type is None:
             continue
-        fm = FIELD_RE.match(line)
-        if not fm:
+        match = FIELD_RE.match(line)
+        if not match:
             continue
-        type_name, field_name, raw_offset = fm.groups()
-        # Static fields commonly use 0x0; parser response values of interest are
-        # instance state and therefore require an object-layout offset.
+        type_name, field_name, raw_offset = match.groups()
         if " static " in f" {line.lower()} ":
             continue
         offset = int(raw_offset, 16)
@@ -196,9 +196,8 @@ def load_script(path: Path) -> tuple[dict[int, list[Method]], list[int]]:
         rva = _as_int(row.get("Address", 0))
         if rva <= 0:
             continue
-        name = str(row.get("Name") or "")
         sig = row.get("Signature")
-        by_rva[rva].append(Method(rva, name, str(sig) if sig else None))
+        by_rva[rva].append(Method(rva, str(row.get("Name") or ""), str(sig) if sig else None))
         starts.add(rva)
     for value in raw.get("Addresses", []):
         rva = _as_int(value)
@@ -225,8 +224,8 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _target_fields(c17: dict[str, Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
-    result = {}
+def _target_fields(c17: dict[str, Any]) -> dict[Origin, list[dict[str, Any]]]:
+    result: dict[Origin, list[dict[str, Any]]] = defaultdict(list)
     for route in c17.get("routes", []):
         if not isinstance(route, dict):
             continue
@@ -236,17 +235,19 @@ def _target_fields(c17: dict[str, Any]) -> dict[tuple[str, str, str], dict[str, 
             task, method, name = field.get("task"), field.get("method"), field.get("field")
             if not all(isinstance(value, str) for value in (task, method, name)):
                 continue
-            result[(task, method, name)] = {
+            result[(task, method, name)].append({
                 "route": route.get("route"),
                 "endpoint_id": route.get("endpoint_id"),
                 "route_class": route.get("route_class"),
                 "refined_shape": field.get("refined_shape"),
                 "requiredness": field.get("requiredness"),
-            }
-    return result
+            })
+    for rows in result.values():
+        rows.sort(key=lambda row: (str(row.get("route")), int(row.get("endpoint_id") or -1)))
+    return dict(result)
 
 
-def _c3_targets(c3: dict[str, Any], wanted: set[tuple[str, str, str]]) -> dict[int, list[dict[str, Any]]]:
+def _c3_targets(c3: dict[str, Any], wanted: set[Origin]) -> dict[int, list[dict[str, Any]]]:
     by_method: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in c3.get("accesses", []):
         if not isinstance(row, dict):
@@ -254,11 +255,9 @@ def _c3_targets(c3: dict[str, Any], wanted: set[tuple[str, str, str]]) -> dict[i
         key = (row.get("task"), row.get("method"), row.get("field"))
         if key not in wanted:
             continue
-        method_rva = row.get("method_rva")
-        access_rva = row.get("access_rva")
-        if not isinstance(method_rva, int) or not isinstance(access_rva, int):
-            continue
-        by_method[method_rva].append(row)
+        method_rva, access_rva = row.get("method_rva"), row.get("access_rva")
+        if isinstance(method_rva, int) and isinstance(access_rva, int):
+            by_method[method_rva].append(row)
     return dict(by_method)
 
 
@@ -312,34 +311,35 @@ def trace_parser_stores(
             continue
         end = function_end(starts, method_rva)
         insns = list(md.disasm(view.read(method_rva, end - method_rva), method_rva))
-        access_events: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        conversion_events: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        access_events: dict[int, set[Origin]] = defaultdict(set)
+        conversion_rvas: set[int] = set()
         for row in rows:
-            access_events[int(row["access_rva"])].append(row)
+            origin = (str(row["task"]), str(row["method"]), str(row["field"]))
+            access_events[int(row["access_rva"])].add(origin)
             if isinstance(row.get("conversion_rva"), int):
-                conversion_events[int(row["conversion_rva"])].append(row)
+                conversion_rvas.add(int(row["conversion_rva"]))
 
         this_regs = {"x0"}
-        value_regs: dict[str, set[tuple[str, str, str]]] = {}
+        value_regs: dict[str, set[Origin]] = {}
         for ins in insns:
+            address = int(ins.address)
             if ins.id == ARM64_INS_BL:
-                if int(ins.address) in access_events:
-                    origins = {
-                        (str(row["task"]), str(row["method"]), str(row["field"]))
-                        for row in access_events[int(ins.address)]
-                    }
-                    value_regs = {reg: origins for reg in value_regs if reg not in caller_saved}
+                if address in access_events:
+                    origins = set(access_events[address])
+                    this_regs -= caller_saved
+                    value_regs = {reg: origins0 for reg, origins0 in value_regs.items() if reg not in caller_saved}
                     value_regs["x0"] = origins
-                elif int(ins.address) in conversion_events:
-                    origins = {
-                        (str(row["task"]), str(row["method"]), str(row["field"]))
-                        for row in conversion_events[int(ins.address)]
-                    }
-                    value_regs = {reg: origins for reg in value_regs if reg not in caller_saved}
-                    value_regs["x0"] = origins
+                elif address in conversion_rvas:
+                    origins = set(value_regs.get("x0", set()))
+                    this_regs -= caller_saved
+                    value_regs = {reg: origins0 for reg, origins0 in value_regs.items() if reg not in caller_saved}
+                    if origins:
+                        value_regs["x0"] = origins
+                    else:
+                        value_regs.pop("x0", None)
                 else:
                     this_regs -= caller_saved
-                    value_regs = {reg: origins for reg, origins in value_regs.items() if reg not in caller_saved}
+                    value_regs = {reg: origins0 for reg, origins0 in value_regs.items() if reg not in caller_saved}
                 continue
 
             if ins.mnemonic.lower().startswith(("str", "stur")) and len(ins.operands) >= 2:
@@ -355,13 +355,12 @@ def trace_parser_stores(
                                 "parser_method": origin[1],
                                 "response_field": origin[2],
                                 "parser_rva": method_rva,
-                                "store_rva": int(ins.address),
+                                "store_rva": address,
                                 "task_field": layout.name,
                                 "task_field_type": layout.type_name,
                                 "task_field_offset": offset,
                             })
 
-            # Explicit alias propagation for both this and the current response value.
             before_this = set(this_regs)
             this_regs = _propagate_alias(ins, md, this_regs)
             if ins.id in {ARM64_INS_MOV, ARM64_INS_ORR} and len(ins.operands) >= 2:
@@ -390,7 +389,7 @@ def trace_parser_stores(
                 reg = norm_reg(md.reg_name(reg_id))
                 if reg and reg not in before_this:
                     value_regs.pop(reg, None)
-    # Deduplicate exact relation; multiple C3 rows can converge on the same store.
+
     unique = {
         (row["task"], row["parser_method"], row["response_field"], row["store_rva"], row["task_field_offset"]): row
         for row in stores
@@ -454,9 +453,8 @@ def map_reader_callers(
     target_to_readers: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in readers:
         target_to_readers[int(row["reader_rva"])].append(row)
-    xrefs = view.direct_branches_to(set(target_to_readers))
     out = []
-    for site, target, kind in xrefs:
+    for site, target, kind in view.direct_branches_to(set(target_to_readers)):
         index = bisect.bisect_right(starts, site) - 1
         if index < 0:
             continue
@@ -488,8 +486,8 @@ def build_report(
     readers: list[dict[str, Any]],
     callers: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    target_meta = _target_fields(c17)
-    store_by_origin: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    targets = _target_fields(c17)
+    store_by_origin: dict[Origin, list[dict[str, Any]]] = defaultdict(list)
     for row in stores:
         store_by_origin[(row["task"], row["parser_method"], row["response_field"])].append(row)
     reader_by_offset: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
@@ -501,13 +499,12 @@ def build_report(
 
     fields = []
     relation_counts = Counter()
-    for origin, meta in sorted(target_meta.items(), key=lambda item: (str(item[1]["route"]), item[0][2])):
+    for origin, metas in sorted(targets.items()):
         origin_stores = store_by_origin.get(origin, [])
-        field_readers = []
-        direct_callers = []
+        field_readers: list[dict[str, Any]] = []
+        direct_callers: list[dict[str, Any]] = []
         for store in origin_stores:
-            key = (store["task"], store["task_field_offset"])
-            for reader in reader_by_offset.get(key, []):
+            for reader in reader_by_offset.get((store["task"], store["task_field_offset"]), []):
                 field_readers.append(reader)
                 direct_callers.extend(
                     caller_by_reader.get((reader["task"], reader["task_field_offset"], reader["reader_rva"]), [])
@@ -520,36 +517,38 @@ def build_report(
             relation = "stored-reader-no-direct-caller"
         else:
             relation = "stored-reader-direct-caller"
-        relation_counts[relation] += 1
-        fields.append({
-            "route": meta["route"],
-            "endpoint_id": meta["endpoint_id"],
-            "route_class": meta["route_class"],
-            "task": origin[0],
-            "parser_method": origin[1],
-            "response_field": origin[2],
-            "refined_shape": meta["refined_shape"],
-            "requiredness": meta["requiredness"],
-            "relation_class": relation,
-            "task_field_stores": origin_stores,
-            "task_owned_readers": field_readers,
-            "direct_reader_callers": direct_callers,
-            "empty_value_promotion": "not-proven-by-c18b",
-        })
+        for meta in metas:
+            relation_counts[relation] += 1
+            fields.append({
+                "route": meta["route"],
+                "endpoint_id": meta["endpoint_id"],
+                "route_class": meta["route_class"],
+                "task": origin[0],
+                "parser_method": origin[1],
+                "response_field": origin[2],
+                "refined_shape": meta["refined_shape"],
+                "requiredness": meta["requiredness"],
+                "relation_class": relation,
+                "task_field_stores": origin_stores,
+                "task_owned_readers": field_readers,
+                "direct_reader_callers": direct_callers,
+                "empty_value_promotion": "not-proven-by-c18b",
+            })
 
     return {
         "schema": SCHEMA,
         "scope": (
             "C18b exact final-client parser-result task-field stores, task-owned readers and direct BL/B callers; "
-            "no response values or empty-container acceptance inferred"
+            "route-field relations remain distinct from shared native parser-field origins; no response values inferred"
         ),
         "source_c17_shape_only_route_count": c17.get("shape_only_route_count"),
-        "target_response_field_count": len(target_meta),
+        "target_route_field_relation_count": len(fields),
+        "unique_native_parser_field_origin_count": len(targets),
         "direct_task_field_store_count": len(stores),
         "task_owned_reader_count": len(readers),
         "direct_reader_caller_count": len(callers),
         "relation_class_counts": dict(sorted(relation_counts.items())),
-        "fields": fields,
+        "fields": sorted(fields, key=lambda row: (str(row["route"]), str(row["response_field"]), str(row["task"]))),
     }
 
 
@@ -582,12 +581,10 @@ def main() -> int:
         return 2
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({
-        "target_response_field_count": report["target_response_field_count"],
+        "target_route_field_relation_count": report["target_route_field_relation_count"],
+        "unique_native_parser_field_origin_count": report["unique_native_parser_field_origin_count"],
         "direct_task_field_store_count": report["direct_task_field_store_count"],
         "task_owned_reader_count": report["task_owned_reader_count"],
         "direct_reader_caller_count": report["direct_reader_caller_count"],
