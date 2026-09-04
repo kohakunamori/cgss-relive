@@ -20,10 +20,10 @@ at:
 2a42e89af5cee120b6a67144108f96597f2319e1
 ```
 
-Latest code commit before this handoff refresh:
+Latest code/CI commit before this handoff refresh:
 
 ```text
-d284f1714860b331512bfaad26b4f1473deb626f
+7f1fb9ed4a19aec69100e0b7eb2cee55883e0efa
 ```
 
 Always re-read the branch HEAD before writing because another agent may continue on
@@ -85,7 +85,7 @@ Core rules already adopted:
 
 ## D0/D1 work completed
 
-### Domain primitives already present before this tranche
+### Domain primitives
 
 Files:
 
@@ -111,7 +111,7 @@ Initial CI run:
 
 ### D1 semantic entities
 
-Added `server/domain/models.py`:
+`server/domain/models.py`:
 
 - `PlayerProfile`
 - `PlayerResource`
@@ -146,7 +146,7 @@ Commit:
 - `MasterDataRepository`
 - `PlayerStateRepository`
 
-`PlayerStateRepository` now exposes a transaction boundary so application/domain
+`PlayerStateRepository` exposes a transaction boundary so domain/application
 services can make multi-row mutations atomically.
 
 Commits:
@@ -190,7 +190,7 @@ Commit:
 
 ### Read-only master-data adapter
 
-`server/domain/master_data.py` now implements a configurable
+`server/domain/master_data.py` implements a configurable
 `SQLiteMasterDataRepository`.
 
 Important property: **no CGSS master table/column names are hard-coded**.
@@ -209,9 +209,8 @@ contains(kind, id)
 get(kind, id)
 ```
 
-Identifiers are validated before being used in SQL. This is infrastructure only;
-actual mappings such as `card -> <exact master table>` still require master/client
-evidence.
+Identifiers are validated before SQL use. Actual mappings such as
+`card -> <exact master table>` still require master/client evidence.
 
 Commit:
 
@@ -253,7 +252,87 @@ ce09667726a336219f8fa1b1308c83c723854026  server: add archival bootstrap and Hom
 a73d0de4f744d2e3b4584489f97bc1f887f428b3  server: export master adapter and D1 profile services
 ```
 
-### Tests and CI
+### D1 `/load/index` compatibility projection
+
+New adapter package:
+
+```text
+server/adapters/__init__.py
+server/adapters/load_index.py
+```
+
+The adapter converts:
+
+```text
+HomeStateSnapshot
+    -> final-client parser-oriented /load/index data
+```
+
+without importing wire names into `server/domain/*`.
+
+Static evidence reused from `docs/load-index-11.6.3.md`:
+
+- `cs_gacha_data_cenere` is the proven container that calls
+  `WorkCardData.AddCardData`;
+- `user_card_list` stays empty in this projection;
+- `user_unit_list.unit_slot` wire value is 1-based;
+- final units expose five `serial_id_0..4` slots;
+- Home immediately resolves a unit card through the ownership serial;
+- `user_chara_list=[]` is parser-safe and current Home startup has no proven
+  `WorkCharaData` requirement;
+- completed tutorial response remains `tutorial_flag=100` through the existing
+  parser-safe scaffold.
+
+The domain does **not** assume that string domain IDs equal client numeric IDs.
+Adapter-only bindings are explicit:
+
+```text
+CardLoadIndexBinding
+    domain user_card_id -> numeric serial_id
+    + still-unrecovered step/love/protect compatibility values
+
+UnitLoadIndexBinding
+    domain unit_id -> numeric CGSS unit_id
+```
+
+`LoadIndexProjectionPolicy` owns preservation/wire defaults such as viewer id,
+storage caps, producer rank, compatibility scalar defaults and resource-kind to
+wire-field mapping.
+
+`project_home_snapshot_to_load_index_data()` then maps proven semantic state:
+
+```text
+PlayerProfile.name           -> user_info.name
+PlayerProfile.producer_level -> user_info.level
+PlayerProfile.experience     -> user_info.exp
+CardOwnership.master_card_id -> cs_gacha_data_cenere[].card_id
+CardOwnership.experience     -> cs_gacha_data_cenere[].exp
+CardOwnership.skill_level    -> cs_gacha_data_cenere[].skill_level
+Unit.slot                    -> unit_slot = slot + 1
+UnitMember.position          -> serial_id_{position}
+```
+
+while requiring explicit bindings for client numeric ownership/unit identities and
+unresolved card state.
+
+Commits:
+
+```text
+0f2641dd7159fd42d033cdf054e9b0f7656b98ac  server: add compatibility adapter package
+55695db0cead281d3c3f80da2d95ade9ad49ac85  server: project domain Home state into load index DTO data
+2bb7e09b1e740d5d3a2404585161b1a8b069cc50  tests: cover domain to load index projection
+7f1fb9ed4a19aec69100e0b7eb2cee55883e0efa  ci: cover compatibility adapters with domain tests
+```
+
+Projection CI:
+
+```text
+33908421104  Test preservation domain core  success
+```
+
+This is static/unit-test success only, not client runtime acceptance.
+
+## Tests and CI
 
 Tests now include:
 
@@ -262,6 +341,7 @@ tests/test_domain_core.py
 tests/test_domain_persistence.py
 tests/test_domain_master_data.py
 tests/test_domain_services.py
+tests/test_domain_load_index_adapter.py
 ```
 
 Coverage includes:
@@ -276,7 +356,11 @@ Coverage includes:
 - deterministic bootstrap;
 - bootstrap idempotency;
 - master-reference validation and whole-bootstrap rollback;
-- missing Home/profile behavior.
+- missing Home/profile behavior;
+- domain profile/resource/card/unit projection into `/load/index`;
+- explicit client-ID binding requirements;
+- duplicate client serial rejection;
+- five-slot final Unit limit at the adapter boundary.
 
 CI workflow:
 
@@ -284,64 +368,72 @@ CI workflow:
 .github/workflows/test-domain-core.yml
 ```
 
-runs all `test_domain_*.py`.
+runs all `test_domain_*.py` and now triggers on both `server/domain/**` and
+`server/adapters/**` changes.
 
 Relevant successful runs:
 
 ```text
-33907825217  D1 persistence tranche          success
-33908108704  master adapter + profile service success
-```
-
-Test commits:
-
-```text
-a3ab6c3aa6fa2c93bcd40d483355f4cc78416c41  tests: cover D1 SQLite domain persistence
-778734f48fa8ddd8807d2a129d38ca99b6558c5c  ci: extend domain tests through D1 persistence
-30c027c2084e7a5069382e661d0f3abf20452051  tests: cover read-only master data adapter
-d284f1714860b331512bfaad26b4f1473deb626f  tests: cover archival profile bootstrap service
+33907825217  D1 persistence tranche                success
+33908108704  master adapter + profile service      success
+33908421104  domain -> /load/index adapter         success
 ```
 
 ## What is NOT yet recovered/implemented
 
-Do not mistake the working server-domain skeleton for recovered CGSS data semantics.
-Still missing:
+Do not mistake the working chain for complete CGSS server semantics. Still missing:
 
 1. exact `master.mdb` semantic mappings for card/idol/item/story/music/mission/etc.;
-2. exact mapping from `/load/index` parser fields to domain entities;
-3. exact master-ID vs user-instance-ID relations for startup/Home data;
-4. exact enum/value semantics for profile/card/unit/unlock fields;
+2. exact domain meaning of card `step`, `love`, `protect` and whether `protect`
+   should map to the current domain `locked` flag;
+3. durable policy for mapping domain `user_card_id` / `unit_id` to stable client
+   numeric IDs across restarts;
+4. exact mapping for additional `/load/index` profile/resources/unlocks beyond the
+   current Home-critical slice;
 5. distinction between startup snapshot fields and shared response deltas;
-6. CGSS adapter projection from `HomeStateSnapshot` / `ChangeSet` into 11.6.3 DTOs;
-7. evidence-backed `SetFavoriteCard` and `UpdateUnit` command mappings;
-8. runtime acceptance of the new adapter;
+6. integration of the new projection with the actual `/load/index` server handler;
+7. evidence-backed `SetFavoriteCard` and `UpdateUnit` domain commands;
+8. runtime acceptance of a response generated from domain state;
 9. actual device/UI-visible Home success.
 
-## Immediate next work — D1 adapter slice
+## Immediate next work
 
-The next implementation unit is now one explicit chain:
+The next chain is now narrower:
 
 ```text
-/load/index evidence
-    -> semantic field mapping
-    -> HomeStateSnapshot / BootstrapResult
-    -> CGSS 11.6.3 response adapter
-    -> compatibility response
+SQLite archival profile
+    -> PreservationProfileService
+    -> HomeStateSnapshot
+    -> project_home_snapshot_to_load_index_data
+    -> build/encode /load/index response
+    -> patched 11.6.3 client runtime
 ```
 
-### Evidence questions to answer first
+### Next server implementation
 
-Use existing C9/C14/Cxx artifacts and only new targeted static analysis where needed:
+1. Add an application/controller layer that wires `PreservationProfileService` to
+   the existing `/load/index` response wrapper without pushing codec/route details
+   into the domain package.
+2. Define a deterministic, persisted compatibility-ID allocator or otherwise prove
+   that numeric ownership/unit IDs belong in the domain model itself.
+3. Replace fixed starter-profile use with domain-backed projection behind an
+   explicit experimental/runtime flag first.
+4. Preserve the existing static starter template as a differential fallback until
+   device acceptance is proven.
 
-1. Which `/load/index` response values populate profile state?
-2. Which values identify owned card instances versus master-card definitions?
-3. Which values define selected/default Units?
-4. Which unlock/resource values are actually consumed before Home becomes stable?
-5. Which structures are complete snapshots and which are delta/shared update objects?
-6. Which values can safely be policy-generated when the patched client no longer
-   requires production account/auth semantics?
+### Next evidence queue
 
-Every mapping should be recorded with one of:
+Only do targeted reverse-engineering that answers one of these blockers:
+
+1. exact semantics of `step`, `love`, `protect`;
+2. whether ownership `serial_id` is the server-domain primary identity and how it is
+   generated/persisted;
+3. exact semantics of `unit_id` and slot selection across save/load;
+4. which remaining `user_info` scalars need durable domain state versus fixed
+   compatibility policy;
+5. which startup structures are snapshots versus deltas/shared updates.
+
+Every mapping must retain evidence status:
 
 ```text
 proven-static
@@ -352,7 +444,7 @@ candidate
 unresolved
 ```
 
-and relationship kind:
+and relation kind:
 
 ```text
 exact
@@ -360,42 +452,16 @@ inferred
 policy
 ```
 
-### Adapter implementation rule
-
-Do **not** put `/load/index` response keys into `server/domain/*`.
-
-Create/extend a separate compatibility/adapter layer that does:
-
-```text
-HomeStateSnapshot
-    -> endpoint-specific response DTO/projection
-    -> existing codec/transport layer
-```
-
-The domain package stays wire-independent.
-
-## Later D1 commands
-
-After the startup/Home projection is sufficiently mapped:
-
-```text
-SetFavoriteCard
-UpdateUnit
-```
-
-should be added as domain commands returning `ChangeSet`, but only after the exact
-client state/ID semantics for their corresponding routes are established.
-
 ## Agent continuation checklist
 
 1. Fetch `analysis/server-contracts-11.6.3`.
-2. Confirm HEAD; do not assume `d284f171...` is still current.
-3. Read `docs/server-domain-model-v0.md` and this file.
-4. Run/check the newest `Test preservation domain core` workflow before building on
-   domain code.
-5. Keep raw master schema mapping, domain semantics and CGSS DTO projection in
-   separate layers.
-6. Do not hard-code guessed CGSS enum/limit/value semantics into domain entities.
+2. Confirm HEAD; do not assume `7f1fb9ed...` is still current.
+3. Read `docs/server-domain-model-v0.md`, `docs/load-index-11.6.3.md` and this file.
+4. Check the newest `Test preservation domain core` workflow before building on the
+   domain/adapter code.
+5. Keep raw master schema mapping, domain semantics, CGSS DTO projection and
+   codec/HTTP handling in separate layers.
+6. Do not silently convert adapter compatibility fields into database invariants.
 7. Record each coherent tranche here with commit SHAs, CI run IDs, evidence status
    and unresolved questions.
 8. Never report static/CI success as real-device/Home success.
