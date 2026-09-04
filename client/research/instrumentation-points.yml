@@ -59,6 +59,9 @@ points:
   - id: load.parse
     symbol: Stage.LoadTask.Parse
     rva: 0x04850a94
+  - id: migration.status_check_parse
+    symbol: Stage.MigrationCheckTask.Parse
+    rva: 0x0489e680
 
 # Native UnityTLS observation points recovered from the exact libunity.so above.
 # These record the actual verifier result/failure path and must never be reused
@@ -69,6 +72,14 @@ native_points:
     module: libunity.so
     identity: default-CA verification dispatch path
     rva: 0x00bb0d98
+  - id: unitytls.x509list_append_pem
+    module: libunity.so
+    identity: PEM certificate list append implementation
+    rva: 0x00bb1808
+  - id: unitytls.default_ca_append_point
+    module: libunity.so
+    identity: default CA list is live in x25 and error state in x19 before final verification
+    rva: 0x00bb5b68
   - id: unitytls.explicit_verify_return
     module: libunity.so
     identity: instruction immediately after explicit verify call

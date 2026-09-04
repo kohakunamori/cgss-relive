@@ -12,6 +12,7 @@ on:
       - "scripts/install-research-client.ps1"
       - "scripts/extract-xapk-specimen.py"
       - "scripts/run-research-trace.py"
+      - "scripts/build-research-unitytls-script.py"
       - "scripts/apply-client-patches.py"
       - "scripts/patch-apk-native.py"
       - "scripts/build-preservation-client.ps1"
@@ -29,6 +30,7 @@ jobs:
         run: |
           python -m py_compile scripts/extract-xapk-specimen.py
           python -m py_compile scripts/run-research-trace.py
+          python -m py_compile scripts/build-research-unitytls-script.py
           python -m py_compile scripts/apply-client-patches.py
           python -m py_compile scripts/patch-apk-native.py
 
@@ -40,6 +42,7 @@ jobs:
           node --check client/research/frida/cgss-trace.js
           node --check client/research/frida/cgss-local-dns.js
           node --check client/research/frida/cgss-unitytls-trace.js
+          node --check client/research/frida/cgss-unitytls-ca-inject.js
           node --check client/research/frida/cgss-ca-store-trace.js
 
       - name: Parse PowerShell scripts
