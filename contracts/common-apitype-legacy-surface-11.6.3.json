@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "specimen": "final-11.6.3-arm64",
+  "surface": "Common.ApiType / B-group VR-login route table",
+  "classification": "orphaned-legacy-static",
+  "server_generation_default": "exclude-unless-runtime-evidence-appears",
+  "scope_note": "This is strong static orphaning evidence, not a claim that every conceivable native/inlined access is impossible.",
+  "facts": {
+    "delivered_route_count": 22,
+    "cctor_rva": 81560720,
+    "cctor_rva_hex": "0x4dc8490",
+    "apilist_typeinfo_got": 136730576,
+    "apilist_typeinfo_got_hex": "0x82657d0",
+    "exact_apilist_static_references": 2,
+    "apilist_consumer_method_count": 1,
+    "sole_apilist_consumer": "Common.ApiType$$.cctor",
+    "external_managed_declaration_consumers": 0,
+    "direct_bl_callers_of_common_apitype_ctor_cctor": 0,
+    "direct_networktask_set_type_bl_xrefs": 0
+  },
+  "observed_initializer_keys": [0, 1, 2, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
+  "route_literal_caveat": "Individual B-route string object/GOT slots have references outside Common.ApiType::.cctor, but the same string objects/slots are reused by unrelated UI/localization/final-client code. Route-literal presence alone is therefore not endpoint-consumption proof.",
+  "evidence": {
+    "common_apilist_analyzer": "scripts/analyze-common-apilist-xrefs.py",
+    "common_route_analyzer": "scripts/analyze-common-route-literal-xrefs.py",
+    "common_managed_consumer_analyzer": "scripts/discover-common-apitype-consumers.py",
+    "common_native_surface_analyzer": "scripts/analyze-common-apitype-native.py",
+    "apilist_targeted_run": 33828514304,
+    "apilist_artifact_id": 9920830216,
+    "apilist_artifact_digest": "sha256:4296745e232fd2ce1f368cd15d0955541b86fff8d51a467a154e518468ea3f43",
+    "route_targeted_run": 33828370860,
+    "route_artifact_id": 9920781236,
+    "route_artifact_digest": "sha256:33de7f209a8fa00081314d29a05798e9906bc2e23e2baab401bf336843aa9a98"
+  }
+}
