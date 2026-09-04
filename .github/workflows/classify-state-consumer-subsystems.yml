@@ -1,0 +1,90 @@
+name: Classify C8 state consumer subsystems
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/classify-state-consumer-subsystems.yml'
+      - 'scripts/classify-state-consumer-subsystems.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      C7B_REFINED_ARTIFACT_ID: '9923752401'
+      C7B_REFINED_ARTIFACT_SHA256: 'f2ca8d10106aeff0a0c5fdff1bfe0e45116e96826d047af57dce9bd3be5aba79'
+      C7B_REFINED_JSON_SHA256: '1d34656cf2b8d76e59b68a41454650eefa97b364878c09e7236349cb057728d5'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact refined C7b semantic input
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work reports
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o work/c7b-refined.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C7B_REFINED_ARTIFACT_ID}/zip"
+          echo "${C7B_REFINED_ARTIFACT_SHA256}  work/c7b-refined.zip" | sha256sum -c -
+          unzip -q work/c7b-refined.zip -d work/c7b
+          echo "${C7B_REFINED_JSON_SHA256}  work/c7b/state-consumers-11.6.3.json" | sha256sum -c -
+
+      - name: Classify subsystem evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/classify-state-consumer-subsystems.py \
+            --state-consumers work/c7b/state-consumers-11.6.3.json \
+            --output reports/state-consumer-subsystems-11.6.3.json \
+            --markdown-output reports/state-consumer-subsystems-11.6.3.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/state-consumer-subsystems-11.6.3.json'))
+          assert d['schema']==1
+          assert d['source_c7b_schema']==2
+          assert d['relation_count']==7522
+          assert d['classified_relation_count']>4000, d['classified_relation_count']
+          assert d['ambiguous_relation_count']>0
+          assert d['unknown_relation_count']>0
+          assert 0.50 < d['classification_coverage'] < 0.95, d['classification_coverage']
+          assert d['evidence_policy']['upstream_route_used_for_classification'] is False
+          for subsystem in ('home','live-result','live','story-commu','room','gacha','mission','event','card-idol'):
+              assert d['subsystem_counts'].get(subsystem,0)>0, subsystem
+          # Sanity-check known lexical evidence without declaring the whole feature graph complete.
+          home=[r for r in d['relations'] if r['consumer_method']=='Stage.Home$$CardDownloadList']
+          assert home and all(r['subsystem']['primary_subsystem']=='home' for r in home)
+          result=[r for r in d['relations'] if 'LiveResult' in r['consumer_method']]
+          assert result and any(r['subsystem']['primary_subsystem']=='live-result' for r in result)
+          print(json.dumps({k:d[k] for k in (
+            'relation_count','classified_relation_count','ambiguous_relation_count','unknown_relation_count',
+            'classification_coverage','subsystem_counts','confidence_counts',
+            'consumer_method_with_multiple_subsystems_count','endpoint_state_subsystem_relation_count')}, indent=2))
+          PY
+
+      - name: Enforce sanitized semantic-only boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C8 subsystem boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload subsystem classification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c8-state-consumer-subsystems
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
