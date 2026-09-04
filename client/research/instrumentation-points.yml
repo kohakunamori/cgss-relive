@@ -5,6 +5,16 @@ baseline:
   version_code: 438
   unity: 2022.3.56f1
   metadata_version: 31
+  xapk_sha256: 609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d
+  base_apk:
+    xapk_name: jp.co.bandainamcoent.BNEI0242.apk
+    sha256: c73fc868bcaaccb7912eddb4d6651189d52526c5df5c31ec9b12de8c06c19cee
+  arm64_split:
+    xapk_name: config.arm64_v8a.apk
+    sha256: da2d09804bdc33a586e684599a42f496db4f43ceedc4359f45b89f8fc571d3c7
+  armeabi_v7a_split:
+    xapk_name: config.armeabi_v7a.apk
+    sha256: a5b5a8dafcb35a3e30f8de74d34dd5d176aa394f81e324cebb19b1aeb1412c04
   libil2cpp_sha256: 2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5
   global_metadata_sha256: 2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586
 
