@@ -8,8 +8,7 @@ import threading
 import unittest
 
 from server import cgss_codec
-from server.application import DomainLoadIndexConfig, DomainLoadIndexController, DynamicLoadIndexData
-from server.adapters.identity_store import SQLiteCompatibilityIdentityStore
+from server.application import DomainLoadIndexConfig, SQLiteDomainLoadIndexData
 from server.domain import (
     BootstrapPolicy,
     FixedClock,
@@ -31,28 +30,34 @@ class DomainBackedHTTPTests(unittest.TestCase):
     def test_load_index_reflects_domain_mutation_between_requests(self) -> None:
         with TemporaryDirectory() as tmp:
             clock = FixedClock(datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc))
-            domain = SQLiteDomainStore.open(Path(tmp) / "domain.sqlite3", master_revision="10133800")
-            identities = SQLiteCompatibilityIdentityStore.open(Path(tmp) / "compat.sqlite3")
-            service = PreservationProfileService(
-                domain,
-                clock=clock,
-                ids=SequentialIdGenerator(),
-            )
-            controller = DomainLoadIndexController(
-                service,
-                identities,
-                clock=clock,
-                config=DomainLoadIndexConfig(
-                    player_id="archival-player",
-                    viewer_id=7,
-                    bootstrap_policy=BootstrapPolicy(
+            domain_path = Path(tmp) / "domain.sqlite3"
+            identity_path = Path(tmp) / "compat.sqlite3"
+
+            with SQLiteDomainStore.open(domain_path, master_revision="10133800") as domain:
+                service = PreservationProfileService(
+                    domain,
+                    clock=clock,
+                    ids=SequentialIdGenerator(),
+                )
+                service.bootstrap_profile(
+                    BootstrapPolicy(
                         name="Relive Producer",
                         initial_resources={"stamina": 100},
                         starter_cards=(StarterCardGrant(100001, skill_level=1),),
                     ),
+                    player_id="archival-player",
+                )
+
+            dynamic_data = SQLiteDomainLoadIndexData(
+                domain_path,
+                identity_path,
+                clock=clock,
+                master_revision="10133800",
+                config=DomainLoadIndexConfig(
+                    player_id="archival-player",
+                    viewer_id=7,
                 ),
             )
-            dynamic_data = DynamicLoadIndexData(controller)
 
             server = create_server(
                 "127.0.0.1",
@@ -97,7 +102,10 @@ class DomainBackedHTTPTests(unittest.TestCase):
             try:
                 first = request_load_index()
                 self.assertEqual(first["user_info"]["stamina"], 100)
-                domain.set_resource(PlayerResource("archival-player", "stamina", 42))
+
+                with SQLiteDomainStore.open(domain_path, master_revision="10133800") as domain:
+                    domain.set_resource(PlayerResource("archival-player", "stamina", 42))
+
                 second = request_load_index()
                 self.assertEqual(second["user_info"]["stamina"], 42)
                 self.assertEqual(
@@ -108,8 +116,6 @@ class DomainBackedHTTPTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
-                identities.close()
-                domain.close()
 
 
 if __name__ == "__main__":
