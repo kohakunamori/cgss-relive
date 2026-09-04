@@ -49,7 +49,7 @@ jobs:
           path = Path('work/final-resource/master-text-inventory.json')
           report = json.loads(path.read_text(encoding='utf-8'))
 
-          assert report['schema_version'] == 1
+          assert report['schema_version'] == 2
           assert report['quick_check'] == ['ok']
           assert report['summary']['table_count'] > 0
           assert report['summary']['text_column_count'] > 0
@@ -57,7 +57,13 @@ jobs:
 
           # The shareable report intentionally contains only schema/statistics.
           for table in report['tables']:
-              assert set(table) == {'table', 'row_count', 'text_columns'}
+              assert set(table) == {
+                  'table',
+                  'row_count',
+                  'column_count',
+                  'primary_key_columns',
+                  'text_columns',
+              }
               for column in table['text_columns']:
                   assert 'source' not in column
                   assert 'sample' not in column

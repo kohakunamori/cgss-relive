@@ -8,7 +8,7 @@ import re
 import sqlite3
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 USER_VISIBLE_HINTS = (
     "name",
@@ -43,14 +43,25 @@ INTERNAL_HINTS = (
     "texture",
     "icon",
     "model",
-    "voice",
     "sound",
     "acb",
     "awb",
+    "sprite",
+    "anim",
+    "cutt",
+    "gimmick",
+    "target",
+    "bgm",
 )
 
 JAPANESE_OR_CJK_RE = re.compile(
     r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9f]"
+)
+SCALAR_RE = re.compile(
+    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$"
+)
+DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?(?:Z|[+-]\d{2}:\d{2})?$"
 )
 
 
@@ -63,11 +74,17 @@ def has_text_affinity(declared_type: str | None) -> bool:
     return any(token in normalized for token in ("CHAR", "CLOB", "TEXT"))
 
 
+def is_scalar_or_datetime(value: str) -> bool:
+    stripped = value.strip()
+    return bool(SCALAR_RE.fullmatch(stripped) or DATETIME_RE.fullmatch(stripped))
+
+
 def classify_column(
     column_name: str,
     *,
     non_empty_count: int,
     japanese_like_count: int,
+    scalar_like_count: int,
 ) -> tuple[str, list[str]]:
     name = column_name.lower()
     reasons: list[str] = []
@@ -81,14 +98,18 @@ def classify_column(
         reasons.append(f"internal-name-hint:{internal_hint}")
     if japanese_like_count:
         reasons.append("contains-japanese-or-cjk")
+    if non_empty_count and scalar_like_count == non_empty_count:
+        reasons.append("all-values-scalar-or-datetime")
 
     if non_empty_count == 0:
         return "empty", reasons or ["no-non-empty-values"]
-    if user_hint:
-        return "user-visible-candidate", reasons
+    if scalar_like_count == non_empty_count:
+        return "internal-candidate", reasons
     if internal_hint and japanese_like_count == 0:
         return "internal-candidate", reasons
     if japanese_like_count:
+        return "user-visible-candidate", reasons
+    if user_hint:
         return "user-visible-candidate", reasons
     return "review", reasons or ["text-column-without-strong-hint"]
 
@@ -119,12 +140,20 @@ def inspect_master_text(db_path: pathlib.Path) -> dict[str, Any]:
         for table in tables:
             qtable = quote_identifier(table)
             columns = list(db.execute(f"PRAGMA table_info({qtable})"))
+            primary_key_columns = [
+                row[1]
+                for row in sorted(
+                    (row for row in columns if row[5]),
+                    key=lambda row: row[5],
+                )
+            ]
             text_columns = [
                 {
                     "name": row[1],
                     "declared_type": row[2] or "",
                     "non_empty_count": 0,
                     "japanese_like_count": 0,
+                    "scalar_like_count": 0,
                     "max_length": 0,
                 }
                 for row in columns
@@ -147,6 +176,8 @@ def inspect_master_text(db_path: pathlib.Path) -> dict[str, Any]:
                     stats["max_length"] = max(stats["max_length"], len(value))
                     if JAPANESE_OR_CJK_RE.search(value):
                         stats["japanese_like_count"] += 1
+                    if is_scalar_or_datetime(value):
+                        stats["scalar_like_count"] += 1
 
             column_reports = []
             for stats in text_columns:
@@ -154,6 +185,7 @@ def inspect_master_text(db_path: pathlib.Path) -> dict[str, Any]:
                     stats["name"],
                     non_empty_count=stats["non_empty_count"],
                     japanese_like_count=stats["japanese_like_count"],
+                    scalar_like_count=stats["scalar_like_count"],
                 )
                 column_reports.append(
                     {
@@ -167,6 +199,8 @@ def inspect_master_text(db_path: pathlib.Path) -> dict[str, Any]:
                 {
                     "table": table,
                     "row_count": row_count,
+                    "column_count": len(columns),
+                    "primary_key_columns": primary_key_columns,
                     "text_columns": column_reports,
                 }
             )
