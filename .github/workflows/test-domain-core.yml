@@ -9,6 +9,7 @@ on:
       - server/domain/**
       - server/adapters/**
       - server/application/**
+      - server/requirements.txt
       - tests/test_domain_*.py
       - .github/workflows/test-domain-core.yml
 
@@ -24,5 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install server test dependencies
+        run: python -m pip install -r server/requirements.txt
       - name: Run preservation domain, adapter and application tests
         run: python -m unittest discover -s tests -p 'test_domain_*.py' -v
