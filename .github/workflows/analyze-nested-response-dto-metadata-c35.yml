@@ -54,7 +54,7 @@ jobs:
           echo "${C33_SHA256}  $C33" | sha256sum -c -
           echo "C33=$C33" >> "$GITHUB_ENV"
 
-      - name: Prepare exact final dump and DummyDll metadata
+      - name: Prepare exact final DummyDll metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -80,24 +80,28 @@ jobs:
           import json
           from pathlib import Path
           p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
-          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=True
+          d['RequireAnyKey']=False; d['GenerateScript']=False; d['GenerateDummyDll']=True
           p.write_text(json.dumps(d,indent=2))
           PY
           DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
-          test -s work/dump/dump.cs
           DUMMY=$(find work/dump -type f -name 'Assembly-CSharp.dll' -print -quit)
           test -n "$DUMMY"
           dotnet run --project tools/DummyMetadataScanner/DummyMetadataScanner.csproj -- \
             "$DUMMY" work/dummy-type-map.json
           test -s work/dummy-type-map.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('work/dummy-type-map.json').read_text())
+          assert d['schema']==2 and d['type_count'] > 1000
+          PY
 
       - name: Recover exact nested DTO metadata
         shell: bash
         run: |
           set -euo pipefail
           python scripts/analyze-nested-response-dto-metadata-c35.py \
-            --dump-cs work/dump/dump.cs \
             --dummy-type-map work/dummy-type-map.json \
             --c33 "$C33" \
             --output reports/c35-nested-response-dto-metadata.json \
@@ -106,9 +110,10 @@ jobs:
           import json
           from pathlib import Path
           d=json.loads(Path('reports/c35-nested-response-dto-metadata.json').read_text())
-          assert d['schema']==2
+          assert d['schema']==3
           assert d['target_task_count']==4
-          assert d['identity_proof']=='DummyDll-NestedClass+four-task-TypeDefIndex-calibration'
+          assert d['identity_proof']=='DummyDll-ECMA335-NestedClass'
+          assert d['field_surface_proof']=='DummyDll-ECMA335-FieldDefinition'
           assert d['c33_task_nested_ref_count'] >= 4
           assert d['unresolved_c33_task_nested_ref_count']==0
           assert d['untouched_client_acceptance'] is False
@@ -121,7 +126,6 @@ jobs:
             assert name in candidates, name
             assert candidates[name]['field_count'] > 0, name
           print(json.dumps({
-            'dummy_typedef_to_dump_index_delta':d['dummy_typedef_to_dump_index_delta'],
             'task_nested_type_counts':d['task_nested_type_counts'],
             'c33_task_nested_refs':d['c33_task_nested_refs'],
             'response_candidate_count':d['response_candidate_count'],
@@ -146,7 +150,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-client-c35-nested-response-dto-metadata-v2
+          name: final-client-c35-nested-response-dto-metadata-v3
           path: reports/
           if-no-files-found: error
           retention-days: 30
