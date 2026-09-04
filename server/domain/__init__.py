@@ -14,6 +14,16 @@ from .core import (
     ResourceChange,
     Reward,
 )
+from .models import (
+    CardOwnership,
+    FeatureUnlock,
+    HomeStateSnapshot,
+    PlayerProfile,
+    PlayerResource,
+    Unit,
+    UnitMember,
+)
+from .persistence import SCHEMA_VERSION, SQLiteDomainStore
 from .providers import (
     Clock,
     FixedClock,
@@ -23,8 +33,10 @@ from .providers import (
     SequentialIdGenerator,
     SystemClock,
 )
+from .repositories import MasterDataRepository, PlayerStateRepository
 
 __all__ = [
+    "CardOwnership",
     "ChangeOperation",
     "ChangeSet",
     "Clock",
@@ -32,12 +44,22 @@ __all__ = [
     "Evidence",
     "EvidenceKind",
     "EvidenceStatus",
+    "FeatureUnlock",
     "FixedClock",
+    "HomeStateSnapshot",
     "IdGenerator",
+    "MasterDataRepository",
+    "PlayerProfile",
+    "PlayerResource",
+    "PlayerStateRepository",
     "RandomSource",
     "ResourceChange",
     "Reward",
+    "SCHEMA_VERSION",
+    "SQLiteDomainStore",
     "SeededRandomSource",
     "SequentialIdGenerator",
     "SystemClock",
+    "Unit",
+    "UnitMember",
 ]
