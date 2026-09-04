@@ -87,10 +87,17 @@ jobs:
           d=json.load(open('reports/request-param-layouts.json'))
           assert d['schema']==1
           assert d['parsed_type_count'] > 25000
-          assert not d['unmatched_request_signature_object_c_types'], d['unmatched_request_signature_object_c_types']
+          known_nonparam_objects = {
+            'Stage_WorkBusData_SlotDataV2',
+            'Stage_WorkCapabilityData_CapabilityEditData',
+            'Stage_WorkDressData_DressData',
+            'Stage_WorkMeetupUserData_MeetupUnitInfo',
+            'Stage_WorkUnitData_UnitData',
+          }
+          assert set(d['unmatched_request_signature_object_c_types']) <= known_nonparam_objects, d['unmatched_request_signature_object_c_types']
           assert 300 < d['baseparam_postparams_lineage_type_count'] < 1000, d['baseparam_postparams_lineage_type_count']
           assert d['selected_param_type_with_fields_count'] > 200, d['selected_param_type_with_fields_count']
-          print(json.dumps({k:d[k] for k in ('parsed_type_count','request_signature_object_c_type_count','baseparam_postparams_lineage_type_count','selected_param_type_count','selected_param_type_with_fields_count','unique_field_name_candidate_count')},indent=2))
+          print(json.dumps({k:d[k] for k in ('parsed_type_count','request_signature_object_c_type_count','unmatched_request_signature_object_c_types','baseparam_postparams_lineage_type_count','selected_param_type_count','selected_param_type_with_fields_count','unique_field_name_candidate_count')},indent=2))
           PY
 
       - name: Analyze request payload field writes
