@@ -1,0 +1,141 @@
+name: Analyze C31 FromJson result consumers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/analyze-fromjson-result-consumers-c31.py
+      - tests/test_fromjson_result_consumers_c31.py
+      - .github/workflows/analyze-fromjson-result-consumers-c31.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      C28_RUN_ID: '33865404039'
+      C28_SHA256: '3badb9e23f51607f2dd50477c960da9da3be1b49c38ddc17e58d41e93a7b3730'
+      XAPK_SHA256: '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d'
+      LIB_SHA256: '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+      META_SHA256: '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Install dependencies and run C31 unit tests
+        run: |
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python -m unittest discover -s tests -p 'test_fromjson_result_consumers_c31.py' -v
+
+      - name: Download frozen C28
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C28_RUN_ID }}
+          name: final-client-c28-tojson-result-liveness
+          path: inputs/c28
+
+      - name: Verify frozen C28
+        shell: bash
+        run: |
+          set -euo pipefail
+          C28=$(find inputs/c28 -type f -name 'c28-tojson-result-liveness.json' -print -quit)
+          test -n "$C28"
+          echo "${C28_SHA256}  $C28" | sha256sum -c -
+          echo "C28=$C28" >> "$GITHUB_ENV"
+
+      - name: Prepare exact final native maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk work/dumper work/dump reports
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo "${XAPK_SHA256}  work/final.xapk" | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo "${LIB_SHA256}  work/libil2cpp.so" | sha256sum -c -
+          echo "${META_SHA256}  work/global-metadata.dat" | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+
+      - name: Trace FromJson result objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-fromjson-result-consumers-c31.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --c28 "$C28" \
+            --output reports/c31-fromjson-result-consumers.json \
+            | tee reports/c31-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('reports/c31-fromjson-result-consumers.json').read_text())
+          assert d['schema']==1
+          assert d['route_count']==3
+          assert all(r['untouched_client_acceptance'] is False for r in d['routes'])
+          assert all(r['ui_visible_success'] is False for r in d['routes'])
+          print(json.dumps({
+            'routes':[
+              {
+                'route':r['route'],
+                'semantic_sink_count':r['semantic_sink_count'],
+                'semantic_sink_kind_counts':r['semantic_sink_kind_counts'],
+                'semantic_sinks':r['semantic_sinks'],
+              } for r in d['routes']
+            ]
+          },indent=2,sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work inputs
+          mkdir -p reports
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C31 report boundary' >&2
+            exit 1
+          fi
+          find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+
+      - name: Upload C31 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c31-fromjson-result-consumers
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
