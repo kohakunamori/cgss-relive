@@ -7,7 +7,7 @@ on:
       - analysis/server-contracts-11.6.3
     paths:
       - server/domain/**
-      - tests/test_domain_core.py
+      - tests/test_domain_*.py
       - .github/workflows/test-domain-core.yml
 
 permissions:
@@ -22,5 +22,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Run domain core tests
-        run: python -m unittest tests.test_domain_core -v
+      - name: Run preservation domain tests
+        run: python -m unittest discover -s tests -p 'test_domain_*.py' -v
