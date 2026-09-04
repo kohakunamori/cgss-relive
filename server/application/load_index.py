@@ -7,14 +7,14 @@ This layer composes three independent concerns:
 * the final 11.6.3 response projection.
 
 It intentionally does not perform HTTP/body encryption. ``server.http_server`` can
-consume ``DynamicLoadIndexData`` as a normal Mapping while the mapping refreshes
-from domain state once per response conversion.
+consume one of the Mapping facades below as ordinary ``load_index_data``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import local
 from types import MappingProxyType
 from typing import Mapping
@@ -26,7 +26,13 @@ from server.adapters.load_index import (
     UnitLoadIndexBinding,
     project_home_snapshot_to_load_index_data,
 )
-from server.domain import BootstrapPolicy, Clock, PreservationProfileService
+from server.domain import (
+    BootstrapPolicy,
+    Clock,
+    PreservationProfileService,
+    SQLiteDomainStore,
+    SequentialIdGenerator,
+)
 
 
 _DEFAULT_RESOURCE_KIND_MAP = {
@@ -75,7 +81,7 @@ class DomainLoadIndexConfig:
 
 
 class DomainLoadIndexController:
-    """Build current ``/load/index`` data from persisted preservation state."""
+    """Build current ``/load/index`` data from one repository/service instance."""
 
     def __init__(
         self,
@@ -138,21 +144,17 @@ class DomainLoadIndexController:
         return project_home_snapshot_to_load_index_data(snapshot, projection)
 
 
-class DynamicLoadIndexData(MappingABC[str, object]):
-    """Mapping facade that refreshes from ``DomainLoadIndexController`` per response.
+class _RefreshingMapping(MappingABC[str, object]):
+    """Refresh one coherent thread-local projection for each ``dict(mapping)``."""
 
-    Existing bootstrap transport calls ``dict(load_index_data)``. Python's mapping
-    conversion requests ``keys()`` and then indexes those keys. ``keys()`` refreshes
-    one thread-local snapshot, so one HTTP worker observes one coherent projection
-    while later requests see later persisted domain mutations.
-    """
-
-    def __init__(self, controller: DomainLoadIndexController) -> None:
-        self._controller = controller
+    def __init__(self) -> None:
         self._local = local()
 
+    def _build_data(self) -> dict[str, object]:
+        raise NotImplementedError
+
     def _refresh(self) -> dict[str, object]:
-        current = self._controller.build_data()
+        current = self._build_data()
         self._local.current = current
         return current
 
@@ -171,3 +173,67 @@ class DynamicLoadIndexData(MappingABC[str, object]):
 
     def __len__(self) -> int:
         return len(self._current())
+
+
+class DynamicLoadIndexData(_RefreshingMapping):
+    """Dynamic facade for a controller whose repositories are thread-safe.
+
+    This is useful in tests or single-threaded hosts. Do not pass a controller that
+    owns default thread-bound SQLite connections to ``ThreadingHTTPServer``; use
+    ``SQLiteDomainLoadIndexData`` below instead.
+    """
+
+    def __init__(self, controller: DomainLoadIndexController) -> None:
+        super().__init__()
+        self._controller = controller
+
+    def _build_data(self) -> dict[str, object]:
+        return self._controller.build_data()
+
+
+class SQLiteDomainLoadIndexData(_RefreshingMapping):
+    """Thread-safe mapping backed by short-lived SQLite repository connections.
+
+    Each response projection opens its own mutable-state and compatibility-identity
+    connections in the worker thread, builds the current snapshot, then closes both.
+    This preserves SQLite's default thread-safety contract instead of disabling
+    ``check_same_thread`` on long-lived shared connections.
+    """
+
+    def __init__(
+        self,
+        domain_path: str | Path,
+        identity_path: str | Path,
+        *,
+        clock: Clock,
+        config: DomainLoadIndexConfig,
+        master_revision: str | None = None,
+        resource_revision: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._domain_path = Path(domain_path)
+        self._identity_path = Path(identity_path)
+        self._clock = clock
+        self._config = config
+        self._master_revision = master_revision
+        self._resource_revision = resource_revision
+
+    def _build_data(self) -> dict[str, object]:
+        with SQLiteDomainStore.open(
+            self._domain_path,
+            master_revision=self._master_revision,
+            resource_revision=self._resource_revision,
+        ) as domain:
+            with SQLiteCompatibilityIdentityStore.open(self._identity_path) as identities:
+                profiles = PreservationProfileService(
+                    domain,
+                    clock=self._clock,
+                    ids=SequentialIdGenerator(),
+                )
+                controller = DomainLoadIndexController(
+                    profiles,
+                    identities,
+                    clock=self._clock,
+                    config=self._config,
+                )
+                return controller.build_data()
