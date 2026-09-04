@@ -6,8 +6,9 @@ field `Dictionary<Common.ApiType.Type,string> ApiList`.  In the exact arm64 spec
 the cctor stores through the Common.ApiType TypeInfo GOT slot at 0x82657d0.  This
 pass finds executable `ADRP page(0x82657d0)` + nearby `LDR [...,#0x7d0]` references,
 maps them to managed ScriptMethods, and emits only those bounded consumer bodies with
-call-target annotations.  The goal is to identify the VR/login URL resolver/factory
-without guessing from task names.
+call-target annotations.  It also labels calls within a small RVA window around each
+ApiList load so dictionary lookup / URL resolver paths can be separated from unrelated
+static-type initialization references without exporting broad native bodies.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ MAX_FUNCTION_SIZE = 0x20000
 MAX_CONSUMERS = 96
 MAX_INSNS_PER_CONSUMER = 2048
 MAX_WINDOW = 8
+NEARBY_CALL_DISTANCE = 0x100
 
 
 @dataclass(frozen=True)
@@ -120,8 +122,10 @@ def exact_refs(view:BinaryView)->list[dict[str,int]]:
     return refs
 
 
-def disasm_consumer(view:BinaryView,starts:list[int],method:Method,names:dict[int,str],ref_rvas:set[int])->dict[str,Any]:
+def disasm_consumer(view:BinaryView,starts:list[int],method:Method,names:dict[int,str],method_refs:list[dict[str,int]])->dict[str,Any]:
     md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN); md.detail=True; end=function_end(starts,method.address)
+    ref_rvas={value for ref in method_refs for value in (ref['adrp_rva'],ref['load_rva'])}
+    load_rvas={ref['load_rva'] for ref in method_refs}
     insns=[]; calls=[]; small_imms=[]
     for ins in md.disasm(view.read(method.address,end-method.address),method.address):
         insns.append({'rva':int(ins.address),'mnemonic':ins.mnemonic,'op_str':ins.op_str,'is_apilist_ref':int(ins.address) in ref_rvas})
@@ -133,23 +137,45 @@ def disasm_consumer(view:BinaryView,starts:list[int],method:Method,names:dict[in
             target=int(ins.operands[0].imm); calls.append({'rva':int(ins.address),'target_rva':target,'target_name':names.get(target)})
         if ins.id==ARM64_INS_RET:break
         if len(insns)>=MAX_INSNS_PER_CONSUMER:raise RuntimeError(f'consumer too large: {method.name}')
-    return {'name':method.name,'rva':method.address,'signature':method.signature,'instructions':insns,'calls':calls,'small_immediates':small_imms}
+    nearby_calls=[]
+    for call in calls:
+        nearest=min((abs(call['rva']-load) for load in load_rvas),default=1<<60)
+        if nearest<=NEARBY_CALL_DISTANCE:
+            nearby_calls.append({**call,'nearest_apilist_load_distance':nearest})
+    return {
+        'name':method.name,
+        'rva':method.address,
+        'signature':method.signature,
+        'apilist_references':method_refs,
+        'instructions':insns,
+        'calls':calls,
+        'nearby_calls':nearby_calls,
+        'small_immediates':small_imms,
+    }
 
 
 def main()->int:
     p=argparse.ArgumentParser(); p.add_argument('--lib',type=Path,required=True); p.add_argument('--script-json',type=Path,required=True); p.add_argument('--output',type=Path,required=True); args=p.parse_args()
     methods,starts,names=load_methods(args.script_json); view=BinaryView(args.lib)
     try:
-        refs=exact_refs(view); owners={}; unmapped=[]
+        refs=exact_refs(view); owners={}; owner_refs={}; unmapped=[]
         for ref in refs:
             ms=containing_methods(methods,starts,ref['load_rva'])
             if not ms:unmapped.append(ref)
-            for m in ms: owners[(m.address,m.name)]=m
+            for m in ms:
+                key=(m.address,m.name); owners[key]=m; owner_refs.setdefault(key,[]).append(ref)
         if len(owners)>MAX_CONSUMERS:raise RuntimeError(f'too many Common.ApiList consumers: {len(owners)}')
-        refset={x['adrp_rva'] for x in refs}|{x['load_rva'] for x in refs}
-        consumers=[disasm_consumer(view,starts,m,names,refset) for m in owners.values()]
+        consumers=[disasm_consumer(view,starts,m,names,owner_refs[(m.address,m.name)]) for m in owners.values()]
     finally:view.close()
-    report={'schema':SCHEMA,'typeinfo_got':TYPEINFO_GOT,'exact_reference_count':len(refs),'references':refs,'consumer_method_count':len(consumers),'consumers':consumers,'unmapped_references':unmapped}
+    report={
+        'schema':SCHEMA,
+        'typeinfo_got':TYPEINFO_GOT,
+        'exact_reference_count':len(refs),
+        'references':refs,
+        'consumer_method_count':len(consumers),
+        'consumers':consumers,
+        'unmapped_references':unmapped,
+    }
     args.output.parent.mkdir(parents=True,exist_ok=True); args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8'); return 0
 
 
