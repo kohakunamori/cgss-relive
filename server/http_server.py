@@ -23,6 +23,7 @@ from .api_registry import (
     BOOTSTRAP_HTTP_ROUTES,
     EMPTY_SUCCESS_HTTP_ROUTES,
     LOAD_INDEX,
+    MIGRATION_STATUS_CHECK_HTTP_ROUTE,
     TITLE,
     VERSION_CHECK,
     by_http_path,
@@ -34,6 +35,7 @@ from .bootstrap_core import (
     process_load_check_request,
     process_load_index_request,
     process_load_title_request,
+    process_migration_check_request,
 )
 from .load_check import FINAL_RESOURCE_VERSION
 from .minimal_profile import (
@@ -47,6 +49,7 @@ MAX_REQUEST_BODY = 8 * 1024 * 1024
 ROUTE_VERSION_CHECK = api_route(VERSION_CHECK.path)
 ROUTE_TITLE = api_route(TITLE.path)
 ROUTE_LOAD_INDEX = api_route(LOAD_INDEX.path)
+ROUTE_MIGRATION_STATUS_CHECK = MIGRATION_STATUS_CHECK_HTTP_ROUTE
 
 
 def make_handler(
@@ -163,6 +166,8 @@ def make_handler(
                     )
                 elif route == ROUTE_TITLE:
                     exchange = process_load_title_request(headers, body)
+                elif route == ROUTE_MIGRATION_STATUS_CHECK:
+                    exchange = process_migration_check_request(headers, body)
                 elif route == ROUTE_LOAD_INDEX:
                     assert load_index_data is not None
                     exchange = process_load_index_request(headers, body, data=load_index_data)

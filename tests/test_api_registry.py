@@ -32,7 +32,7 @@ class ApiRegistryTests(unittest.TestCase):
             ],
         )
 
-    def test_bootstrap_routes_are_registry_backed(self) -> None:
+    def test_verified_bootstrap_routes(self) -> None:
         self.assertEqual(
             api_registry.BOOTSTRAP_HTTP_ROUTES,
             frozenset(
@@ -42,6 +42,7 @@ class ApiRegistryTests(unittest.TestCase):
                     "/load/title",
                     "/load/index",
                     "/load/update_agreement_status",
+                    "/bnid/status_check/check",
                 }
             ),
         )

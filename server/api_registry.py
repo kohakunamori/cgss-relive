@@ -78,6 +78,11 @@ BOOTSTRAP_HTTP_ROUTES = frozenset(
 
 EMPTY_SUCCESS_HTTP_ROUTES = frozenset(route(endpoint.path) for endpoint in EMPTY_SUCCESS_ENDPOINTS)
 
+# Runtime-proven early bootstrap route outside the small embedded A-load subset.
+# Its complete ApiType key/literal identity is intentionally not guessed here.
+MIGRATION_STATUS_CHECK_HTTP_ROUTE = "/bnid/status_check/check"
+BOOTSTRAP_HTTP_ROUTES = frozenset({*BOOTSTRAP_HTTP_ROUTES, MIGRATION_STATUS_CHECK_HTTP_ROUTE})
+
 
 def _parse_entry(group_name: str, raw: Any) -> ApiEndpoint:
     if not isinstance(raw, list) or len(raw) != 4:

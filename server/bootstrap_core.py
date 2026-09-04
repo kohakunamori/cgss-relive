@@ -15,6 +15,7 @@ from .header_codec import decode_header_value
 from .load_check import FINAL_RESOURCE_VERSION, encode_load_check_response
 from .load_index import encode_load_index_response
 from .load_title import encode_load_title_response
+from .migration_check import NORMAL_TRANSITION, encode_migration_check_response
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,32 @@ def process_load_title_request(
         udid,
         sid=sid,
         servertime=servertime,
+        dynamic_key=dynamic_key,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_migration_check_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+    transition: int = NORMAL_TRANSITION,
+) -> BootstrapExchange:
+    """Decode BNID status-check and return the verified normal migration state."""
+    udid, request = decode_client_request(headers, body, route="bnid/status_check/check")
+    sid = _get_header(headers, "SID")
+    response = encode_migration_check_response(
+        udid,
+        sid=sid,
+        servertime=servertime,
+        transition=transition,
         dynamic_key=dynamic_key,
     )
     return BootstrapExchange(

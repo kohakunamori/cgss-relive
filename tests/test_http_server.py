@@ -87,6 +87,14 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
         self.assertEqual(decoded["data"], {})
 
+    def test_real_http_migration_status_exchange(self) -> None:
+        status, body = self._post_route("/bnid/status_check/check", res_ver="10133000")
+        self.assertEqual(status, 200)
+        decoded = cgss_codec.decode_body(body, self.udid)
+        self.assertEqual(decoded["data_headers"]["result_code"], 1)
+        self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
+        self.assertEqual(decoded["data"], {"transition": 0})
+
     def test_auxiliary_load_routes_return_common_success(self) -> None:
         for route in ("/load/set_cache_clear_flg", "/load/update_agreement_status"):
             with self.subTest(route=route):
