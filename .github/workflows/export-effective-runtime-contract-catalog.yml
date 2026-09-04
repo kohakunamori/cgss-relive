@@ -35,7 +35,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: 33838319342
-          name: final-client-c9-semantic-db-tail-aware
+          name: final-client-c9-client-semantic-db-tail-aware
           path: artifacts/c9
 
       - name: Download fixed C13 effective parser overlay artifact
