@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/analyze-request-response-contracts.yml'
       - 'scripts/build-request-contract-inventory.py'
+      - 'scripts/build-request-signature-schema.py'
       - 'scripts/build-response-contract-inventory.py'
 
 permissions:
@@ -68,6 +69,25 @@ jobs:
           assert d['schema']==1
           assert d['request_method_count']==402
           print(json.dumps({k:d[k] for k in ['request_task_count','request_method_count','request_tasks_bound_to_proven_endpoints','proven_endpoint_count','proven_endpoints_with_request_surface','unique_field_key_candidate_count']},indent=2))
+          PY
+
+      - name: Derive C2 request signature schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-request-signature-schema.py \
+            --request-inventory reports/request-contract-inventory.json \
+            --output reports/request-signature-schema.json \
+            --markdown-output reports/request-signature-schema.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/request-signature-schema.json'))
+          assert d['schema']==1 and d['method_count']==402
+          assert d['methods_with_explicit_parameters'] > 0
+          print(json.dumps({k:d[k] for k in [
+            'method_count','methods_with_explicit_parameters','methods_without_explicit_parameters',
+            'semantic_parameter_count','parameter_kind_counts','opaque_object_type_count'
+          ]},indent=2))
           PY
 
       - name: Build C3 response inventory
