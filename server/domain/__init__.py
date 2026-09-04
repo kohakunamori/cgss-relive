@@ -14,6 +14,7 @@ from .core import (
     ResourceChange,
     Reward,
 )
+from .master_data import MasterTableSpec, SQLiteMasterDataRepository
 from .models import (
     CardOwnership,
     FeatureUnlock,
@@ -34,8 +35,17 @@ from .providers import (
     SystemClock,
 )
 from .repositories import MasterDataRepository, PlayerStateRepository
+from .services import (
+    BootstrapPolicy,
+    BootstrapResult,
+    InitialUnlock,
+    PreservationProfileService,
+    StarterCardGrant,
+)
 
 __all__ = [
+    "BootstrapPolicy",
+    "BootstrapResult",
     "CardOwnership",
     "ChangeOperation",
     "ChangeSet",
@@ -48,17 +58,22 @@ __all__ = [
     "FixedClock",
     "HomeStateSnapshot",
     "IdGenerator",
+    "InitialUnlock",
     "MasterDataRepository",
+    "MasterTableSpec",
     "PlayerProfile",
     "PlayerResource",
     "PlayerStateRepository",
+    "PreservationProfileService",
     "RandomSource",
     "ResourceChange",
     "Reward",
     "SCHEMA_VERSION",
     "SQLiteDomainStore",
+    "SQLiteMasterDataRepository",
     "SeededRandomSource",
     "SequentialIdGenerator",
+    "StarterCardGrant",
     "SystemClock",
     "Unit",
     "UnitMember",
