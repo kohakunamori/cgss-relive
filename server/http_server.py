@@ -8,6 +8,11 @@ must use :mod:`server.safe_events`, whose schema intentionally excludes query
 strings, request bodies, account/session identifiers, and non-whitelisted
 headers. This prevents terminal transcripts from bypassing the clean-room log
 boundary even if a future client route carries sensitive query parameters.
+
+Optional C9 semantic contracts extend route recognition without manufacturing
+responses. A known non-bootstrap route returns HTTP 501 until an explicit local
+response template is supplied. Templates are data-only and are validated against
+a unique C9 endpoint record before the common CGSS success envelope is encoded.
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ from .bootstrap_core import (
     process_load_check_request,
     process_load_index_request,
     process_load_title_request,
+    process_template_request,
 )
 from .load_check import FINAL_RESOURCE_VERSION
 from .minimal_profile import (
@@ -41,7 +47,9 @@ from .minimal_profile import (
     build_minimal_load_index_data,
     build_starter_visible_load_index_data,
 )
+from .response_templates import ResponseTemplateStore
 from .safe_events import SafeEventLog, build_event
+from .semantic_contracts import SemanticContractIndex
 
 MAX_REQUEST_BODY = 8 * 1024 * 1024
 ROUTE_VERSION_CHECK = api_route(VERSION_CHECK.path)
@@ -55,12 +63,14 @@ def make_handler(
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
     accept_old_resource_version: bool = False,
+    semantic_index: SemanticContractIndex | None = None,
+    response_templates: ResponseTemplateStore | None = None,
 ) -> Type[BaseHTTPRequestHandler]:
     events = SafeEventLog(event_log) if event_log is not None else None
     api_index = api_index or {}
 
     class CGSSBootstrapHandler(BaseHTTPRequestHandler):
-        server_version = "cgss-relive/0.2"
+        server_version = "cgss-relive/0.3"
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *args: object) -> None:
@@ -75,6 +85,11 @@ def make_handler(
             # only its explicit version-header allow-list into persisted output.
             return {key: value for key, value in self.headers.items()}
 
+        def _contract_candidates(self, route: str) -> list[dict[str, Any]]:
+            if semantic_index is None:
+                return []
+            return semantic_index.safe_route_candidates(route)
+
         def _record(
             self,
             route: str,
@@ -84,6 +99,7 @@ def make_handler(
             request: Any = None,
             response: Any = None,
             error: str | None = None,
+            contract_candidates: list[dict[str, Any]] | None = None,
         ) -> None:
             if events is None:
                 return
@@ -105,6 +121,7 @@ def make_handler(
                     response=response,
                     error=error,
                     api_candidates=candidates,
+                    contract_candidates=contract_candidates,
                 )
             )
 
@@ -126,28 +143,76 @@ def make_handler(
         def do_POST(self) -> None:  # noqa: N802
             route = self.path.split("?", 1)[0]
             headers = self._safe_headers()
-            if route not in BOOTSTRAP_HTTP_ROUTES:
-                self._record(route, 404, headers=headers, error="endpoint_not_implemented")
-                self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
+            contract_candidates = self._contract_candidates(route)
+            template = response_templates.get(route) if response_templates is not None else None
+            is_bootstrap = route in BOOTSTRAP_HTTP_ROUTES
+
+            if not is_bootstrap and template is None:
+                if contract_candidates:
+                    self._record(
+                        route,
+                        501,
+                        headers=headers,
+                        error="contract_known_template_missing",
+                        contract_candidates=contract_candidates,
+                    )
+                    self._send_bytes(
+                        501,
+                        b"known final-client endpoint requires an explicit reconstructed template\n",
+                        "text/plain; charset=utf-8",
+                    )
+                else:
+                    self._record(
+                        route,
+                        404,
+                        headers=headers,
+                        error="endpoint_not_implemented",
+                        contract_candidates=contract_candidates,
+                    )
+                    self._send_bytes(404, b"not found\n", "text/plain; charset=utf-8")
                 return
             if route == ROUTE_LOAD_INDEX and load_index_data is None:
-                self._record(route, 503, headers=headers, error="load_index_profile_not_configured")
+                self._record(
+                    route,
+                    503,
+                    headers=headers,
+                    error="load_index_profile_not_configured",
+                    contract_candidates=contract_candidates,
+                )
                 self._send_bytes(503, b"load/index profile is not configured\n", "text/plain; charset=utf-8")
                 return
 
             raw_length = self.headers.get("Content-Length")
             if raw_length is None:
-                self._record(route, 411, headers=headers, error="content_length_required")
+                self._record(
+                    route,
+                    411,
+                    headers=headers,
+                    error="content_length_required",
+                    contract_candidates=contract_candidates,
+                )
                 self._send_bytes(411, b"content-length required\n", "text/plain; charset=utf-8")
                 return
             try:
                 length = int(raw_length)
             except ValueError:
-                self._record(route, 400, headers=headers, error="invalid_content_length")
+                self._record(
+                    route,
+                    400,
+                    headers=headers,
+                    error="invalid_content_length",
+                    contract_candidates=contract_candidates,
+                )
                 self._send_bytes(400, b"invalid content-length\n", "text/plain; charset=utf-8")
                 return
             if length < 0 or length > MAX_REQUEST_BODY:
-                self._record(route, 413, headers=headers, error="request_body_too_large")
+                self._record(
+                    route,
+                    413,
+                    headers=headers,
+                    error="request_body_too_large",
+                    contract_candidates=contract_candidates,
+                )
                 self._send_bytes(413, b"request body too large\n", "text/plain; charset=utf-8")
                 return
 
@@ -166,11 +231,24 @@ def make_handler(
                 elif route == ROUTE_LOAD_INDEX:
                     assert load_index_data is not None
                     exchange = process_load_index_request(headers, body, data=load_index_data)
-                else:
-                    assert route in EMPTY_SUCCESS_HTTP_ROUTES
+                elif route in EMPTY_SUCCESS_HTTP_ROUTES:
                     exchange = process_empty_success_request(headers, body, route=route)
+                else:
+                    assert template is not None
+                    exchange = process_template_request(
+                        headers,
+                        body,
+                        route=route,
+                        data=template.data,
+                    )
             except (ValueError, UnicodeError) as exc:
-                self._record(route, 400, headers=headers, error=type(exc).__name__)
+                self._record(
+                    route,
+                    400,
+                    headers=headers,
+                    error=type(exc).__name__,
+                    contract_candidates=contract_candidates,
+                )
                 message = f"invalid CGSS {route.lstrip('/')} request: {type(exc).__name__}\n".encode("ascii")
                 self._send_bytes(400, message, "text/plain; charset=utf-8")
                 return
@@ -181,6 +259,7 @@ def make_handler(
                 headers=headers,
                 request=exchange.request,
                 response=exchange.response,
+                contract_candidates=contract_candidates,
             )
             self._send_bytes(200, exchange.response_body)
 
@@ -196,6 +275,8 @@ def create_server(
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
     accept_old_resource_version: bool = False,
+    semantic_index: SemanticContractIndex | None = None,
+    response_templates: ResponseTemplateStore | None = None,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
         (host, port),
@@ -205,6 +286,8 @@ def create_server(
             event_log,
             api_index,
             accept_old_resource_version,
+            semantic_index,
+            response_templates,
         ),
     )
     server.daemon_threads = True
@@ -272,12 +355,27 @@ def main() -> int:
         type=Path,
         help="optional complete validated final_map.json used only to annotate runtime routes",
     )
+    parser.add_argument(
+        "--semantic-db",
+        type=Path,
+        help="optional sanitized C9 contracts-semantic-11.6.3.sqlite for full final-route recognition",
+    )
+    parser.add_argument(
+        "--response-templates",
+        type=Path,
+        help=(
+            "local schema-1 data-only templates for reconstructed non-bootstrap endpoints; "
+            "requires --semantic-db and must not target ambiguous C9 routes"
+        ),
+    )
     parser.add_argument("--cert", help="PEM certificate chain for HTTPS")
     parser.add_argument("--key", help="PEM private key for HTTPS")
     args = parser.parse_args()
 
     if bool(args.cert) != bool(args.key):
         parser.error("--cert and --key must be supplied together")
+    if args.response_templates and not args.semantic_db:
+        parser.error("--response-templates requires --semantic-db")
     selected_profiles = sum(
         bool(value)
         for value in (
@@ -324,6 +422,30 @@ def main() -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             parser.error(f"failed to load --api-map: {exc}")
 
+    semantic_index = None
+    if args.semantic_db:
+        try:
+            semantic_index = SemanticContractIndex(args.semantic_db)
+        except (OSError, ValueError, sqlite3.Error) as exc:  # type: ignore[name-defined]
+            parser.error(f"failed to load --semantic-db: {exc}")
+
+    response_templates = None
+    if args.response_templates:
+        assert semantic_index is not None
+        try:
+            response_templates = ResponseTemplateStore.load(
+                args.response_templates,
+                semantic_index=semantic_index,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(f"failed to load --response-templates: {exc}")
+        overlap = set(response_templates.routes) & set(BOOTSTRAP_HTTP_ROUTES)
+        if overlap:
+            parser.error(
+                "response templates may not override specialized bootstrap routes: "
+                + ", ".join(sorted(overlap))
+            )
+
     httpd = create_server(
         args.host,
         args.port,
@@ -332,6 +454,8 @@ def main() -> int:
         event_log=args.event_log,
         api_index=api_index,
         accept_old_resource_version=args.accept_old_resource_version,
+        semantic_index=semantic_index,
+        response_templates=response_templates,
     )
     scheme = "http"
     if args.cert and args.key:
@@ -350,6 +474,13 @@ def main() -> int:
         print(f"sanitized event log: {args.event_log}")
     if args.api_map:
         print(f"validated final ApiType map: {args.api_map}")
+    if semantic_index is not None:
+        print(
+            "sanitized C9 semantic routes: "
+            f"{semantic_index.endpoint_count} endpoint records / {semantic_index.unique_route_count} paths"
+        )
+    if response_templates is not None:
+        print(f"explicit reconstructed response templates: {len(response_templates.routes)}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
