@@ -2,14 +2,14 @@
 """Extract sanitized C2 request parameter object layouts from Il2CppDumper dump.cs.
 
 The SetParameter signature pass recovers semantic arguments, but many wire payloads
-are materialized into BaseParam/PostParams-derived objects. This pass parses only
+are materialized into BaseParam/PostParams-derived objects.  This pass parses only
 type metadata from dump.cs and emits field layouts for:
 
 * object types referenced directly by request-role method signatures; and
 * classes deriving from BaseParam/PostParams (including transitive subclasses).
 
 No method bodies, native bytes, specimen files, or complete dump.cs content are
-emitted. Field names remain evidence candidates for request wire keys; inheritance
+emitted.  Field names remain evidence candidates for request wire keys; inheritance
 and later serializer data-flow still decide whether a field is actually transmitted.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ TYPE_RE = re.compile(
 )
 FIELD_RE = re.compile(
     r"^\s*(?:\[[^\]]+\]\s*)*"
-    r"(?:(?:public|private|protected|internal|static|readonly|const|volatile|unsafe|new)\s+)*"
+    r"(?P<mods>(?:(?:public|private|protected|internal|static|readonly|const|volatile|unsafe|new)\s+)*)"
     r"(?P<type>[^();{}=]+?)\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_<>]*)\s*;"
     r"(?:\s*//\s*(?P<offset>0x[0-9A-Fa-f]+))?\s*$"
@@ -104,9 +104,11 @@ def parse_dump(path: Path) -> list[TypeDef]:
         if in_fields:
             fm = FIELD_RE.match(line)
             if fm:
+                modifiers = set((fm.group("mods") or "").split())
                 row: dict[str, Any] = {
                     "name": fm.group("name"),
                     "managed_type": " ".join(fm.group("type").split()),
+                    "is_static": "static" in modifiers or "const" in modifiers,
                 }
                 if fm.group("offset"):
                     row["offset"] = int(fm.group("offset"), 16)
@@ -163,54 +165,56 @@ def main() -> int:
         matches: list[TypeDef] = []
         for candidate in c_name_candidates(c_name):
             matches.extend(by_can.get(canonical(candidate), []))
-        if not matches:
-            cc = canonical(c_name)
-            matches = [t for t in types if canonical(t.full_name).endswith(cc) or cc.endswith(canonical(t.full_name))]
         unique = {m.full_name: m for m in matches}
         if unique:
             direct_matches.update(unique)
         else:
             direct_unmatched.append(c_name)
 
-    selected = set(direct_matches)
-    reason: dict[str, set[str]] = {name: {"request-signature-object"} for name in direct_matches}
+    # Follow only the exact BaseParam/PostParams inheritance graph.  Do not use
+    # fuzzy suffix matching here: broad matching can accidentally pull unrelated
+    # UI/MonoBehaviour trees into a request-wire candidate set.
+    lineage: set[str] = set()
+    lineage_names = {
+        canonical("BaseParam"), canonical("Stage.BaseParam"),
+        canonical("PostParams"), canonical("Cute.PostParams"),
+    }
     changed = True
     while changed:
         changed = False
         for t in types:
             full = t.full_name
-            if full in selected:
+            if full in lineage:
                 continue
-            base_cans = {canonical(x) for x in t.bases}
-            base_short = {canonical(x.split(".")[-1]) for x in t.bases}
-            is_param_base = bool((base_cans | base_short) & {canonical("BaseParam"), canonical("PostParams")})
-            derives_selected = any(
-                canonical(base).endswith(canonical(sel)) or canonical(sel).endswith(canonical(base))
-                for base in t.bases for sel in selected
-            )
-            is_param_base = is_param_base or any(
-                canonical(base).endswith(canonical("BaseParam")) or canonical(base).endswith(canonical("PostParams"))
-                for base in t.bases
-            )
-            if is_param_base or derives_selected:
-                selected.add(full)
-                reason.setdefault(full, set()).add(
-                    "baseparam-postparams-lineage" if is_param_base else "transitive-selected-base"
-                )
-                changed = True
+            if not any(canonical(base) in lineage_names for base in t.bases):
+                continue
+            lineage.add(full)
+            lineage_names.add(canonical(t.full_name))
+            lineage_names.add(canonical(t.name))
+            changed = True
+
+    selected = lineage | direct_matches
+    reason: dict[str, set[str]] = {}
+    for name in lineage:
+        reason.setdefault(name, set()).add("baseparam-postparams-lineage")
+    for name in direct_matches:
+        reason.setdefault(name, set()).add("request-signature-object")
 
     rows = []
     for t in sorted((x for x in types if x.full_name in selected), key=lambda x: x.full_name):
+        instance_fields = [f for f in t.fields if not f.get("is_static")]
         rows.append({
             "type": t.full_name,
             "kind": t.kind,
             "bases": t.bases,
-            "selection_reason": sorted(reason.get(t.full_name, {"transitive-selected-base"})),
+            "selection_reason": sorted(reason.get(t.full_name, set())),
             "fields": t.fields,
             "field_count": len(t.fields),
+            "instance_fields": instance_fields,
+            "instance_field_count": len(instance_fields),
         })
 
-    unique_field_names = sorted({f["name"] for r in rows for f in r["fields"]})
+    unique_field_names = sorted({f["name"] for r in rows for f in r["instance_fields"]})
     report = {
         "schema": SCHEMA,
         "scope": "sanitized request payload type metadata; field names are wire-key candidates, not serializer proof",
@@ -218,8 +222,10 @@ def main() -> int:
         "request_signature_object_c_type_count": len(direct_c_names),
         "request_signature_object_c_types": sorted(direct_c_names),
         "unmatched_request_signature_object_c_types": direct_unmatched,
+        "baseparam_postparams_lineage_type_count": len(lineage),
+        "direct_request_object_type_count": len(direct_matches),
         "selected_param_type_count": len(rows),
-        "selected_param_type_with_fields_count": sum(bool(r["fields"]) for r in rows),
+        "selected_param_type_with_fields_count": sum(bool(r["instance_fields"]) for r in rows),
         "unique_field_name_candidate_count": len(unique_field_names),
         "unique_field_name_candidates": unique_field_names,
         "types": rows,
@@ -231,17 +237,19 @@ def main() -> int:
         lines = [
             "# C2 request parameter type layouts", "",
             "Sanitized type/field metadata only. Field names are **wire-key candidates**, not yet serializer proof.", "",
-            f"- parsed dump.cs types: **{len(types)}**",
+            f"- parsed dump.cs class/struct types: **{len(types)}**",
             f"- request-signature object C types: **{len(direct_c_names)}**",
             f"- unmatched signature object C types: **{len(direct_unmatched)}**",
-            f"- selected BaseParam/PostParams/signature types: **{len(rows)}**",
-            f"- selected types with fields: **{sum(bool(r['fields']) for r in rows)}**",
-            f"- unique field-name candidates: **{len(unique_field_names)}**", "",
-            "## Highest-field-count parameter types", "",
+            f"- BaseParam/PostParams lineage types: **{len(lineage)}**",
+            f"- direct request object types: **{len(direct_matches)}**",
+            f"- selected types: **{len(rows)}**",
+            f"- selected types with instance fields: **{sum(bool(r['instance_fields']) for r in rows)}**",
+            f"- unique instance-field-name candidates: **{len(unique_field_names)}**", "",
+            "## Highest-instance-field-count parameter types", "",
         ]
-        for row in sorted(rows, key=lambda r: (-r["field_count"], r["type"]))[:120]:
-            fs = ", ".join(f"`{f['name']}:{f['managed_type']}`" for f in row["fields"][:20]) or "(no instance fields)"
-            lines.append(f"- `{row['type']}` ({row['field_count']}) — {fs}")
+        for row in sorted(rows, key=lambda r: (-r["instance_field_count"], r["type"]))[:120]:
+            fs = ", ".join(f"`{f['name']}:{f['managed_type']}`" for f in row["instance_fields"][:20]) or "(no instance fields)"
+            lines.append(f"- `{row['type']}` ({row['instance_field_count']} instance fields) — {fs}")
         if direct_unmatched:
             lines += ["", "## Unmatched request object C names", ""]
             lines.extend(f"- `{x}`" for x in direct_unmatched)
