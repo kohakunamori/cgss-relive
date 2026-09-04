@@ -2,7 +2,7 @@
 
 These classes model mutable archival state without copying CGSS wire DTO names.
 Fields are intentionally limited to semantics needed by the first Home-oriented
-implementation slice.  More fields should be added only with client/master evidence
+implementation slice. More fields should be added only with client/master evidence
 or an explicit preservation policy.
 """
 
@@ -58,7 +58,19 @@ class PlayerResource:
 
 @dataclass(frozen=True)
 class CardOwnership:
-    """One user-owned card instance referencing immutable master card data."""
+    """One user-owned card instance referencing immutable master card data.
+
+    ``star_lesson_step``, ``love`` and ``is_protected`` are final-11.6.3
+    proven-static semantics:
+
+    * the final CardData ``_step`` field is directly read by
+      ``get_starLessonStep`` and star-rank UI/gameplay consumers;
+    * ``_love`` is paired with ``GetLoveMax`` and LIVE/gift/heart consumers;
+    * ``_isProtect`` is an independent bool written by ``SetResponseProtect``.
+
+    ``favorite`` remains separate because the final client has independent
+    ``isFavorite`` state/accessors.
+    """
 
     user_card_id: str
     player_id: str
@@ -66,7 +78,9 @@ class CardOwnership:
     level: int
     experience: int
     skill_level: int
-    locked: bool
+    star_lesson_step: int
+    love: int
+    is_protected: bool
     favorite: bool
     acquired_at: datetime
 
@@ -81,6 +95,10 @@ class CardOwnership:
             raise ValueError("card experience must be non-negative")
         if self.skill_level < 0:
             raise ValueError("skill_level must be non-negative")
+        if self.star_lesson_step < 0:
+            raise ValueError("star_lesson_step must be non-negative")
+        if self.love < 0:
+            raise ValueError("love must be non-negative")
         _require_aware(self.acquired_at, "acquired_at")
 
 
