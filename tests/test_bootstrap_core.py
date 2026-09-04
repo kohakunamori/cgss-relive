@@ -76,6 +76,24 @@ class BootstrapCoreTests(unittest.TestCase):
         self.assertEqual(exchange.response["data"], {"transition": 0})
         self.assertEqual(cgss_codec.decode_body(exchange.response_body, self.udid), exchange.response)
 
+    def test_login_signup_exchange(self) -> None:
+        body = cgss_codec.encode_body(self.request, self.udid, dynamic_key=self.request_key)
+        exchange = bootstrap_core.process_login_signup_request(
+            self._headers("10133000"),
+            body,
+            route="/tool/signup_migration",
+            servertime=1_700_000_000,
+            dynamic_key=self.response_key,
+        )
+        self.assertEqual(exchange.request, self.request)
+        self.assertEqual(exchange.response["data_headers"]["result_code"], 1)
+        self.assertEqual(exchange.response["data_headers"]["sid"], "synthetic-sid")
+        self.assertEqual(exchange.response["data"], {"change_domain_enabled": False})
+        self.assertEqual(exchange.response["data_headers"]["viewer_id"], 1)
+        self.assertEqual(exchange.response["data_headers"]["user_id"], 1)
+        self.assertEqual(exchange.response["data_headers"]["udid"], self.udid)
+        self.assertEqual(cgss_codec.decode_body(exchange.response_body, self.udid), exchange.response)
+
     def test_complete_success_exchange(self) -> None:
         body = cgss_codec.encode_body(self.request, self.udid, dynamic_key=self.request_key)
         exchange = bootstrap_core.process_load_check_request(

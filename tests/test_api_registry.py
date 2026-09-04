@@ -43,6 +43,8 @@ class ApiRegistryTests(unittest.TestCase):
                     "/load/index",
                     "/load/update_agreement_status",
                     "/bnid/status_check/check",
+                    "/tool/signup",
+                    "/tool/signup_migration",
                 }
             ),
         )

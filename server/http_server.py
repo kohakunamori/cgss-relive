@@ -23,6 +23,7 @@ from .api_registry import (
     BOOTSTRAP_HTTP_ROUTES,
     EMPTY_SUCCESS_HTTP_ROUTES,
     LOAD_INDEX,
+    LOGIN_SIGNUP_HTTP_ROUTES,
     MIGRATION_STATUS_CHECK_HTTP_ROUTE,
     TITLE,
     VERSION_CHECK,
@@ -35,6 +36,7 @@ from .bootstrap_core import (
     process_load_check_request,
     process_load_index_request,
     process_load_title_request,
+    process_login_signup_request,
     process_migration_check_request,
 )
 from .load_check import FINAL_RESOURCE_VERSION
@@ -58,6 +60,8 @@ def make_handler(
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
     accept_old_resource_version: bool = False,
+    viewer_id: int = 1,
+    user_id: int = 1,
 ) -> Type[BaseHTTPRequestHandler]:
     events = SafeEventLog(event_log) if event_log is not None else None
     api_index = api_index or {}
@@ -168,6 +172,10 @@ def make_handler(
                     exchange = process_load_title_request(headers, body)
                 elif route == ROUTE_MIGRATION_STATUS_CHECK:
                     exchange = process_migration_check_request(headers, body)
+                elif route in LOGIN_SIGNUP_HTTP_ROUTES:
+                    exchange = process_login_signup_request(
+                        headers, body, route=route, viewer_id=viewer_id, user_id=user_id
+                    )
                 elif route == ROUTE_LOAD_INDEX:
                     assert load_index_data is not None
                     exchange = process_load_index_request(headers, body, data=load_index_data)
@@ -201,6 +209,8 @@ def create_server(
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
     accept_old_resource_version: bool = False,
+    viewer_id: int = 1,
+    user_id: int = 1,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
         (host, port),
@@ -210,6 +220,8 @@ def create_server(
             event_log,
             api_index,
             accept_old_resource_version,
+            viewer_id,
+            user_id,
         ),
     )
     server.daemon_threads = True
@@ -262,6 +274,7 @@ def main() -> int:
         help="use the one-card synthetic Home profile backed by final 10133800 master data",
     )
     parser.add_argument("--viewer-id", type=int, default=1, help="viewer id for a synthetic profile")
+    parser.add_argument("--user-id", type=int, default=1, help="user id for the local preservation identity")
     parser.add_argument(
         "--producer-name",
         default="Relive Producer",
@@ -337,6 +350,8 @@ def main() -> int:
         event_log=args.event_log,
         api_index=api_index,
         accept_old_resource_version=args.accept_old_resource_version,
+        viewer_id=args.viewer_id,
+        user_id=args.user_id,
     )
     scheme = "http"
     if args.cert and args.key:

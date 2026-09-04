@@ -95,6 +95,19 @@ class HTTPBootstrapServerTests(unittest.TestCase):
         self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
         self.assertEqual(decoded["data"], {"transition": 0})
 
+    def test_real_http_signup_routes(self) -> None:
+        for route in ("/tool/signup", "/tool/signup_migration"):
+            with self.subTest(route=route):
+                status, body = self._post_route(route, res_ver="10133000")
+                self.assertEqual(status, 200)
+                decoded = cgss_codec.decode_body(body, self.udid)
+                self.assertEqual(decoded["data_headers"]["result_code"], 1)
+                self.assertEqual(decoded["data_headers"]["sid"], "synthetic-sid")
+                self.assertEqual(decoded["data"], {"change_domain_enabled": False})
+                self.assertEqual(decoded["data_headers"]["viewer_id"], 1)
+                self.assertEqual(decoded["data_headers"]["user_id"], 1)
+                self.assertEqual(decoded["data_headers"]["udid"], self.udid)
+
     def test_auxiliary_load_routes_return_common_success(self) -> None:
         for route in ("/load/set_cache_clear_flg", "/load/update_agreement_status"):
             with self.subTest(route=route):

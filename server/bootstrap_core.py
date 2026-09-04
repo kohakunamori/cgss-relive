@@ -15,6 +15,7 @@ from .header_codec import decode_header_value
 from .load_check import FINAL_RESOURCE_VERSION, encode_load_check_response
 from .load_index import encode_load_index_response
 from .load_title import encode_load_title_response
+from .login_signup import encode_login_signup_response
 from .migration_check import NORMAL_TRANSITION, encode_migration_check_response
 
 
@@ -123,6 +124,40 @@ def process_migration_check_request(
         servertime=servertime,
         transition=transition,
         dynamic_key=dynamic_key,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_login_signup_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    route: str,
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+    change_domain_enabled: bool = False,
+    viewer_id: int = 1,
+    user_id: int = 1,
+) -> BootstrapExchange:
+    """Decode a final-client signup request and return the shared LoginTask contract."""
+    normalized = route.lstrip("/")
+    if normalized not in {"tool/signup", "tool/signup_migration"}:
+        raise ValueError(f"unsupported login signup route: {route}")
+    udid, request = decode_client_request(headers, body, route=normalized)
+    sid = _get_header(headers, "SID")
+    response = encode_login_signup_response(
+        udid,
+        sid=sid,
+        servertime=servertime,
+        change_domain_enabled=change_domain_enabled,
+        dynamic_key=dynamic_key,
+        viewer_id=viewer_id,
+        user_id=user_id,
     )
     return BootstrapExchange(
         udid=udid,
