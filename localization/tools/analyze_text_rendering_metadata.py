@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 TARGET_TYPES = (
     "UnityEngine.UI.Text",
@@ -39,9 +39,10 @@ INTERESTING_METHODS = {
     "set_fallbackFontAssets",
 }
 
-NAMESPACE_RE = re.compile(r"\bnamespace\s+([A-Za-z0-9_.]+)\s*\{")
+IL2CPP_NAMESPACE_RE = re.compile(r"(?m)^// Namespace:\s*([^\r\n]*)$")
+CS_NAMESPACE_RE = re.compile(r"\bnamespace\s+([A-Za-z0-9_.]+)\s*\{")
 TYPE_RE = re.compile(
-    r"(?m)^[ \t]*(?:public|internal|private|protected)?[^\n{]*\b"
+    r"(?m)^[ \t]*(?:(?:public|internal|private|protected|abstract|sealed|static|partial)\s+)*"
     r"(?:class|struct)\s+([A-Za-z_][A-Za-z0-9_`]*)[^\n{]*\s*\{"
 )
 RVA_RE = re.compile(r"// RVA:\s*(0x[0-9A-Fa-f]+)")
@@ -61,13 +62,27 @@ def matching_brace(text: str, open_index: int) -> int:
     raise ValueError(f"unclosed brace at offset {open_index}")
 
 
-def namespace_blocks(text: str) -> list[tuple[str, str]]:
-    blocks: list[tuple[str, str]] = []
-    for match in NAMESPACE_RE.finditer(text):
+def namespace_segments(text: str) -> list[tuple[str, str]]:
+    """Return namespace bodies for Il2CppDumper and ordinary C# layouts."""
+    comment_matches = list(IL2CPP_NAMESPACE_RE.finditer(text))
+    if comment_matches:
+        segments: list[tuple[str, str]] = []
+        for index, match in enumerate(comment_matches):
+            start = match.end()
+            end = (
+                comment_matches[index + 1].start()
+                if index + 1 < len(comment_matches)
+                else len(text)
+            )
+            segments.append((match.group(1).strip(), text[start:end]))
+        return segments
+
+    segments = []
+    for match in CS_NAMESPACE_RE.finditer(text):
         open_index = text.find("{", match.start())
         close_index = matching_brace(text, open_index)
-        blocks.append((match.group(1), text[open_index + 1 : close_index]))
-    return blocks
+        segments.append((match.group(1), text[open_index + 1 : close_index]))
+    return segments
 
 
 def class_blocks(namespace: str, body: str) -> list[tuple[str, str]]:
@@ -75,7 +90,7 @@ def class_blocks(namespace: str, body: str) -> list[tuple[str, str]]:
     for match in TYPE_RE.finditer(body):
         open_index = body.find("{", match.start())
         close_index = matching_brace(body, open_index)
-        full_name = f"{namespace}.{match.group(1)}"
+        full_name = f"{namespace}.{match.group(1)}" if namespace else match.group(1)
         blocks.append((full_name, body[open_index + 1 : close_index]))
     return blocks
 
@@ -98,12 +113,7 @@ def parse_methods(body: str) -> list[dict[str, Any]]:
         if name not in INTERESTING_METHODS:
             pending_rva = None
             continue
-        methods.append(
-            {
-                "name": name,
-                "rva": pending_rva,
-            }
-        )
+        methods.append({"name": name, "rva": pending_rva})
         pending_rva = None
     return methods
 
@@ -112,23 +122,19 @@ def analyze_dump_cs(path: pathlib.Path) -> dict[str, Any]:
     text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
     found: dict[str, dict[str, Any]] = {}
 
-    for namespace, namespace_body in namespace_blocks(text):
+    for namespace, namespace_body in namespace_segments(text):
         for full_name, class_body in class_blocks(namespace, namespace_body):
             if full_name not in TARGET_TYPES:
                 continue
-            methods = parse_methods(class_body)
             found[full_name] = {
                 "present": True,
-                "interesting_methods": methods,
+                "interesting_methods": parse_methods(class_body),
             }
 
     return {
         "schema_version": SCHEMA_VERSION,
         "targets": {
-            target: found.get(
-                target,
-                {"present": False, "interesting_methods": []},
-            )
+            target: found.get(target, {"present": False, "interesting_methods": []})
             for target in TARGET_TYPES
         },
     }
