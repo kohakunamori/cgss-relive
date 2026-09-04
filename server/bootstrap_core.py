@@ -15,6 +15,7 @@ from .header_codec import decode_header_value
 from .load_check import FINAL_RESOURCE_VERSION, encode_load_check_response
 from .load_index import encode_load_index_response
 from .load_title import encode_load_title_response
+from .template_response import encode_template_success_response
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,40 @@ def process_load_index_request(
     udid, request = decode_client_request(headers, body, route="load/index")
     sid = _get_header(headers, "SID")
     response = encode_load_index_response(
+        udid,
+        data,
+        sid=sid,
+        servertime=servertime,
+        dynamic_key=dynamic_key,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_template_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    route: str,
+    data: Mapping[str, Any],
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+) -> BootstrapExchange:
+    """Encode one explicitly supplied reconstructed non-bootstrap response.
+
+    The template contains only the endpoint ``data`` object.  Common success
+    headers, SID propagation and CGSS encryption are generated here so local
+    runtime experiments do not need a bespoke Python handler for every newly
+    reconstructed route.
+    """
+    clean_route = "/" + route.split("?", 1)[0].lstrip("/")
+    udid, request = decode_client_request(headers, body, route=clean_route.lstrip("/"))
+    sid = _get_header(headers, "SID")
+    response = encode_template_success_response(
         udid,
         data,
         sid=sid,
