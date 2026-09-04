@@ -36,6 +36,8 @@ def _write_semantic_db(path: Path) -> None:
             CREATE VIEW endpoint_semantics AS SELECT id AS endpoint_id, route FROM endpoints;
             INSERT INTO endpoints(id,route,enum,status,group_name,api_key)
               VALUES(1,'/safe/empty','SafeEmpty','proven-static','A',1);
+            INSERT INTO endpoints(id,route,enum,status,group_name,api_key)
+              VALUES(2,'/safe/optional','SafeOptional','proven-static','A',2);
             """
         )
         db.commit()
@@ -48,8 +50,8 @@ def _write_catalog(path: Path) -> None:
         json.dumps(
             {
                 "schema": 1,
-                "endpoint_count": 1,
-                "unique_route_count": 1,
+                "endpoint_count": 2,
+                "unique_route_count": 2,
                 "duplicate_route_count": 0,
                 "routes": [
                     {
@@ -64,7 +66,35 @@ def _write_catalog(path: Path) -> None:
                                 ],
                             }
                         ],
-                    }
+                    },
+                    {
+                        "route": "/safe/optional",
+                        "endpoints": [
+                            {
+                                "endpoint_id": 2,
+                                "concrete_response_fields": [
+                                    {
+                                        "field": "rank",
+                                        "task": "Stage.SafeOptionalTask",
+                                        "method": "Stage.SafeOptionalTask$$Parse",
+                                        "requiredness": "optional-defaulted",
+                                        "value_types": ["int"],
+                                    },
+                                    {
+                                        "field": "items",
+                                        "task": "Stage.SafeOptionalTask",
+                                        "method": "Stage.SafeOptionalTask$$Parse",
+                                        "requiredness": "optional-conditional",
+                                        "value_types": ["collection"],
+                                    },
+                                ],
+                                "exact_state_mutation_count": 0,
+                                "effective_base_parsers": [
+                                    {"response_scope": "common-envelope"}
+                                ],
+                            }
+                        ],
+                    },
                 ],
             }
         ),
@@ -73,7 +103,7 @@ def _write_catalog(path: Path) -> None:
 
 
 class FullServiceStackWrapperTests(unittest.TestCase):
-    def test_compiler_builds_c15_baseline_and_preserves_explicit_array_override(self) -> None:
+    def test_compiler_composes_c15_c18_and_preserves_explicit_array_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             semantic = root / "semantic.sqlite"
@@ -105,13 +135,18 @@ class FullServiceStackWrapperTests(unittest.TestCase):
                 explicit_templates=explicit,
                 enforce_final_counts=False,
             )
-            self.assertEqual(counts, (1, 1, 1))
+            self.assertEqual(counts, (1, 1, 1, 2))
             document = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(document["routes"]["/safe/empty"]["endpoint_id"], 1)
             self.assertEqual(document["routes"]["/safe/empty"]["data"], [{"id": 1}])
             self.assertEqual(
                 document["routes"]["/safe/empty"]["evidence"],
                 "synthetic stronger evidence",
+            )
+            self.assertEqual(document["routes"]["/safe/optional"]["data"], {})
+            self.assertIn(
+                "parser-proven omission",
+                document["routes"]["/safe/optional"]["evidence"],
             )
 
     def test_delegate_command_injects_semantics_templates_and_preserves_passthrough(self) -> None:
