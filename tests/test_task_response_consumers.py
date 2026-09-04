@@ -45,26 +45,45 @@ public class IgnoreMe // TypeDefIndex: 101
         self.assertEqual(layouts["Stage.SampleTask"][0x20].name, "count")
         self.assertNotIn(0, layouts["Stage.SampleTask"])
 
+    def _route(self, route: str, endpoint_id: int) -> dict:
+        return {
+            "route": route,
+            "endpoint_id": endpoint_id,
+            "route_class": "data-only:proven-object",
+            "fields": [
+                {
+                    "task": "Stage.SampleTask",
+                    "method": "Stage.SampleTask$$Parse",
+                    "field": "data",
+                    "refined_shape": "proven-object",
+                    "requiredness": "conditional-direct",
+                }
+            ],
+        }
+
+    def test_shared_parser_keeps_route_relations_distinct(self) -> None:
+        c17 = {
+            "schema": 1,
+            "shape_only_route_count": 2,
+            "routes": [self._route("/sample/a", 1), self._route("/sample/b", 2)],
+        }
+        targets = MODULE._target_fields(c17)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(len(next(iter(targets.values()))), 2)
+        report = MODULE.build_report(c17, [], [], [])
+        self.assertEqual(report["schema"], 2)
+        self.assertEqual(report["target_route_field_relation_count"], 2)
+        self.assertEqual(report["unique_native_parser_field_origin_count"], 1)
+        self.assertEqual(
+            report["relation_class_counts"],
+            {"no-direct-task-field-store": 2},
+        )
+
     def test_report_preserves_structural_evidence_without_promotion(self) -> None:
         c17 = {
             "schema": 1,
             "shape_only_route_count": 1,
-            "routes": [
-                {
-                    "route": "/sample",
-                    "endpoint_id": 1,
-                    "route_class": "data-only:proven-object",
-                    "fields": [
-                        {
-                            "task": "Stage.SampleTask",
-                            "method": "Stage.SampleTask$$Parse",
-                            "field": "data",
-                            "refined_shape": "proven-object",
-                            "requiredness": "conditional-direct",
-                        }
-                    ],
-                }
-            ],
+            "routes": [self._route("/sample", 1)],
         }
         stores = [
             {
@@ -100,7 +119,8 @@ public class IgnoreMe // TypeDefIndex: 101
             }
         ]
         report = MODULE.build_report(c17, stores, readers, callers)
-        self.assertEqual(report["target_response_field_count"], 1)
+        self.assertEqual(report["target_route_field_relation_count"], 1)
+        self.assertEqual(report["unique_native_parser_field_origin_count"], 1)
         self.assertEqual(report["relation_class_counts"], {"stored-reader-direct-caller": 1})
         row = report["fields"][0]
         self.assertEqual(row["relation_class"], "stored-reader-direct-caller")
