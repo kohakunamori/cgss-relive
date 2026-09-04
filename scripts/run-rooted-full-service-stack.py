@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Launch the rooted local stack with the opt-in C15 full-service baseline.
+"""Launch the rooted local stack with final-client static service baselines.
 
-This wrapper compiles C14+C9 conservative templates (plus optional stronger
-explicit templates) into a local schema-1 file and delegates to the existing
-``run-rooted-local-stack.py`` supervisor.  All unknown arguments are passed
-through unchanged, so resource/TLS/profile options remain owned by the proven
-supervisor.
+This wrapper compiles C14+C9 static templates (C15 conservative zero-field
+routes plus C18 parser-proven optional omissions), layers optional stronger
+explicit templates, and delegates to the existing ``run-rooted-local-stack.py``
+supervisor. Unknown arguments are passed through unchanged, so resource/TLS/
+profile options remain owned by the proven supervisor.
 
-C15 routes are static parser candidates, not untouched-client acceptance claims.
+All C15/C18 routes remain static evidence until accepted by the untouched client.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from server.conservative_templates import load_conservative_empty_templates  # noqa: E402
+from server.optional_omission_templates import load_optional_omission_templates  # noqa: E402
 from server.response_templates import ResponseTemplateStore  # noqa: E402
 from server.semantic_contracts import SemanticContractIndex  # noqa: E402
 
@@ -35,22 +36,28 @@ def compile_templates(
     output: Path,
     explicit_templates: Path | None = None,
     enforce_final_counts: bool = True,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     semantic = SemanticContractIndex(
         semantic_db,
         enforce_final_counts=enforce_final_counts,
     )
-    baseline = load_conservative_empty_templates(
+    c15 = load_conservative_empty_templates(
         effective_runtime_catalog,
         semantic_index=semantic,
         enforce_final_counts=enforce_final_counts,
     )
-    compiled = baseline
+    c18 = load_optional_omission_templates(
+        effective_runtime_catalog,
+        semantic_index=semantic,
+        enforce_final_counts=enforce_final_counts,
+    )
+    static_baseline = c15.merged(c18)
+    compiled = static_baseline
     explicit_count = 0
     if explicit_templates is not None:
         explicit = ResponseTemplateStore.load(explicit_templates, semantic_index=semantic)
         explicit_count = explicit.count
-        compiled = baseline.merged(explicit)
+        compiled = static_baseline.merged(explicit)
 
     routes = {}
     for route in compiled.routes:
@@ -69,7 +76,7 @@ def compile_templates(
         + "\n",
         encoding="utf-8",
     )
-    return baseline.count, explicit_count, compiled.count
+    return c15.count, c18.count, explicit_count, compiled.count
 
 
 def build_delegate_command(
@@ -91,7 +98,7 @@ def build_delegate_command(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compile C15 service baseline and launch the proven rooted local stack",
+        description="Compile static full-service baselines and launch the proven rooted local stack",
         allow_abbrev=False,
     )
     parser.add_argument("--semantic-db", type=Path, required=True)
@@ -99,12 +106,12 @@ def main() -> int:
     parser.add_argument(
         "--explicit-templates",
         type=Path,
-        help="optional stronger schema-1 endpoint templates layered over C15",
+        help="optional stronger schema-1 endpoint templates layered over static baselines",
     )
     parser.add_argument(
         "--compiled-templates-output",
         type=Path,
-        default=ROOT / "work" / "c15-runtime-response-templates.json",
+        default=ROOT / "work" / "static-runtime-response-templates.json",
     )
     args, passthrough = parser.parse_known_args()
 
@@ -121,7 +128,7 @@ def main() -> int:
         parser.error("do not pass --semantic-db/--response-templates twice through passthrough")
 
     try:
-        baseline_count, explicit_count, compiled_count = compile_templates(
+        c15_count, c18_count, explicit_count, compiled_count = compile_templates(
             semantic_db=args.semantic_db.resolve(),
             effective_runtime_catalog=args.effective_runtime_catalog.resolve(),
             output=args.compiled_templates_output.resolve(),
@@ -135,8 +142,8 @@ def main() -> int:
 
     print(
         "compiled full-service template layer: "
-        f"C15={baseline_count}, explicit={explicit_count}, effective={compiled_count}; "
-        "evidence=static/CI, device_acceptance=false"
+        f"C15={c15_count}, C18={c18_count}, explicit={explicit_count}, "
+        f"effective={compiled_count}; evidence=static/CI, device_acceptance=false"
     )
     command = build_delegate_command(
         semantic_db=args.semantic_db.resolve(),
