@@ -1,0 +1,122 @@
+name: Build C36 route-bound JsonUtility schema
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/build-route-bound-jsonutility-schema-c36.py
+      - tests/test_route_bound_jsonutility_schema_c36.py
+      - .github/workflows/build-route-bound-jsonutility-schema-c36.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      C14_RUN_ID: '33847577801'
+      C14_SHA256: 'de42e8340458c96a66dcf798bd47965638efcb082c5bbb1b37c149520a7e18b8'
+      C35_RUN_ID: '33887812234'
+      C35_SHA256: '2528ca26fe02b8819d2b7cc1a389a6b896338b66a14e573d7f0e3cea87845f33'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run C36 unit tests
+        run: python -m unittest discover -s tests -p 'test_route_bound_jsonutility_schema_c36.py' -v
+
+      - name: Download frozen C14 effective runtime contract catalog
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C14_RUN_ID }}
+          name: final-client-c14-effective-runtime-contract-catalog
+          path: inputs/c14
+
+      - name: Download frozen C35 nested DTO metadata
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C35_RUN_ID }}
+          name: final-client-c35-nested-response-dto-metadata-v3
+          path: inputs/c35
+
+      - name: Verify frozen inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          C14=$(find inputs/c14 -type f -name 'final-client-c14-effective-runtime-contract-catalog.json' -print -quit)
+          C35=$(find inputs/c35 -type f -name 'c35-nested-response-dto-metadata.json' -print -quit)
+          test -n "$C14"; test -n "$C35"
+          echo "${C14_SHA256}  $C14" | sha256sum -c -
+          echo "${C35_SHA256}  $C35" | sha256sum -c -
+          echo "C14=$C14" >> "$GITHUB_ENV"
+          echo "C35=$C35" >> "$GITHUB_ENV"
+
+      - name: Build exact route-bound recursive DTO schemas
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          python scripts/build-route-bound-jsonutility-schema-c36.py \
+            --c14 "$C14" \
+            --c35 "$C35" \
+            --output reports/c36-route-bound-jsonutility-schema.json \
+            | tee reports/c36-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('reports/c36-route-bound-jsonutility-schema.json').read_text())
+          assert d['schema']==1
+          assert d['route_count']==4
+          expected={
+            '/bus/favorite': (317, 'Stage.BusSetFavoriteTask.BusSetFavoriteResponse', 2),
+            '/concert/finish_mv_loading': (304, 'Stage.ConcertMVFinishMVLoadingTask.ResponseDataMain', 2),
+            '/concert/mv_polling': (306, 'Stage.ConcertMVPollingTask.ResponseDataMain', 8),
+            '/concert/mv_start': (303, 'Stage.ConcertMVStartTask.ResponseDataMain', 4),
+          }
+          by={r['route']:r for r in d['routes']}
+          assert set(by)==set(expected)
+          for route,(endpoint_id,root_type,field_count) in expected.items():
+            r=by[route]
+            assert r['endpoint_id']==endpoint_id
+            assert r['root_dto_type']==root_type
+            assert r['response_json_schema']['field_count']==field_count
+            assert r['empty_value_status']=='not-proven'
+            assert r['runtime_template_status']=='not-promoted'
+            assert r['untouched_client_acceptance'] is False
+            assert r['ui_visible_success'] is False
+          polling=by['/concert/mv_polling']['response_json_schema']
+          assert polling['unresolved_external_types']==['Stage.Concert.ConcertApiDefine.StampData']
+          assert d['value_semantics_inferred'] is False
+          assert d['runtime_templates_promoted']==0
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf inputs
+          mkdir -p reports
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name '*.dll' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C36 report boundary' >&2
+            exit 1
+          fi
+          find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+
+      - name: Upload C36 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c36-route-bound-jsonutility-schema
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
