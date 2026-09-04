@@ -4,10 +4,12 @@ from .load_index import (
     DomainLoadIndexConfig,
     DomainLoadIndexController,
     DynamicLoadIndexData,
+    SQLiteDomainLoadIndexData,
 )
 
 __all__ = [
     "DomainLoadIndexConfig",
     "DomainLoadIndexController",
     "DynamicLoadIndexData",
+    "SQLiteDomainLoadIndexData",
 ]
