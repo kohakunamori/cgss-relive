@@ -2,12 +2,15 @@
 """Launch the rooted local stack with final-client static service baselines.
 
 This wrapper compiles C14+C9 static templates (C15 conservative zero-field
-routes plus C18 parser-proven optional omissions), layers optional stronger
-explicit templates, and delegates to the existing ``run-rooted-local-stack.py``
+routes plus C18 parser-proven optional omissions), optionally overlays sanitized
+C27 parser-local dead-value evidence, layers optional stronger explicit
+templates, and delegates to the existing ``run-rooted-local-stack.py``
 supervisor. Unknown arguments are passed through unchanged, so resource/TLS/
 profile options remain owned by the proven supervisor.
 
-All C15/C18 routes remain static evidence until accepted by the untouched client.
+All C15/C18/C27 routes remain static evidence until accepted by the untouched
+client; C27 specifically proves only parser-local irrelevance of the concrete
+``data`` value, not business/UI correctness.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from server.conservative_templates import load_conservative_empty_templates  # noqa: E402
+from server.dead_value_templates import load_dead_value_templates  # noqa: E402
 from server.optional_omission_templates import load_optional_omission_templates  # noqa: E402
 from server.response_templates import ResponseTemplateStore  # noqa: E402
 from server.semantic_contracts import SemanticContractIndex  # noqa: E402
@@ -34,9 +38,10 @@ def compile_templates(
     semantic_db: Path,
     effective_runtime_catalog: Path,
     output: Path,
+    dead_value_evidence: Path | None = None,
     explicit_templates: Path | None = None,
     enforce_final_counts: bool = True,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     semantic = SemanticContractIndex(
         semantic_db,
         enforce_final_counts=enforce_final_counts,
@@ -51,7 +56,14 @@ def compile_templates(
         semantic_index=semantic,
         enforce_final_counts=enforce_final_counts,
     )
-    static_baseline = c15.merged(c18)
+    c27 = ResponseTemplateStore({})
+    if dead_value_evidence is not None:
+        c27 = load_dead_value_templates(
+            dead_value_evidence,
+            semantic_index=semantic,
+            enforce_final_identity=enforce_final_counts,
+        )
+    static_baseline = c15.merged(c18).merged(c27)
     compiled = static_baseline
     explicit_count = 0
     if explicit_templates is not None:
@@ -76,7 +88,7 @@ def compile_templates(
         + "\n",
         encoding="utf-8",
     )
-    return c15.count, c18.count, explicit_count, compiled.count
+    return c15.count, c18.count, c27.count, explicit_count, compiled.count
 
 
 def build_delegate_command(
@@ -104,6 +116,11 @@ def main() -> int:
     parser.add_argument("--semantic-db", type=Path, required=True)
     parser.add_argument("--effective-runtime-catalog", type=Path, required=True)
     parser.add_argument(
+        "--dead-value-evidence",
+        type=Path,
+        help="optional sanitized C27 dead-value report layered into the static baseline",
+    )
+    parser.add_argument(
         "--explicit-templates",
         type=Path,
         help="optional stronger schema-1 endpoint templates layered over static baselines",
@@ -121,6 +138,8 @@ def main() -> int:
     ):
         if not path.is_file():
             parser.error(f"{label} is missing: {path}")
+    if args.dead_value_evidence is not None and not args.dead_value_evidence.is_file():
+        parser.error(f"dead-value evidence is missing: {args.dead_value_evidence}")
     if args.explicit_templates is not None and not args.explicit_templates.is_file():
         parser.error(f"explicit templates are missing: {args.explicit_templates}")
     forbidden = {"--semantic-db", "--response-templates"}
@@ -128,10 +147,13 @@ def main() -> int:
         parser.error("do not pass --semantic-db/--response-templates twice through passthrough")
 
     try:
-        c15_count, c18_count, explicit_count, compiled_count = compile_templates(
+        c15_count, c18_count, c27_count, explicit_count, compiled_count = compile_templates(
             semantic_db=args.semantic_db.resolve(),
             effective_runtime_catalog=args.effective_runtime_catalog.resolve(),
             output=args.compiled_templates_output.resolve(),
+            dead_value_evidence=(
+                args.dead_value_evidence.resolve() if args.dead_value_evidence is not None else None
+            ),
             explicit_templates=(
                 args.explicit_templates.resolve() if args.explicit_templates is not None else None
             ),
@@ -142,7 +164,7 @@ def main() -> int:
 
     print(
         "compiled full-service template layer: "
-        f"C15={c15_count}, C18={c18_count}, explicit={explicit_count}, "
+        f"C15={c15_count}, C18={c18_count}, C27={c27_count}, explicit={explicit_count}, "
         f"effective={compiled_count}; evidence=static/CI, device_acceptance=false"
     )
     command = build_delegate_command(
