@@ -1,0 +1,117 @@
+name: Analyze C2 request parameter layouts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-request-param-layouts.yml'
+      - 'scripts/extract-request-param-layouts.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASELINE_ARTIFACT_ID: '9920654705'
+      INVENTORY_SHA256: 'c5c4106e4c4abacec4b6336433340f9e3dfa4a0d91820282c5a723f3c0abc543'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Fetch validated sanitized C0 inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline work/xapk work/dumper work/dump reports
+          curl --fail --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -o baseline.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
+          unzip -q baseline.zip -d baseline
+          echo "${INVENTORY_SHA256}  baseline/server-contract-inventory.json" | sha256sum -c -
+
+      - name: Prepare exact final dump.cs
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=False; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll | head -1)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/dump.cs
+
+      - name: Extract sanitized request parameter layouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/extract-request-param-layouts.py \
+            --dump-cs work/dump/dump.cs \
+            --inventory baseline/server-contract-inventory.json \
+            --output reports/request-param-layouts.json \
+            --markdown-output reports/request-param-layouts.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/request-param-layouts.json'))
+          assert d['schema']==1
+          assert d['parsed_type_count'] > 30000, d['parsed_type_count']
+          assert d['request_signature_object_c_type_count'] >= 30, d['request_signature_object_c_type_count']
+          assert d['selected_param_type_count'] > 100, d['selected_param_type_count']
+          assert d['selected_param_type_with_fields_count'] > 100, d['selected_param_type_with_fields_count']
+          print(json.dumps({k:d[k] for k in (
+            'parsed_type_count','request_signature_object_c_type_count',
+            'unmatched_request_signature_object_c_types','selected_param_type_count',
+            'selected_param_type_with_fields_count','unique_field_name_candidate_count'
+          )},indent=2))
+          PY
+
+      - name: Enforce sanitized boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work baseline baseline.zip
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped request-layout report boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload request parameter layouts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c2-request-param-layouts
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
