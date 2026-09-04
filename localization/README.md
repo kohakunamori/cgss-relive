@@ -15,7 +15,7 @@ See [`docs/localization-plan.md`](../docs/localization-plan.md) for architecture
 - Runtime localization must fail open to original text rather than crash the game.
 - Preservation success and localized-client success are separate acceptance targets.
 
-## Initial layout
+## Layout
 
 ```text
 localization/
@@ -27,4 +27,35 @@ localization/
   runtime/         # production localization loader/hooks (M1+)
 ```
 
-The first active work item is a non-leaking inventory of text-bearing columns in the final local `master.mdb`, followed by a reviewed field-classification map and source-catalog generator.
+## Current M0 tools
+
+### Master text inventory
+
+`tools/inventory_master_text.py` scans a local SQLite `master.mdb` and reports text-bearing tables/columns, candidate classification, counts and maximum lengths without emitting source string values.
+
+```bash
+python localization/tools/inventory_master_text.py \
+  work/final/master.mdb \
+  --output work/localization/master-text-inventory.json
+```
+
+Use the sanitized inventory to review which columns are genuinely player-visible. Do not treat the heuristic classification as authoritative.
+
+### Master source catalog
+
+After reviewing the inventory, write a field map conforming to `schema/master-field-map.schema.json`. The catalog builder exports only the explicitly selected fields and constructs stable IDs from table + primary key + column.
+
+```bash
+python localization/tools/build_master_source_catalog.py \
+  work/final/master.mdb \
+  work/localization/master-fields.json \
+  --output localization/catalogs/source/master.zh-source.json
+```
+
+The resulting catalog **contains original game strings** and is intentionally gitignored. It is a local translator/build input, not a repository artifact.
+
+Translation entries intended for versioned locale packs conform to `schema/translation-entry.schema.json` and use the source SHA-256 to detect source drift without requiring bulk Japanese source text in Git.
+
+## Immediate next step
+
+Run the inventory on the frozen final `10133800` master, review the candidate fields into a field map, build the first local source catalog, and then move to final-client Text/TMP/font discovery for the M1 production localization loader.
