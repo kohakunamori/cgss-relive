@@ -13,7 +13,10 @@ on:
       - "scripts/extract-xapk-specimen.py"
       - "scripts/run-research-trace.py"
       - "scripts/apply-client-patches.py"
+      - "scripts/patch-apk-native.py"
+      - "scripts/build-preservation-client.ps1"
       - "tests/test_apply_client_patches.py"
+      - "tests/test_patch_apk_native.py"
       - ".github/workflows/research-client-static.yml"
 
 jobs:
@@ -27,9 +30,10 @@ jobs:
           python -m py_compile scripts/extract-xapk-specimen.py
           python -m py_compile scripts/run-research-trace.py
           python -m py_compile scripts/apply-client-patches.py
+          python -m py_compile scripts/patch-apk-native.py
 
       - name: Test guarded client patch pipeline
-        run: python -m unittest tests.test_apply_client_patches -v
+        run: python -m unittest tests.test_apply_client_patches tests.test_patch_apk_native -v
 
       - name: Parse Frida JavaScript
         run: |
@@ -44,6 +48,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $files = @(
             'scripts/build-research-client.ps1',
+            'scripts/build-preservation-client.ps1',
             'scripts/install-research-client.ps1'
           )
           foreach ($file in $files) {

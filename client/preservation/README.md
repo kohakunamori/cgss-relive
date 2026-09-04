@@ -93,3 +93,30 @@ do not match. Blind offset patching is not allowed.
 The current manifest intentionally contains no active patch. Runtime research
 must first establish the exact endpoint/TLS mechanism that can be changed
 without weakening original protocol or game semantics.
+
+## Build
+
+Build the locally signed Preservation APK set from the exact frozen specimen:
+
+```powershell
+./scripts/build-preservation-client.ps1 `
+  -SpecimenDir work/apk/frozen-11.6.3
+```
+
+The builder deliberately does **not** enable Research-only Android flags. With
+an empty patch manifest it copies the frozen APK contents unchanged, then only
+zipaligns/re-signs the complete split set with a stable local Preservation key.
+When active native patches exist, only the declared target member is rewritten
+through `scripts/patch-apk-native.py` and the guarded manifest.
+
+Outputs are local/gitignored:
+
+```text
+work/preservation-client/apks/
+work/preservation-client/preservation-build.json
+work/preservation-signing/cgss-preservation.jks
+```
+
+A Preservation build is still not an Original-client acceptance artifact: the
+local signing identity and any declared environment patches make it a distinct
+artifact.
