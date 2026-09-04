@@ -4,8 +4,8 @@
 Classification is evidence-scored and deliberately does *not* use an upstream API
 route as proof of a consumer's subsystem. The same Work*/TempData state surface can
 be mutated by many endpoints, so route names are retained only as contextual
-metadata. Primary evidence is the consumer method/type name, with weaker support
-from the state type and reader name.
+metadata. The declaring consumer type/namespace is strongest evidence, followed
+by its method name, with weaker support from the state type and reader name.
 
 Ambiguous ties and weak/no-signal relations remain explicit instead of being
 forced into a feature bucket.
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -25,9 +24,6 @@ TAXONOMY = (
     "event", "profile", "card-idol", "shop", "friend-social", "payment",
     "shared-core",
 )
-
-# Tokens are intentionally concrete. Broad terms such as User/Data/Manager are not
-# feature evidence by themselves.
 TOKENS: dict[str, tuple[str, ...]] = {
     "home": ("Home",),
     "live-result": ("LiveResult", "ResultLive"),
@@ -64,9 +60,6 @@ def endpoint_key(endpoint: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def token_present(text: str, token: str) -> bool:
-    # CamelCase names make strict word boundaries inappropriate. Match the exact
-    # case-insensitive token as a substring, but all configured tokens are >=4
-    # characters and semantically specific enough for this bounded classifier.
     return token.lower() in text.lower()
 
 
@@ -83,8 +76,6 @@ def lexical_scores(text: str, weight: int, source: str) -> tuple[Counter[str], d
             if not token_present(text, token):
                 continue
             applied = weight
-            # Resolve only obvious compound-name semantics. We do not impose a
-            # global arbitrary subsystem priority.
             if subsystem == "event" and token == "Event" and has_story:
                 applied = max(1, weight // 4)
             elif subsystem == "live" and token == "Live" and has_live_result:
@@ -98,12 +89,21 @@ def lexical_scores(text: str, weight: int, source: str) -> tuple[Counter[str], d
     return scores, dict(evidence)
 
 
+def split_consumer(name: str) -> tuple[str, str]:
+    if "$$" not in name:
+        return name, ""
+    return tuple(name.split("$$", 1))
+
+
 def classify(relation: dict[str, Any]) -> dict[str, Any]:
     total: Counter[str] = Counter()
     evidence: dict[str, list[str]] = defaultdict(list)
     source_scores: dict[str, dict[str, int]] = {}
+    consumer_full = str(relation.get("consumer_method") or "")
+    consumer_owner, consumer_short = split_consumer(consumer_full)
     inputs = (
-        ("consumer", str(relation.get("consumer_method") or ""), 10),
+        ("consumer_owner", consumer_owner, 20),
+        ("consumer_method", consumer_short, 8),
         ("state", str(relation.get("state_type") or ""), 3),
         ("reader", str(relation.get("reader_full_name") or ""), 2),
     )
@@ -131,14 +131,15 @@ def classify(relation: dict[str, Any]) -> dict[str, Any]:
     second_score = ordered[1][1] if len(ordered) > 1 else 0
     candidates = [
         {"subsystem": name, "score": score}
-        for name, score in ordered if score >= max(2, top_score - 3)
+        for name, score in ordered if score >= max(2, top_score - 4)
     ]
-    consumer_top = source_scores.get("consumer", {}).get(top_name, 0)
+    owner_top = source_scores.get("consumer_owner", {}).get(top_name, 0)
+    method_top = source_scores.get("consumer_method", {}).get(top_name, 0)
     margin = top_score - second_score
 
-    if consumer_top >= 8 and margin >= 3:
+    if (owner_top >= 12 or method_top >= 8) and margin >= 4:
         status, confidence, primary = "classified", "high", top_name
-    elif top_score >= 6 and margin >= 3:
+    elif top_score >= 8 and margin >= 3:
         status, confidence, primary = "classified", "medium", top_name
     elif top_score >= 4 and margin >= 2:
         status, confidence, primary = "classified", "low", top_name
@@ -234,7 +235,8 @@ def main() -> int:
         "state_summary": state_summary,
         "consumer_subsystem_conflicts": consumer_conflicts,
         "evidence_policy": {
-            "consumer_name_weight": 10,
+            "consumer_owner_weight": 20,
+            "consumer_method_weight": 8,
             "state_type_weight": 3,
             "reader_name_weight": 2,
             "upstream_route_used_for_classification": False,
@@ -247,7 +249,7 @@ def main() -> int:
     if a.markdown_output:
         lines = [
             "# C8 state consumer subsystem classification", "",
-            "Consumer/type lexical evidence is primary. Upstream API routes are retained only as context and are not used to force a feature label.", "",
+            "Declaring consumer type/namespace is strongest evidence. Upstream API routes are context only and never force a feature label.", "",
             f"- relations: **{report['relation_count']}**",
             f"- classified: **{report['classified_relation_count']}** ({report['classification_coverage']:.1%})",
             f"- ambiguous: **{report['ambiguous_relation_count']}**",
