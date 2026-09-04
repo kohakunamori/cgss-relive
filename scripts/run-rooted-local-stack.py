@@ -12,7 +12,10 @@ The supervisor is deliberately conservative:
 6. any unexpected child exit tears down the whole stack.
 
 No request/body/resource identifiers are inspected by this helper. Runtime
-evidence remains in the two backend sanitized JSONL logs.
+evidence remains in the two backend sanitized JSONL logs.  An optional sanitized
+C9 semantic DB can be supplied for all-final-route recognition, and optional
+explicit data-only response templates can unblock reconstructed post-bootstrap
+routes without modifying server code.
 """
 from __future__ import annotations
 
@@ -59,6 +62,8 @@ def build_stack_commands(
     control_log: Path,
     resource_log: Path,
     api_map: Path | None,
+    semantic_db: Path | None,
+    response_templates: Path | None,
     viewer_id: int,
     producer_name: str,
     api_port: int,
@@ -97,6 +102,10 @@ def build_stack_commands(
     ]
     if api_map is not None:
         api.extend(("--api-map", str(api_map)))
+    if semantic_db is not None:
+        api.extend(("--semantic-db", str(semantic_db)))
+    if response_templates is not None:
+        api.extend(("--response-templates", str(response_templates)))
     if accept_old_resource_version:
         api.append("--accept-old-resource-version")
 
@@ -307,6 +316,16 @@ def main() -> int:
         default=repo_root / "work" / "runtime-starter-resource.jsonl",
     )
     parser.add_argument("--api-map", type=Path)
+    parser.add_argument(
+        "--semantic-db",
+        type=Path,
+        help="sanitized tail-aware C9 contracts-semantic-11.6.3.sqlite for all-final-route recognition",
+    )
+    parser.add_argument(
+        "--response-templates",
+        type=Path,
+        help="local schema-1 explicit endpoint templates; requires --semantic-db",
+    )
     parser.add_argument("--viewer-id", type=int, default=1)
     parser.add_argument("--producer-name", default="Relive Producer")
     parser.add_argument("--api-port", type=positive_port, default=DEFAULT_API_PORT)
@@ -319,6 +338,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.response_templates and not args.semantic_db:
+        parser.error("--response-templates requires --semantic-db")
+
     paths = {
         "resource root": args.resource_root.resolve(),
         "manifest DB": args.manifest_db.resolve(),
@@ -330,6 +352,8 @@ def main() -> int:
         "resource log": args.resource_log.resolve(),
     }
     api_map = args.api_map.resolve() if args.api_map else None
+    semantic_db = args.semantic_db.resolve() if args.semantic_db else None
+    response_templates = args.response_templates.resolve() if args.response_templates else None
 
     require_file(paths["manifest DB"], "manifest DB")
     require_file(paths["certificate chain"], "certificate chain")
@@ -337,6 +361,10 @@ def main() -> int:
     require_file(paths["CA certificate"], "CA certificate")
     if api_map is not None:
         require_file(api_map, "API map")
+    if semantic_db is not None:
+        require_file(semantic_db, "semantic DB")
+    if response_templates is not None:
+        require_file(response_templates, "response templates")
 
     paths["preflight report"].parent.mkdir(parents=True, exist_ok=True)
     paths["control log"].parent.mkdir(parents=True, exist_ok=True)
@@ -353,6 +381,8 @@ def main() -> int:
         control_log=paths["control log"],
         resource_log=paths["resource log"],
         api_map=api_map,
+        semantic_db=semantic_db,
+        response_templates=response_templates,
         viewer_id=args.viewer_id,
         producer_name=args.producer_name,
         api_port=args.api_port,
@@ -399,6 +429,10 @@ def main() -> int:
         print(f"TLS mux route healthy with CA/SAN verification: {RESOURCE_HOST}")
 
         print(f"rooted-device stack ready: adb reverse tcp:443 -> host tcp:{args.tls_port}")
+        if semantic_db is not None:
+            print(f"C9 semantic route recognition enabled: {semantic_db}")
+        if response_templates is not None:
+            print(f"explicit response templates enabled: {response_templates}")
         print("press Ctrl+C to stop all local stack processes")
         while True:
             for name, process in children:
