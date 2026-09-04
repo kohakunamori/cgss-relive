@@ -1,0 +1,84 @@
+name: Refine C11b base parser overlays
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/refine-base-contract-overlays.yml'
+      - 'scripts/refine-base-contract-overlays.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      C11_ARTIFACT_ID: '9924573487'
+      C11_ARTIFACT_SHA256: '909f8ad90d4823b502a01d95e38251a8c63e116044b5c40287b99cfeb9976821'
+      C11_JSON_SHA256: 'ed1b71de04a901f6a96d39f9f5f5e6877c5092be96478838bbf6945af79b3671'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch fixed C11 discovery artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/c11 reports
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o work/c11.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C11_ARTIFACT_ID}/zip"
+          echo "$C11_ARTIFACT_SHA256  work/c11.zip" | sha256sum -c -
+          unzip -q work/c11.zip -d work/c11
+          echo "$C11_JSON_SHA256  work/c11/unbound-base-contract-callers-11.6.3.json" | sha256sum -c -
+
+      - name: Refine exact parser-call overlays
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/refine-base-contract-overlays.py \
+            --c11 work/c11/unbound-base-contract-callers-11.6.3.json \
+            --output reports/base-contract-overlays-11.6.3.json \
+            --markdown-output reports/base-contract-overlays-11.6.3.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/base-contract-overlays-11.6.3.json'))
+          assert d['schema']==1
+          assert d['source_c11_candidate_relation_count']==436
+          assert d['overlay_relation_count']==429
+          assert d['overlay_endpoint_count']==380
+          assert d['overlay_field_link_count']==1802
+          assert d['overlay_base_task_count']==4
+          assert d['rejected_relation_count']==0
+          assert set(d['overlay_base_tasks']) == {
+            'Stage.ArcadePhaseBaseTask','Stage.BaseTask','Stage.BusResultBaseTask','Stage.LiveStartBaseTask'
+          }
+          print(json.dumps({k:d[k] for k in (
+            'overlay_relation_count','overlay_endpoint_count','overlay_field_link_count',
+            'overlay_managed_caller_count','overlay_base_task_count','overlay_requiredness_counts',
+            'endpoints_with_multiple_base_parsers','rejected_relation_count')},indent=2))
+          PY
+
+      - name: Enforce sanitized output boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name '*.sqlite' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw/intermediate specimen escaped C11b boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload C11b base parser overlays
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c11b-base-contract-overlays
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
