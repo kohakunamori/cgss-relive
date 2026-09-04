@@ -1,0 +1,95 @@
+name: Build C13 effective parser overlays
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/build-effective-parser-overlays.yml'
+      - 'scripts/build-effective-parser-overlays.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      C11B_ARTIFACT_ID: '9924613611'
+      C11B_ARTIFACT_SHA256: '3df8bde8c6a59b98b559430751172bb2f63806b07aa1a1602f504cf45fe2cd4f'
+      C11B_JSON_SHA256: 'e0c83eac98b4960e1dfeaadf7ff9d029c384bbcfa9c93b15d22f7ae7ca4d4b00'
+      C12_ARTIFACT_ID: '9924706997'
+      C12_ARTIFACT_SHA256: 'fcb4e050b62931bf6bc788be15ef10a56bf3b70f7ad8595b5126f40ce4cd5eae'
+      C12_JSON_SHA256: '8e09aff36618569afa3662748ddfc301b5a337a582f3b3525233b4cf8dd07bd1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch fixed C11b and C12 artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/c11b work/c12 reports
+          fetch_artifact() {
+            local id="$1" expected="$2" out="$3"
+            curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              -o "$out" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip"
+            echo "${expected}  ${out}" | sha256sum -c -
+          }
+          fetch_artifact "$C11B_ARTIFACT_ID" "$C11B_ARTIFACT_SHA256" work/c11b.zip
+          fetch_artifact "$C12_ARTIFACT_ID" "$C12_ARTIFACT_SHA256" work/c12.zip
+          unzip -q work/c11b.zip -d work/c11b
+          unzip -q work/c12.zip -d work/c12
+          echo "$C11B_JSON_SHA256  work/c11b/base-contract-overlays-11.6.3.json" | sha256sum -c -
+          echo "$C12_JSON_SHA256  work/c12/inherited-base-contracts-11.6.3.json" | sha256sum -c -
+
+      - name: Build provenance-preserving effective parser overlays
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-effective-parser-overlays.py \
+            --c11b work/c11b/base-contract-overlays-11.6.3.json \
+            --c12 work/c12/inherited-base-contracts-11.6.3.json \
+            --output reports/effective-parser-overlays-11.6.3.json \
+            --markdown-output reports/effective-parser-overlays-11.6.3.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/effective-parser-overlays-11.6.3.json'))
+          assert d['schema']==1
+          assert d['source_c11b_overlay_relation_count']==429
+          assert d['source_c12_inherited_relation_count']==9
+          assert d['overlay_relation_count']==438
+          assert d['overlay_endpoint_count']==389
+          assert d['overlay_field_link_count']==1871
+          assert d['common_envelope_overlay_endpoint_count']==369
+          assert d['residual_unmapped_method_count']==1
+          assert d['residual_unmapped_methods'][0]['base_parser_method']=='Stage.BusBaseTask$$EventInfoParse'
+          assert d['provenance_record_counts']=={'direct-BL':429,'inherited-no-override':9}
+          print(json.dumps({k:d[k] for k in (
+            'overlay_relation_count','overlay_endpoint_count','overlay_field_link_count',
+            'provenance_record_counts','base_task_relation_counts',
+            'common_envelope_overlay_endpoint_count','residual_unmapped_method_count')},indent=2))
+          PY
+
+      - name: Enforce sanitized output boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name '*.sqlite' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw/intermediate specimen escaped C13 boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload C13 effective parser overlays
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c13-effective-parser-overlays
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
