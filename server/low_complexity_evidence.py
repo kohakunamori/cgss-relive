@@ -1,9 +1,12 @@
-"""Read-only index for the sanitized C22 low-complexity response evidence.
+"""Read-only index for sanitized low-complexity response evidence.
 
-C22 contains static final-client parser/helper metadata only.  This module exposes
-compact diagnostic summaries for runtime blocker analysis, while deliberately
-excluding parser field lists and response values.  Shape proof is kept separate
-from empty-value proof and untouched-client acceptance.
+The index accepts both frozen C22 and the newer C25 catalog.  C25 overlays five
+additional exact recursive-helper object proofs onto C22; neither generation
+contains parser-local empty-value proof or untouched-client acceptance.
+
+Only compact diagnostic metadata is exposed.  Parser field lists and response
+values are deliberately excluded, and shape proof remains separate from
+empty-value/client acceptance proof.
 """
 from __future__ import annotations
 
@@ -13,12 +16,21 @@ from pathlib import Path
 from typing import Any, Mapping
 
 EXPECTED_ROUTE_COUNT = 76
-EXPECTED_SHAPE_COUNTS = {
-    "countable-collection-ambiguous": 2,
-    "multi-field": 19,
-    "opaque:json": 10,
-    "proven-object": 44,
-    "proven-scalar:int": 1,
+EXPECTED_SHAPE_COUNTS_BY_GENERATION = {
+    "C22": {
+        "countable-collection-ambiguous": 2,
+        "multi-field": 19,
+        "opaque:json": 10,
+        "proven-object": 44,
+        "proven-scalar:int": 1,
+    },
+    "C25": {
+        "countable-collection-ambiguous": 2,
+        "multi-field": 19,
+        "opaque:json": 5,
+        "proven-object": 49,
+        "proven-scalar:int": 1,
+    },
 }
 
 
@@ -48,34 +60,46 @@ class LowComplexityEvidenceIndex:
     def __init__(self, path: Path, *, enforce_final_counts: bool = True):
         self.path = Path(path)
         self._by_route: dict[str, LowComplexityRouteEvidence] = {}
+        self.generation = "synthetic"
         self._load(enforce_final_counts=enforce_final_counts)
 
     @staticmethod
     def _normalize_route(route: str) -> str:
         value = "/" + str(route).split("?", 1)[0].lstrip("/")
         if value == "/":
-            raise ValueError("C22 route cannot be empty")
+            raise ValueError("low-complexity route cannot be empty")
         return value
+
+    @staticmethod
+    def _generation(raw: dict[str, Any]) -> str:
+        # Frozen C22 predates an explicit generation field.  C25 adds one.
+        value = raw.get("generation")
+        if value is None:
+            return "C22"
+        if value == "C25":
+            return "C25"
+        raise ValueError(f"unsupported low-complexity evidence generation: {value!r}")
 
     def _load(self, *, enforce_final_counts: bool) -> None:
         if not self.path.is_file():
-            raise FileNotFoundError(f"C22 evidence catalog is missing: {self.path}")
+            raise FileNotFoundError(f"low-complexity evidence catalog is missing: {self.path}")
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict) or raw.get("schema") != 1:
-            raise ValueError("C22 evidence catalog must contain schema=1")
+            raise ValueError("low-complexity evidence catalog must contain schema=1")
+        self.generation = self._generation(raw) if enforce_final_counts else str(raw.get("generation") or "synthetic")
         rows = raw.get("routes")
         if not isinstance(rows, list):
-            raise ValueError("C22 evidence catalog routes must be a list")
+            raise ValueError("low-complexity evidence catalog routes must be a list")
         by_route: dict[str, LowComplexityRouteEvidence] = {}
         for row in rows:
             if not isinstance(row, dict):
-                raise ValueError("malformed C22 route record")
+                raise ValueError("malformed low-complexity route record")
             route = self._normalize_route(str(row.get("route") or ""))
             if route in by_route:
-                raise ValueError(f"duplicate C22 route: {route}")
+                raise ValueError(f"duplicate low-complexity route: {route}")
             endpoint_id = row.get("endpoint_id")
             if endpoint_id is not None and (not isinstance(endpoint_id, int) or endpoint_id <= 0):
-                raise ValueError(f"invalid C22 endpoint id for {route}")
+                raise ValueError(f"invalid low-complexity endpoint id for {route}")
             values = {
                 key: row.get(key)
                 for key in (
@@ -87,11 +111,11 @@ class LowComplexityEvidenceIndex:
                 )
             }
             if any(not isinstance(value, str) or not value for value in values.values()):
-                raise ValueError(f"malformed C22 diagnostic fields for {route}")
+                raise ValueError(f"malformed low-complexity diagnostic fields for {route}")
             if row.get("static_evidence_only") is not True:
-                raise ValueError(f"C22 route is not marked static-only: {route}")
+                raise ValueError(f"low-complexity route is not marked static-only: {route}")
             if row.get("untouched_client_acceptance") is not False:
-                raise ValueError(f"C22 route unexpectedly claims client acceptance: {route}")
+                raise ValueError(f"low-complexity route unexpectedly claims client acceptance: {route}")
             by_route[route] = LowComplexityRouteEvidence(
                 route=route,
                 endpoint_id=endpoint_id,
@@ -104,14 +128,23 @@ class LowComplexityEvidenceIndex:
         self._by_route = by_route
 
         if enforce_final_counts:
+            expected_shapes = EXPECTED_SHAPE_COUNTS_BY_GENERATION[self.generation]
             if len(by_route) != EXPECTED_ROUTE_COUNT or raw.get("route_count") != EXPECTED_ROUTE_COUNT:
-                raise ValueError(f"C22 route count mismatch: {len(by_route)} != {EXPECTED_ROUTE_COUNT}")
-            if raw.get("effective_shape_counts") != EXPECTED_SHAPE_COUNTS:
-                raise ValueError("C22 effective shape counts do not match frozen final artifact")
+                raise ValueError(
+                    f"{self.generation} route count mismatch: {len(by_route)} != {EXPECTED_ROUTE_COUNT}"
+                )
+            if raw.get("effective_shape_counts") != expected_shapes:
+                raise ValueError(
+                    f"{self.generation} effective shape counts do not match frozen final artifact"
+                )
             if raw.get("parser_local_empty_value_proven_route_count") != 0:
-                raise ValueError("C22 unexpectedly contains parser-local empty-value proof")
+                raise ValueError(
+                    f"{self.generation} unexpectedly contains parser-local empty-value proof"
+                )
             if raw.get("untouched_client_accepted_route_count") != 0:
-                raise ValueError("C22 unexpectedly claims untouched-client acceptance")
+                raise ValueError(
+                    f"{self.generation} unexpectedly claims untouched-client acceptance"
+                )
 
     @property
     def route_count(self) -> int:
@@ -126,7 +159,11 @@ class LowComplexityEvidenceIndex:
 
     def safe_route_summary(self, route: str) -> dict[str, Any] | None:
         value = self.route(route)
-        return value.safe_summary() if value is not None else None
+        if value is None:
+            return None
+        summary = value.safe_summary()
+        summary["evidence_generation"] = self.generation
+        return summary
 
     @property
     def by_route(self) -> Mapping[str, LowComplexityRouteEvidence]:
