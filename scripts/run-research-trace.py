@@ -31,7 +31,24 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", default=DEFAULT_PACKAGE)
     parser.add_argument("--serial", default=None, help="ADB/Frida device id; default is USB device")
+    parser.add_argument("--host", default=None, help="Frida remote host, e.g. 127.0.0.1:27042 after adb forward")
+    parser.add_argument(
+        "--spawn-pid-file",
+        default=None,
+        help="write the spawned PID here before resume; ignored for attach mode",
+    )
+    parser.add_argument(
+        "--resume-gate-file",
+        default=None,
+        help="when spawning, wait for this file to exist before resuming the process",
+    )
     parser.add_argument("--attach", action="store_true", help="Attach to an already-running process instead of spawning")
+    parser.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help="attach directly to this PID; avoids Android process enumeration on OEM builds where Frida enumeration is broken",
+    )
     parser.add_argument(
         "--script",
         default=str(repo_root / "client" / "research" / "frida" / "cgss-trace.js"),
@@ -43,8 +60,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_device(serial: str | None):
+def get_device(serial: str | None, host: str | None):
     manager = frida.get_device_manager()
+    if host:
+        return manager.add_remote_device(host)
     if serial:
         return manager.get_device(serial, timeout=10)
     return frida.get_usb_device(timeout=10)
@@ -55,15 +74,25 @@ def main() -> int:
     script_path = pathlib.Path(args.script).resolve()
     output_path = pathlib.Path(args.output).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    spawn_pid_path = pathlib.Path(args.spawn_pid_file).resolve() if args.spawn_pid_file else None
+    resume_gate_path = pathlib.Path(args.resume_gate_file).resolve() if args.resume_gate_file else None
+    if spawn_pid_path is not None:
+        spawn_pid_path.parent.mkdir(parents=True, exist_ok=True)
+        spawn_pid_path.unlink(missing_ok=True)
+    if resume_gate_path is not None:
+        resume_gate_path.parent.mkdir(parents=True, exist_ok=True)
+        resume_gate_path.unlink(missing_ok=True)
 
     if not script_path.is_file():
         raise SystemExit(f"Frida script not found: {script_path}")
 
     source = script_path.read_text(encoding="utf-8")
-    device = get_device(args.serial)
+    device = get_device(args.serial, args.host)
     spawned_pid: int | None = None
 
-    if args.attach:
+    if args.pid is not None:
+        session = device.attach(args.pid)
+    elif args.attach:
         session = device.attach(args.package)
     else:
         spawned_pid = device.spawn([args.package])
@@ -94,6 +123,20 @@ def main() -> int:
         script.load()
 
         if spawned_pid is not None:
+            if spawn_pid_path is not None:
+                spawn_pid_path.write_text(str(spawned_pid), encoding="ascii")
+            if resume_gate_path is not None:
+                write_record(
+                    {
+                        "source": "collector",
+                        "event": "spawn_paused",
+                        "package": args.package,
+                        "spawned_pid": spawned_pid,
+                        "resume_gate_file": str(resume_gate_path),
+                    }
+                )
+                while not resume_gate_path.exists():
+                    time.sleep(0.05)
             device.resume(spawned_pid)
 
         write_record(
@@ -102,6 +145,8 @@ def main() -> int:
                 "event": "started",
                 "package": args.package,
                 "spawned": spawned_pid is not None,
+                "spawned_pid": spawned_pid,
+                "attached_pid": args.pid,
                 "script": str(script_path),
             }
         )

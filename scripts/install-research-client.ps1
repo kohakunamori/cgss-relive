@@ -16,12 +16,12 @@ function Resolve-RepoPath {
 }
 
 function Invoke-Adb {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
     $base = @()
     if ($Serial) { $base += @("-s", $Serial) }
-    & adb @base @Args
+    & adb @base @ArgumentList
     if ($LASTEXITCODE -ne 0) {
-        throw "adb command failed: adb $($base -join ' ') $($Args -join ' ')"
+        throw "adb command failed: adb $($base -join ' ') $($ArgumentList -join ' ')"
     }
 }
 
@@ -40,7 +40,7 @@ if (-not ($apks | Where-Object { $_.Name -eq "base.apk" })) {
 
 $installed = $false
 try {
-    $paths = Invoke-Adb shell pm path $Package 2>$null
+    $paths = Invoke-Adb @("shell", "pm", "path", $Package) 2>$null
     $installed = [bool]($paths | Where-Object { $_ -like "package:*" })
 } catch {
     $installed = $false
@@ -48,7 +48,7 @@ try {
 
 if ($installed -and $UninstallOriginal) {
     Write-Warning "Uninstalling $Package removes its app-local data from this device."
-    Invoke-Adb uninstall $Package | Out-Host
+    Invoke-Adb @("uninstall", $Package) | Out-Host
     $installed = $false
 }
 
@@ -56,7 +56,7 @@ $apkPaths = @($apks | ForEach-Object { $_.FullName })
 Write-Host "Installing $($apkPaths.Count) APKs as one split package set..."
 
 try {
-    Invoke-Adb install-multiple -r @apkPaths | Out-Host
+    Invoke-Adb (@("install-multiple", "-r") + $apkPaths) | Out-Host
 } catch {
     if ($installed -and -not $UninstallOriginal) {
         Write-Host ""

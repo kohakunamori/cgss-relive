@@ -3,6 +3,7 @@ param(
     [string]$SpecimenDir,
     [string]$OutputDir = "work/research-client",
     [string]$Keystore = "",
+    [string]$CaCertPath = "",
     [string]$KeyAlias = "cgss-research",
     [string]$StorePass = "android",
     [string]$KeyPass = "android"
@@ -33,13 +34,14 @@ function Require-Command {
 
 function Invoke-Checked {
     param(
+        [Parameter(Mandatory = $true)]
         [string]$Exe,
-        [Parameter(ValueFromRemainingArguments = $true)]
-        [string[]]$Args
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList
     )
-    & $Exe @Args
+    & $Exe @ArgumentList
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed ($LASTEXITCODE): $Exe $($Args -join ' ')"
+        throw "Command failed ($LASTEXITCODE): $Exe $($ArgumentList -join ' ')"
     }
 }
 
@@ -47,6 +49,23 @@ Require-Command "apktool"
 Require-Command "zipalign"
 Require-Command "apksigner"
 Require-Command "keytool"
+
+$ApktoolExe = "apktool"
+$ApktoolPrefix = @()
+$apktoolCommand = Get-Command "apktool" -ErrorAction Stop
+if ($apktoolCommand.Source -and $apktoolCommand.Source.EndsWith(".bat", [System.StringComparison]::OrdinalIgnoreCase)) {
+    Require-Command "java"
+    $apktoolDir = Split-Path -Parent $apktoolCommand.Source
+    $apktoolJar = Get-ChildItem -Path $apktoolDir -Filter "apktool*.jar" -File |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+    if (-not $apktoolJar) {
+        throw "apktool wrapper is a .bat file but no apktool*.jar was found beside it: $apktoolDir"
+    }
+    Write-Host "Using apktool JAR directly to avoid interactive batch-wrapper pause: $($apktoolJar.FullName)"
+    $ApktoolExe = "java"
+    $ApktoolPrefix = @("-jar", $apktoolJar.FullName)
+}
 
 $SpecimenDir = (Resolve-Path (Resolve-RepoPath $SpecimenDir)).Path
 $manifestPath = Join-Path $SpecimenDir "manifest.json"
@@ -74,6 +93,10 @@ if (-not (Test-Path $baseApk)) {
     throw "base.apk is missing: $baseApk"
 }
 
+if ($CaCertPath) {
+    $CaCertPath = (Resolve-Path (Resolve-RepoPath $CaCertPath)).Path
+}
+
 $OutputDir = Resolve-RepoPath $OutputDir
 $staging = Join-Path $OutputDir "staging"
 $decoded = Join-Path $staging "base-decoded"
@@ -87,27 +110,32 @@ if (Test-Path $OutputDir) {
 New-Item -ItemType Directory -Force -Path $decoded, $unsignedDir, $alignedDir, $signedDir | Out-Null
 
 if (-not $Keystore) {
-    $Keystore = Join-Path $OutputDir "cgss-research.jks"
+    $Keystore = Resolve-RepoPath "work/research-signing/cgss-research.jks"
 } else {
     $Keystore = Resolve-RepoPath $Keystore
+}
+$keystoreDir = Split-Path -Parent $Keystore
+if ($keystoreDir) {
+    New-Item -ItemType Directory -Force -Path $keystoreDir | Out-Null
 }
 
 if (-not (Test-Path $Keystore)) {
     Write-Host "Generating local research signing key: $Keystore"
-    Invoke-Checked keytool `
-        -genkeypair `
-        -keystore $Keystore `
-        -storepass $StorePass `
-        -keypass $KeyPass `
-        -alias $KeyAlias `
-        -keyalg RSA `
-        -keysize 2048 `
-        -validity 10000 `
-        -dname "CN=CGSS Relive Research, OU=Research, O=Local, L=Local, ST=Local, C=US"
+    Invoke-Checked "keytool" @(
+        "-genkeypair",
+        "-keystore", $Keystore,
+        "-storepass", $StorePass,
+        "-keypass", $KeyPass,
+        "-alias", $KeyAlias,
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "10000",
+        "-dname", "CN=CGSS Relive Research, OU=Research, O=Local, L=Local, ST=Local, C=US"
+    )
 }
 
 Write-Host "[1/6] Decoding base APK without decompiling DEX"
-Invoke-Checked apktool d -f -s $baseApk -o $decoded
+Invoke-Checked $ApktoolExe ($ApktoolPrefix + @("d", "-f", "-s", $baseApk, "-o", $decoded))
 
 $decodedManifestPath = Join-Path $decoded "AndroidManifest.xml"
 if (-not (Test-Path $decodedManifestPath)) {
@@ -127,26 +155,34 @@ $xml.Save($decodedManifestPath)
 
 $resXml = Join-Path $decoded "res/xml"
 New-Item -ItemType Directory -Force -Path $resXml | Out-Null
-@'
+$embeddedTrustAnchor = ""
+if ($CaCertPath) {
+    $resRaw = Join-Path $decoded "res/raw"
+    New-Item -ItemType Directory -Force -Path $resRaw | Out-Null
+    Copy-Item -Force $CaCertPath (Join-Path $resRaw "relive_ca.pem")
+    $embeddedTrustAnchor = '            <certificates src="@raw/relive_ca" />' + [Environment]::NewLine
+}
+$networkSecurityConfig = @"
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
             <certificates src="user" />
-        </trust-anchors>
+$embeddedTrustAnchor        </trust-anchors>
     </base-config>
     <debug-overrides>
         <trust-anchors>
             <certificates src="user" />
-        </trust-anchors>
+$embeddedTrustAnchor        </trust-anchors>
     </debug-overrides>
 </network-security-config>
-'@ | Set-Content -Encoding UTF8 (Join-Path $resXml "relive_network_security_config.xml")
+"@
+$networkSecurityConfig | Set-Content -Encoding UTF8 (Join-Path $resXml "relive_network_security_config.xml")
 
 Write-Host "[3/6] Rebuilding modified base APK"
 $rebuiltBase = Join-Path $unsignedDir "base.apk"
-Invoke-Checked apktool b $decoded -o $rebuiltBase
+Invoke-Checked $ApktoolExe ($ApktoolPrefix + @("b", $decoded, "-o", $rebuiltBase))
 
 foreach ($entry in @($manifest.files)) {
     if ($entry.file -eq "base.apk") { continue }
@@ -161,21 +197,23 @@ Write-Host "[4/6] Aligning base and split APKs"
 $unsignedApks = @(Get-ChildItem -Path $unsignedDir -Filter "*.apk" -File | Sort-Object Name)
 foreach ($apk in $unsignedApks) {
     $aligned = Join-Path $alignedDir $apk.Name
-    Invoke-Checked zipalign -f 4 $apk.FullName $aligned
+    Invoke-Checked "zipalign" @("-f", "4", $apk.FullName, $aligned)
 }
 
 Write-Host "[5/6] Re-signing the entire APK set with one local research key"
 $records = @()
 foreach ($apk in @(Get-ChildItem -Path $alignedDir -Filter "*.apk" -File | Sort-Object Name)) {
     $signed = Join-Path $signedDir $apk.Name
-    Invoke-Checked apksigner sign `
-        --ks $Keystore `
-        --ks-key-alias $KeyAlias `
-        --ks-pass "pass:$StorePass" `
-        --key-pass "pass:$KeyPass" `
-        --out $signed `
+    Invoke-Checked "apksigner" @(
+        "sign",
+        "--ks", $Keystore,
+        "--ks-key-alias", $KeyAlias,
+        "--ks-pass", "pass:$StorePass",
+        "--key-pass", "pass:$KeyPass",
+        "--out", $signed,
         $apk.FullName
-    Invoke-Checked apksigner verify --verbose $signed
+    )
+    Invoke-Checked "apksigner" @("verify", "--verbose", $signed)
 
     $sourceEntry = @($manifest.files | Where-Object { $_.file -eq $apk.Name }) | Select-Object -First 1
     $records += [ordered]@{
@@ -189,6 +227,7 @@ foreach ($apk in @(Get-ChildItem -Path $alignedDir -Filter "*.apk" -File | Sort-
 Write-Host "[6/6] Writing local build manifest"
 $buildManifest = [ordered]@{
     schema = 1
+    embedded_ca_sha256 = if ($CaCertPath) { (Get-FileHash -Algorithm SHA256 $CaCertPath).Hash.ToLowerInvariant() } else { $null }
     purpose = "research-fixed instrumentation client; not an untouched-client acceptance artifact"
     source_package = $ExpectedPackage
     source_version_name = $ExpectedVersionName
@@ -198,7 +237,8 @@ $buildManifest = [ordered]@{
         "android:usesCleartextTraffic=true",
         "android:networkSecurityConfig=@xml/relive_network_security_config",
         "network security config trusts system and user certificate stores",
-        "all APK splits re-signed with one local research key"
+        $(if ($CaCertPath) { "network security config embeds the supplied local research CA" } else { "no embedded research CA" }),
+        "all APK splits re-signed with one stable local research key"
     )
     files = $records
 }

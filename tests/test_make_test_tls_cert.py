@@ -27,6 +27,13 @@ class TestTLSCertificateGenerator(unittest.TestCase):
             leaf = x509.load_pem_x509_certificate(paths["server_cert"].read_bytes())
             self.assertTrue(ca.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
             self.assertEqual(leaf.issuer, ca.subject)
+            ca_ski = ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+            ca_aki = ca.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value
+            leaf_ski = leaf.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+            leaf_aki = leaf.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value
+            self.assertIsNotNone(leaf_ski.digest)
+            self.assertEqual(ca_aki.key_identifier, ca_ski.digest)
+            self.assertEqual(leaf_aki.key_identifier, ca_ski.digest)
             sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
             self.assertIn("apis.game.starlight-stage.jp", sans.get_values_for_type(x509.DNSName))
             eku = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
