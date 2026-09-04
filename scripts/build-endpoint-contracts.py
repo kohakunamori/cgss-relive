@@ -5,6 +5,11 @@
 field. Accepted evidence includes direct field writes, proven conditional/constant-
 pool ctor writes, Arcade ConvertType input/output chains, or caller-side object
 provenance into `NetworkTask.set_type`. Naming alone remains candidate evidence.
+
+The separate B-group `Common.ApiType` route table can be classified as
+`orphaned-legacy-static` when an explicit exact-specimen proof is supplied. This is
+kept distinct from `proven-static`: orphaned legacy rows are preserved for archival
+knowledge but are excluded from the default preservation-server generation surface.
 """
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-SCHEMA = 4
+SCHEMA = 5
 CONVERT_TARGET = "Stage.ArcadePhaseBaseTask$$ConvertType"
 _SUFFIXES = ("NetworkTask", "Task", "Api", "Request", "Response")
 
@@ -165,6 +170,34 @@ def add_set_type_bindings(bindings: dict[int, list[dict[str, Any]]], report: dic
             })
 
 
+def validate_legacy_surface(proof: dict[str, Any]) -> dict[str, Any]:
+    if proof.get("schema") != 1:
+        raise RuntimeError("Common.ApiType legacy proof schema mismatch")
+    if proof.get("classification") != "orphaned-legacy-static":
+        raise RuntimeError("unexpected Common.ApiType legacy classification")
+    if proof.get("server_generation_default") != "exclude-unless-runtime-evidence-appears":
+        raise RuntimeError("unexpected Common.ApiType server-generation policy")
+    facts = proof.get("facts", {})
+    required = {
+        "delivered_route_count": 22,
+        "cctor_rva": 0x4DC8490,
+        "apilist_typeinfo_got": 0x82657D0,
+        "exact_apilist_static_references": 2,
+        "apilist_consumer_method_count": 1,
+        "sole_apilist_consumer": "Common.ApiType$$.cctor",
+        "external_managed_declaration_consumers": 0,
+        "direct_bl_callers_of_common_apitype_ctor_cctor": 0,
+        "direct_networktask_set_type_bl_xrefs": 0,
+    }
+    for key, expected in required.items():
+        if facts.get(key) != expected:
+            raise RuntimeError(f"Common.ApiType legacy proof mismatch for {key}: {facts.get(key)!r} != {expected!r}")
+    expected_keys = {0, 1, 2, *range(8, 27)}
+    if set(int(value) for value in proof.get("observed_initializer_keys", [])) != expected_keys:
+        raise RuntimeError("Common.ApiType initializer-key coverage mismatch")
+    return proof
+
+
 def name_candidates(tasks: list[str], enum_name: str) -> list[str]:
     target = normalize(enum_name)
     return sorted(task for task in tasks if normalize(task) == target)
@@ -178,6 +211,7 @@ def main() -> int:
     p.add_argument("--arcade-report", type=Path, required=True)
     p.add_argument("--arcade-garden-report", type=Path)
     p.add_argument("--set-type-report", type=Path)
+    p.add_argument("--legacy-surface-proof", type=Path)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--markdown-output", type=Path)
     args = p.parse_args()
@@ -190,6 +224,10 @@ def main() -> int:
     if arcade_report.get("schema") not in {2, 3}:
         raise RuntimeError("Arcade ConvertType proof report schema mismatch")
 
+    legacy_proof = None
+    if args.legacy_surface_proof:
+        legacy_proof = validate_legacy_surface(json.loads(args.legacy_surface_proof.read_text(encoding="utf-8")))
+
     bindings, converted_tasks = direct_bindings(field_report)
     if args.dynamic_writer_proof:
         add_dynamic_ctor_bindings(bindings, json.loads(args.dynamic_writer_proof.read_text(encoding="utf-8")))
@@ -201,7 +239,10 @@ def main() -> int:
     tasks = [str(row["task"]) for row in field_report.get("tasks", [])]
 
     endpoints = []
-    summary = {"A": {"total": 0, "proven_static": 0, "candidate_name": 0, "unresolved": 0}, "B": {"total": 0, "proven_static": 0, "candidate_name": 0, "unresolved": 0}}
+    summary = {
+        "A": {"total": 0, "proven_static": 0, "candidate_name": 0, "unresolved": 0, "orphaned_legacy_static": 0},
+        "B": {"total": 0, "proven_static": 0, "candidate_name": 0, "unresolved": 0, "orphaned_legacy_static": 0},
+    }
     for group in ("A", "B"):
         for endpoint in api_map[group]:
             raw_bindings = bindings.get(endpoint["key"], []) if group == "A" else []
@@ -212,28 +253,67 @@ def main() -> int:
                 if marker not in seen:
                     seen.add(marker)
                     unique.append(binding)
-            candidates = [] if unique else [task for task in name_candidates(tasks, endpoint["enum"]) if task not in converted_tasks]
-            status = "proven-static" if unique else ("candidate-name" if candidates else "unresolved")
+
+            legacy = group == "B" and legacy_proof is not None
+            if legacy:
+                candidates = []
+                status = "orphaned-legacy-static"
+            else:
+                candidates = [] if unique else [task for task in name_candidates(tasks, endpoint["enum"]) if task not in converted_tasks]
+                status = "proven-static" if unique else ("candidate-name" if candidates else "unresolved")
+
             row = dict(endpoint)
-            row.update({"status": status, "task_bindings": unique, "name_candidates": candidates})
+            row.update({
+                "status": status,
+                "task_bindings": unique,
+                "name_candidates": candidates,
+                "server_generation_default": "exclude" if legacy else ("include" if status == "proven-static" else "defer"),
+            })
+            if legacy:
+                row["legacy_evidence"] = {
+                    "classification": legacy_proof["classification"],
+                    "sole_apilist_consumer": legacy_proof["facts"]["sole_apilist_consumer"],
+                    "exact_apilist_static_references": legacy_proof["facts"]["exact_apilist_static_references"],
+                    "scope_note": legacy_proof["scope_note"],
+                }
             endpoints.append(row)
             summary[group]["total"] += 1
             summary[group][status.replace("-", "_")] += 1
 
-    report = {"schema": SCHEMA, "scope": "final 11.6.3 endpoint-to-task binding with evidence grades", "summary": summary, "endpoints": endpoints}
+    report = {
+        "schema": SCHEMA,
+        "scope": "final 11.6.3 endpoint-to-task binding with evidence grades and legacy-surface classification",
+        "summary": summary,
+        "endpoints": endpoints,
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     if args.markdown_output:
-        lines = ["# Final 11.6.3 endpoint/task contract status", "", "`proven-static` requires concrete key-flow evidence; naming alone is never proof.", ""]
+        lines = [
+            "# Final 11.6.3 endpoint/task contract status",
+            "",
+            "`proven-static` requires concrete key-flow evidence; naming alone is never proof.",
+            "`orphaned-legacy-static` preserves a statically present route table that has strong orphaning evidence and is excluded from default server generation.",
+            "",
+        ]
         for group in ("A", "B"):
             s = summary[group]
-            lines += [f"## Group {group}", "", f"- total: **{s['total']}**", f"- proven-static: **{s['proven_static']}**", f"- candidate-name: **{s['candidate_name']}**", f"- unresolved: **{s['unresolved']}**", ""]
-        lines += ["## Remaining non-proven endpoints", ""]
+            lines += [
+                f"## Group {group}", "",
+                f"- total: **{s['total']}**",
+                f"- proven-static: **{s['proven_static']}**",
+                f"- orphaned-legacy-static: **{s['orphaned_legacy_static']}**",
+                f"- candidate-name: **{s['candidate_name']}**",
+                f"- unresolved: **{s['unresolved']}**",
+                "",
+            ]
+        lines += ["## Remaining active non-proven endpoints", ""]
         for row in endpoints:
-            if row["status"] != "proven-static":
-                suffix = " -> " + ", ".join(f"`{x}`" for x in row["name_candidates"]) if row["name_candidates"] else ""
-                lines.append(f"- `{row['group']}:{row['key']}` `{row['enum']}` `{row['route']}`: **{row['status']}**{suffix}")
+            if row["status"] in {"proven-static", "orphaned-legacy-static"}:
+                continue
+            suffix = " -> " + ", ".join(f"`{x}`" for x in row["name_candidates"]) if row["name_candidates"] else ""
+            lines.append(f"- `{row['group']}:{row['key']}` `{row['enum']}` `{row['route']}`: **{row['status']}**{suffix}")
         lines.append("")
         args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
         args.markdown_output.write_text("\n".join(lines), encoding="utf-8")
