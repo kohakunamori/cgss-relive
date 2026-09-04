@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import unittest
 from pathlib import Path
-
-import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "enrich-runtime-contract-blocker.py"
@@ -63,37 +62,49 @@ def _runtime(route: str = "/story/start", endpoint_ids: list[int] | None = None)
     }
 
 
-def test_enriches_unique_blocker_without_field_names() -> None:
-    report = MODULE.enrich(_runtime(), _catalog())
-    blocker = report["runs"]["device"]["semantic_contract_blocker"]
-    assert blocker["next_action"] == "reconstruct_concrete_plus_effective_base_response_model"
-    assert blocker["route_identity_ambiguous"] is False
-    candidate = blocker["effective_contract_candidates"][0]
-    assert candidate == {
-        "endpoint_id": 48,
-        "route": "/story/start",
-        "concrete_response_field_count": 2,
-        "concrete_required_response_field_count": 1,
-        "concrete_unknown_response_field_count": 0,
-        "exact_state_mutation_count": 3,
-        "effective_base_parser_count": 1,
-        "effective_base_field_link_count": 4,
-        "effective_base_required_field_link_count": 1,
-        "effective_base_unknown_field_link_count": 2,
-        "effective_base_provenance": ["direct-BL"],
-        "inferred_subsystems": ["story-commu"],
-    }
-    text = repr(report)
-    assert "story_id" not in text
-    assert "result" not in text
+class RuntimeContractEnrichmentTests(unittest.TestCase):
+    def test_enriches_unique_blocker_without_field_names(self) -> None:
+        report = MODULE.enrich(_runtime(), _catalog())
+        blocker = report["runs"]["device"]["semantic_contract_blocker"]
+        self.assertEqual(
+            blocker["next_action"],
+            "reconstruct_concrete_plus_effective_base_response_model",
+        )
+        self.assertFalse(blocker["route_identity_ambiguous"])
+        candidate = blocker["effective_contract_candidates"][0]
+        self.assertEqual(
+            candidate,
+            {
+                "endpoint_id": 48,
+                "route": "/story/start",
+                "concrete_response_field_count": 2,
+                "concrete_required_response_field_count": 1,
+                "concrete_unknown_response_field_count": 0,
+                "exact_state_mutation_count": 3,
+                "effective_base_parser_count": 1,
+                "effective_base_field_link_count": 4,
+                "effective_base_required_field_link_count": 1,
+                "effective_base_unknown_field_link_count": 2,
+                "effective_base_provenance": ["direct-BL"],
+                "inferred_subsystems": ["story-commu"],
+            },
+        )
+        text = repr(report)
+        self.assertNotIn("story_id", text)
+        self.assertNotIn("result", text)
+
+    def test_enrichment_rejects_runtime_catalog_route_mismatch(self) -> None:
+        with self.assertRaisesRegex(MODULE.EnrichmentError, "runtime/C14 route mismatch"):
+            MODULE.enrich(_runtime(route="/wrong"), _catalog())
+
+    def test_run_without_semantic_blocker_remains_explicitly_empty(self) -> None:
+        runtime = {"schema": 5, "runs": {"device": {"semantic_contract_blocker": None}}}
+        report = MODULE.enrich(runtime, _catalog())
+        self.assertEqual(
+            report["runs"]["device"],
+            {"semantic_contract_blocker": None},
+        )
 
 
-def test_enrichment_rejects_runtime_catalog_route_mismatch() -> None:
-    with pytest.raises(MODULE.EnrichmentError, match="runtime/C14 route mismatch"):
-        MODULE.enrich(_runtime(route="/wrong"), _catalog())
-
-
-def test_run_without_semantic_blocker_remains_explicitly_empty() -> None:
-    runtime = {"schema": 5, "runs": {"device": {"semantic_contract_blocker": None}}}
-    report = MODULE.enrich(runtime, _catalog())
-    assert report["runs"]["device"] == {"semantic_contract_blocker": None}
+if __name__ == "__main__":
+    unittest.main()
