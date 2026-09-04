@@ -11,69 +11,67 @@ from server.semantic_contracts import SemanticContractIndex
 
 
 def _write_semantic_db(path: Path) -> None:
-    con = sqlite3.connect(path)
+    db = sqlite3.connect(path)
     try:
-        con.executescript(
+        db.executescript(
             """
-            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE endpoints (
-                endpoint_id INTEGER PRIMARY KEY,
-                enum TEXT NOT NULL,
-                route TEXT NOT NULL,
-                status TEXT NOT NULL,
-                group_name TEXT NOT NULL,
-                api_key INTEGER,
-                request_field_count INTEGER NOT NULL,
-                response_field_count INTEGER NOT NULL,
-                exact_state_mutation_count INTEGER NOT NULL
+            CREATE TABLE endpoints(
+              id INTEGER PRIMARY KEY, route TEXT NOT NULL, enum TEXT, status TEXT,
+              group_name TEXT, api_key INTEGER
             );
-            CREATE TABLE response_fields (
-                endpoint_id INTEGER NOT NULL,
-                task TEXT NOT NULL,
-                method TEXT NOT NULL,
-                field TEXT NOT NULL,
-                requiredness TEXT NOT NULL,
-                value_types_json TEXT NOT NULL
+            CREATE TABLE request_fields(id INTEGER PRIMARY KEY, endpoint_id INTEGER);
+            CREATE TABLE response_fields(
+              id INTEGER PRIMARY KEY, endpoint_id INTEGER, task TEXT NOT NULL,
+              method TEXT, field TEXT NOT NULL, requiredness TEXT, value_types_json TEXT
             );
-            CREATE TABLE endpoint_subsystems (
-                endpoint_id INTEGER NOT NULL,
-                subsystem TEXT NOT NULL
-            );
+            CREATE TABLE endpoint_state_mutations(endpoint_id INTEGER, mutation_id INTEGER);
+            CREATE TABLE subsystems(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE endpoint_subsystems(endpoint_id INTEGER, state_type TEXT, subsystem_id INTEGER);
+            CREATE VIEW endpoint_semantics AS SELECT id AS endpoint_id, route FROM endpoints;
             """
         )
-        con.executemany(
-            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        db.executemany(
+            "INSERT INTO endpoints(id,route,enum,status,group_name,api_key) VALUES(?,?,?,?,?,?)",
             [
-                ("schema", "1"),
-                ("endpoint_count", "2"),
+                (1, "/load/index", "LoadIndex", "proven-static", "A", 1),
+                (2, "/story/start", "StoryStart", "proven-static", "A", 2),
             ],
         )
-        con.executemany(
-            """
-            INSERT INTO endpoints(
-                endpoint_id, enum, route, status, group_name, api_key,
-                request_field_count, response_field_count, exact_state_mutation_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (1, "LoadIndex", "/load/index", "proven-static", "load", 1, 2, 1, 3),
-                (2, "StoryStart", "/story/start", "proven-static", "story", 2, 0, 0, 1),
-            ],
+        db.executemany(
+            "INSERT INTO request_fields(id,endpoint_id) VALUES(?,?)",
+            [(1, 1), (2, 1)],
         )
-        con.execute(
-            "INSERT INTO response_fields VALUES (?, ?, ?, ?, ?, ?)",
-            (1, "Stage.LoadTask", "Stage.LoadTask$$Parse", "user_data", "required-path", '["object"]'),
+        db.execute(
+            "INSERT INTO response_fields(id,endpoint_id,task,method,field,requiredness,value_types_json) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (1, 1, "Stage.LoadTask", "Stage.LoadTask$$Parse", "user_data", "required-path", '["object"]'),
         )
-        con.executemany(
-            "INSERT INTO endpoint_subsystems VALUES (?, ?)",
+        db.executemany(
+            "INSERT INTO endpoint_state_mutations(endpoint_id,mutation_id) VALUES(?,?)",
+            [(1, 1), (1, 2), (1, 3), (2, 4)],
+        )
+        db.executemany(
+            "INSERT INTO subsystems(id,name) VALUES(?,?)",
             [(1, "home"), (2, "story-commu")],
         )
-        con.commit()
+        db.executemany(
+            "INSERT INTO endpoint_subsystems(endpoint_id,state_type,subsystem_id) VALUES(?,?,?)",
+            [
+                (1, "Stage.WorkHomeData", 1),
+                (2, "Stage.WorkStoryData", 2),
+            ],
+        )
+        db.commit()
     finally:
-        con.close()
+        db.close()
 
 
-def _write_overlay(path: Path, *, route: str = "/load/index", provenance_kind: str = "direct-BL") -> None:
+def _write_overlay(
+    path: Path,
+    *,
+    route: str = "/load/index",
+    provenance_kind: str = "direct-BL",
+) -> None:
     path.write_text(
         json.dumps(
             {
