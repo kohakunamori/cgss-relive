@@ -6,13 +6,16 @@ This layer composes three independent concerns:
 * persistent client-facing numeric identity bindings;
 * the final 11.6.3 response projection.
 
-It intentionally does not perform HTTP/body encryption.  ``server.http_server`` can
-consume ``build_data`` as a dynamic provider while transport remains unchanged.
+It intentionally does not perform HTTP/body encryption. ``server.http_server`` can
+consume ``DynamicLoadIndexData`` as a normal Mapping while the mapping refreshes
+from domain state once per response conversion.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
+from threading import local
 from types import MappingProxyType
 from typing import Mapping
 
@@ -40,7 +43,7 @@ class DomainLoadIndexConfig:
     """Explicit compatibility policy for one archival player.
 
     Fields that are not yet proven domain semantics remain here at the application /
-    adapter boundary.  They can later migrate into the domain only when evidence
+    adapter boundary. They can later migrate into the domain only when evidence
     shows they represent durable game meaning.
     """
 
@@ -133,3 +136,38 @@ class DomainLoadIndexController:
             last_payment_date=self._config.last_payment_date,
         )
         return project_home_snapshot_to_load_index_data(snapshot, projection)
+
+
+class DynamicLoadIndexData(MappingABC[str, object]):
+    """Mapping facade that refreshes from ``DomainLoadIndexController`` per response.
+
+    Existing bootstrap transport calls ``dict(load_index_data)``. Python's mapping
+    conversion requests ``keys()`` and then indexes those keys. ``keys()`` refreshes
+    one thread-local snapshot, so one HTTP worker observes one coherent projection
+    while later requests see later persisted domain mutations.
+    """
+
+    def __init__(self, controller: DomainLoadIndexController) -> None:
+        self._controller = controller
+        self._local = local()
+
+    def _refresh(self) -> dict[str, object]:
+        current = self._controller.build_data()
+        self._local.current = current
+        return current
+
+    def _current(self) -> dict[str, object]:
+        current = getattr(self._local, "current", None)
+        return self._refresh() if current is None else current
+
+    def keys(self):
+        return tuple(self._refresh().keys())
+
+    def __getitem__(self, key: str) -> object:
+        return self._current()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(tuple(self._refresh().keys()))
+
+    def __len__(self) -> int:
+        return len(self._current())
