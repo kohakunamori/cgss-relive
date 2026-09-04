@@ -38,6 +38,8 @@ def _write_semantic_db(path: Path) -> None:
               VALUES(1,'/safe/empty','SafeEmpty','proven-static','A',1);
             INSERT INTO endpoints(id,route,enum,status,group_name,api_key)
               VALUES(2,'/safe/optional','SafeOptional','proven-static','A',2);
+            INSERT INTO endpoints(id,route,enum,status,group_name,api_key)
+              VALUES(3,'/dead/value','DeadValue','proven-static','A',3);
             """
         )
         db.commit()
@@ -50,8 +52,8 @@ def _write_catalog(path: Path) -> None:
         json.dumps(
             {
                 "schema": 1,
-                "endpoint_count": 2,
-                "unique_route_count": 2,
+                "endpoint_count": 3,
+                "unique_route_count": 3,
                 "duplicate_route_count": 0,
                 "routes": [
                     {
@@ -95,6 +97,27 @@ def _write_catalog(path: Path) -> None:
                             }
                         ],
                     },
+                    {
+                        "route": "/dead/value",
+                        "endpoints": [
+                            {
+                                "endpoint_id": 3,
+                                "concrete_response_fields": [
+                                    {
+                                        "field": "data",
+                                        "task": "Stage.SyntheticDeadTask",
+                                        "method": "Stage.SyntheticDeadTask$$Parse",
+                                        "requiredness": "required-path",
+                                        "value_types": ["json"],
+                                    }
+                                ],
+                                "exact_state_mutation_count": 0,
+                                "effective_base_parsers": [
+                                    {"response_scope": "common-envelope"}
+                                ],
+                            }
+                        ],
+                    },
                 ],
             }
         ),
@@ -102,16 +125,43 @@ def _write_catalog(path: Path) -> None:
     )
 
 
+def _write_dead_value_report(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "route": "/dead/value",
+                "endpoint_id": 3,
+                "task": "Stage.SyntheticDeadTask",
+                "method": "Stage.SyntheticDeadTask$$Parse",
+                "parser_data_value_class": "dead-value",
+                "parser_local_arbitrary_json_value_safe": True,
+                "empty_object_promotion": "parser-local-safe-if-field-present",
+                "semantic_sink_count": 0,
+                "semantic_sinks": [],
+                "reachable_unresolved_control_flow": [],
+                "reachable_normal_return_count": 1,
+                "reachable_managed_tail_exit_count": 0,
+                "untouched_client_acceptance": False,
+                "ui_visible_success": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class FullServiceStackWrapperTests(unittest.TestCase):
-    def test_compiler_composes_c15_c18_and_preserves_explicit_array_override(self) -> None:
+    def test_compiler_composes_c15_c18_c27_and_preserves_explicit_array_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             semantic = root / "semantic.sqlite"
             catalog = root / "c14.json"
+            c27 = root / "c27.json"
             explicit = root / "explicit.json"
             output = root / "compiled.json"
             _write_semantic_db(semantic)
             _write_catalog(catalog)
+            _write_dead_value_report(c27)
             explicit.write_text(
                 json.dumps(
                     {
@@ -132,10 +182,11 @@ class FullServiceStackWrapperTests(unittest.TestCase):
                 semantic_db=semantic,
                 effective_runtime_catalog=catalog,
                 output=output,
+                dead_value_evidence=c27,
                 explicit_templates=explicit,
                 enforce_final_counts=False,
             )
-            self.assertEqual(counts, (1, 1, 1, 2))
+            self.assertEqual(counts, (1, 1, 1, 1, 3))
             document = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(document["routes"]["/safe/empty"]["endpoint_id"], 1)
             self.assertEqual(document["routes"]["/safe/empty"]["data"], [{"id": 1}])
@@ -147,6 +198,11 @@ class FullServiceStackWrapperTests(unittest.TestCase):
             self.assertIn(
                 "parser-proven omission",
                 document["routes"]["/safe/optional"]["evidence"],
+            )
+            self.assertEqual(document["routes"]["/dead/value"]["data"], {})
+            self.assertIn(
+                "dead-value proof",
+                document["routes"]["/dead/value"]["evidence"],
             )
 
     def test_delegate_command_injects_semantics_templates_and_preserves_passthrough(self) -> None:
