@@ -1,4 +1,4 @@
-name: Compile C15 runtime response templates
+name: Compile static runtime response templates
 
 on:
   workflow_dispatch:
@@ -7,11 +7,13 @@ on:
       - analysis/server-contracts-11.6.3
     paths:
       - server/conservative_templates.py
+      - server/optional_omission_templates.py
       - server/response_templates.py
       - server/template_response.py
       - scripts/prepare-runtime-response-templates.py
       - scripts/run-rooted-full-service-stack.py
       - tests/test_conservative_runtime_templates.py
+      - tests/test_optional_omission_templates.py
       - tests/test_full_service_stack_wrapper.py
       - tests/test_template_response.py
       - .github/workflows/compile-c15-runtime-templates.yml
@@ -64,24 +66,23 @@ jobs:
           echo "C14=$C14" >> "$GITHUB_ENV"
           echo "C9=$C9" >> "$GITHUB_ENV"
 
-      - name: Run C15 runtime and shape tests
+      - name: Run static runtime template tests
         run: |
           python -m unittest discover -s tests -p 'test_conservative_runtime_templates.py' -v
+          python -m unittest discover -s tests -p 'test_optional_omission_templates.py' -v
           python -m unittest discover -s tests -p 'test_template_response.py' -v
-          if test -f tests/test_full_service_stack_wrapper.py; then
-            python -m unittest discover -s tests -p 'test_full_service_stack_wrapper.py' -v
-          fi
+          python -m unittest discover -s tests -p 'test_full_service_stack_wrapper.py' -v
 
-      - name: Compile real C15 runtime template baseline
+      - name: Compile real static runtime template baseline
         run: |
           mkdir -p out
           python scripts/prepare-runtime-response-templates.py \
             --semantic-db "$C9" \
             --effective-runtime-catalog "$C14" \
-            --output out/c15-runtime-response-templates.json \
-            | tee out/c15-runtime-compile-summary.json
+            --output out/static-runtime-response-templates.json \
+            | tee out/static-runtime-compile-summary.json
 
-      - name: Validate compiled baseline through real C9 loader
+      - name: Validate composed baseline through real C9 loader
         run: |
           python - <<'PY'
           import json
@@ -92,28 +93,41 @@ jobs:
 
           semantic = SemanticContractIndex(Path(os.environ['C9']))
           store = ResponseTemplateStore.load(
-              Path('out/c15-runtime-response-templates.json'),
+              Path('out/static-runtime-response-templates.json'),
               semantic_index=semantic,
           )
-          if store.count != 154:
-              raise SystemExit(f'expected 154 compiled C15 routes, got {store.count}')
+          if store.count != 155:
+              raise SystemExit(f'expected 155 compiled static routes, got {store.count}')
           for route in ('/account_notice/accept', '/birthday/save', '/card_storage/setting'):
               template = store.get(route)
               if template is None or template.data != {}:
-                  raise SystemExit(f'missing expected conservative route: {route}')
-          summary = json.loads(Path('out/c15-runtime-compile-summary.json').read_text())
-          if summary['device_acceptance'] is not False:
-              raise SystemExit('static C15 compile must never claim device acceptance')
+                  raise SystemExit(f'missing expected C15 conservative route: {route}')
+          optional = store.get('/producer_rank/index')
+          if optional is None or optional.endpoint_id != 162 or optional.data != {}:
+              raise SystemExit('missing C18 /producer_rank/index optional-omission template')
+          if 'parser-proven omission' not in (optional.evidence or ''):
+              raise SystemExit('C18 provenance was not retained')
+          summary = json.loads(Path('out/static-runtime-compile-summary.json').read_text())
+          expected = {
+              'c15_baseline_routes': 154,
+              'c18_optional_omission_routes': 1,
+              'static_baseline_routes': 155,
+              'compiled_template_routes': 155,
+              'device_acceptance': False,
+          }
+          for key, value in expected.items():
+              if summary.get(key) != value:
+                  raise SystemExit(f'summary mismatch for {key}: {summary.get(key)!r} != {value!r}')
           print({'validated_template_routes': store.count})
           PY
 
       - name: Hash outputs
         run: sha256sum out/* | tee out/SHA256SUMS
 
-      - name: Upload compiled runtime baseline
+      - name: Upload compiled static runtime baseline
         uses: actions/upload-artifact@v4
         with:
-          name: final-client-c15-runtime-response-templates
+          name: final-client-static-runtime-response-templates-c15-c18
           path: out/
           if-no-files-found: error
           retention-days: 30
