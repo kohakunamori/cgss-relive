@@ -1,0 +1,135 @@
+"""Application/controller for domain-backed final-client ``/load/index`` data.
+
+This layer composes three independent concerns:
+
+* preservation-domain profile/Home state;
+* persistent client-facing numeric identity bindings;
+* the final 11.6.3 response projection.
+
+It intentionally does not perform HTTP/body encryption.  ``server.http_server`` can
+consume ``build_data`` as a dynamic provider while transport remains unchanged.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Mapping
+
+from server.adapters.identity_store import SQLiteCompatibilityIdentityStore
+from server.adapters.load_index import (
+    CardLoadIndexBinding,
+    LoadIndexProjectionPolicy,
+    UnitLoadIndexBinding,
+    project_home_snapshot_to_load_index_data,
+)
+from server.domain import BootstrapPolicy, Clock, PreservationProfileService
+
+
+_DEFAULT_RESOURCE_KIND_MAP = {
+    "friend_pt": "friend_pt",
+    "jewel": "jewel",
+    "free_jewel": "free_jewel",
+    "gold": "gold",
+    "stamina": "stamina",
+}
+
+
+@dataclass(frozen=True)
+class DomainLoadIndexConfig:
+    """Explicit compatibility policy for one archival player.
+
+    Fields that are not yet proven domain semantics remain here at the application /
+    adapter boundary.  They can later migrate into the domain only when evidence
+    shows they represent durable game meaning.
+    """
+
+    player_id: str
+    viewer_id: int
+    bootstrap_policy: BootstrapPolicy | None = None
+    leader_user_card_id: str | None = None
+    resource_kind_map: Mapping[str, str] = field(default_factory=lambda: dict(_DEFAULT_RESOURCE_KIND_MAP))
+    comment: str = ""
+    max_card_num: int = 300
+    max_room_storage_num: int = 500
+    fan: int = 0
+    producer_rank: int = 1
+    birth: int = 0
+    sum_of_money: int = 0
+    last_payment_date: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.player_id:
+            raise ValueError("player_id must be non-empty")
+        if self.viewer_id <= 0:
+            raise ValueError("viewer_id must be positive")
+        resource_map = dict(self.resource_kind_map)
+        if set(resource_map) != set(_DEFAULT_RESOURCE_KIND_MAP):
+            raise ValueError("resource_kind_map must map the five load/index user_info resource fields")
+        if any(not value for value in resource_map.values()):
+            raise ValueError("resource_kind_map values must be non-empty")
+        object.__setattr__(self, "resource_kind_map", MappingProxyType(resource_map))
+
+
+class DomainLoadIndexController:
+    """Build current ``/load/index`` data from persisted preservation state."""
+
+    def __init__(
+        self,
+        profile_service: PreservationProfileService,
+        identities: SQLiteCompatibilityIdentityStore,
+        *,
+        clock: Clock,
+        config: DomainLoadIndexConfig,
+    ) -> None:
+        self._profiles = profile_service
+        self._identities = identities
+        self._clock = clock
+        self._config = config
+
+    def _snapshot(self):
+        try:
+            return self._profiles.get_home_snapshot(self._config.player_id)
+        except KeyError:
+            policy = self._config.bootstrap_policy
+            if policy is None:
+                raise
+            return self._profiles.bootstrap_profile(
+                policy,
+                player_id=self._config.player_id,
+            ).snapshot
+
+    def build_data(self) -> dict[str, object]:
+        snapshot = self._snapshot()
+        player_id = snapshot.profile.player_id
+
+        card_bindings = {
+            card.user_card_id: CardLoadIndexBinding(
+                serial_id=self._identities.ensure_card_serial(player_id, card.user_card_id)
+            )
+            for card in snapshot.cards
+        }
+        unit_bindings = {
+            unit.unit_id: UnitLoadIndexBinding(
+                unit_id=self._identities.ensure_unit_id(player_id, unit.unit_id)
+            )
+            for unit in snapshot.units
+        }
+
+        projection = LoadIndexProjectionPolicy(
+            viewer_id=self._config.viewer_id,
+            now=int(self._clock.now().timestamp()),
+            card_bindings=card_bindings,
+            unit_bindings=unit_bindings,
+            leader_user_card_id=self._config.leader_user_card_id,
+            resource_kind_map=self._config.resource_kind_map,
+            comment=self._config.comment,
+            max_card_num=self._config.max_card_num,
+            max_room_storage_num=self._config.max_room_storage_num,
+            fan=self._config.fan,
+            producer_rank=self._config.producer_rank,
+            birth=self._config.birth,
+            sum_of_money=self._config.sum_of_money,
+            last_payment_date=self._config.last_payment_date,
+        )
+        return project_home_snapshot_to_load_index_data(snapshot, projection)
