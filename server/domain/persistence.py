@@ -1,6 +1,6 @@
 """Versioned SQLite persistence for the preservation domain.
 
-The mutable database stores only archival user state and revision metadata.  Frozen
+The mutable database stores only archival user state and revision metadata. Frozen
 CGSS master data remains behind ``MasterDataRepository`` and is not copied into
 these tables.
 """
@@ -24,7 +24,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATION_1 = (
     """
@@ -100,7 +100,21 @@ _MIGRATION_1 = (
     """,
 )
 
-_MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1}
+# v1 used the speculative domain name ``locked`` and omitted two card fields that
+# were still adapter-only. The targeted final-client WorkCardData pass closes these
+# semantics: ``_step`` is the star-lesson/star-rank progression, ``_love`` is the
+# card love/affection counter, and response ``protect`` maps to independent
+# ``_isProtect`` state. Preserve old profiles through an explicit migration.
+_MIGRATION_2 = (
+    "ALTER TABLE user_cards RENAME COLUMN locked TO is_protected",
+    "ALTER TABLE user_cards ADD COLUMN star_lesson_step INTEGER NOT NULL DEFAULT 0 CHECK (star_lesson_step >= 0)",
+    "ALTER TABLE user_cards ADD COLUMN love INTEGER NOT NULL DEFAULT 0 CHECK (love >= 0)",
+)
+
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: _MIGRATION_1,
+    2: _MIGRATION_2,
+}
 
 
 def _encode_time(value: datetime | None) -> str | None:
@@ -304,15 +318,17 @@ class SQLiteDomainStore:
             """
             INSERT INTO user_cards(
                 user_card_id, player_id, master_card_id, level, experience,
-                skill_level, locked, favorite, acquired_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                skill_level, star_lesson_step, love, is_protected, favorite, acquired_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_card_id) DO UPDATE SET
                 player_id = excluded.player_id,
                 master_card_id = excluded.master_card_id,
                 level = excluded.level,
                 experience = excluded.experience,
                 skill_level = excluded.skill_level,
-                locked = excluded.locked,
+                star_lesson_step = excluded.star_lesson_step,
+                love = excluded.love,
+                is_protected = excluded.is_protected,
                 favorite = excluded.favorite,
                 acquired_at = excluded.acquired_at
             """,
@@ -323,7 +339,9 @@ class SQLiteDomainStore:
                 card.level,
                 card.experience,
                 card.skill_level,
-                int(card.locked),
+                card.star_lesson_step,
+                card.love,
+                int(card.is_protected),
                 int(card.favorite),
                 _encode_time(card.acquired_at),
             ),
@@ -346,7 +364,9 @@ class SQLiteDomainStore:
                     level=int(row["level"]),
                     experience=int(row["experience"]),
                     skill_level=int(row["skill_level"]),
-                    locked=bool(row["locked"]),
+                    star_lesson_step=int(row["star_lesson_step"]),
+                    love=int(row["love"]),
+                    is_protected=bool(row["is_protected"]),
                     favorite=bool(row["favorite"]),
                     acquired_at=acquired_at,
                 )
