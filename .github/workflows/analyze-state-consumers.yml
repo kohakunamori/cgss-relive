@@ -1,0 +1,148 @@
+name: Analyze C7b state consumers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-state-consumers.yml'
+      - 'scripts/analyze-state-consumers.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      C7A_ARTIFACT_ID: '9922977839'
+      C7A_ARTIFACT_SHA256: 'ecc46ffd54a36d3a25518a46c37f483d61e71c4f44eba927ccd8c0bd2ce8e4c6'
+      C7A_JSON_SHA256: '2e38ea036ce4b326271753aa680f903159030e734a3e7834373bd397a8ac243a'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 6 for Il2CppDumper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Fetch and verify sanitized C7a input
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/c7a reports
+          curl --fail --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -o work/c7a.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C7A_ARTIFACT_ID}/zip"
+          echo "${C7A_ARTIFACT_SHA256}  work/c7a.zip" | sha256sum -c -
+          unzip -q work/c7a.zip -d work/c7a
+          echo "${C7A_JSON_SHA256}  work/c7a/response-state-mutations-11.6.3.json" | sha256sum -c -
+
+      - name: Download and verify exact final XAPK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+
+      - name: Extract and verify ARM64 IL2CPP specimen
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARM_APK=''
+          META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"
+          test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+
+      - name: Build Il2CppDumper method map
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 \
+            -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          mkdir -p work/dumper work/dump
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json')
+          d=json.loads(p.read_text())
+          d['RequireAnyKey']=False
+          d['GenerateScript']=True
+          d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d, indent=2))
+          PY
+          DLL=$(find work/dumper -maxdepth 2 -type f -name 'Il2CppDumper.dll' | head -1)
+          test -n "$DLL"
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+
+      - name: Build C7b state consumer graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check pyelftools
+          python scripts/analyze-state-consumers.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --state-mutations work/c7a/response-state-mutations-11.6.3.json \
+            --output reports/state-consumers-11.6.3.json \
+            --markdown-output reports/state-consumers-11.6.3.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/state-consumers-11.6.3.json'))
+          assert d['schema']==1
+          assert d['state_type_count']==171, d['state_type_count']
+          assert d['reader_method_count']>0, d['reader_method_count']
+          assert d['reader_xref_count']>0, d['reader_xref_count']
+          assert d['consumer_method_count']>0, d['consumer_method_count']
+          assert d['game_owned_consumer_count']>0, d['game_owned_consumer_count']
+          assert d['state_types_with_consumers']>0, d['state_types_with_consumers']
+          print(json.dumps({k:d[k] for k in (
+              'state_type_count','reader_method_count','reader_rva_count','shared_reader_rva_count',
+              'reader_xref_count','unique_reader_consumer_relation_count','consumer_method_count',
+              'game_owned_consumer_count','state_types_with_readers','state_types_without_readers',
+              'state_types_with_consumers','state_types_without_consumers',
+              'endpoint_state_consumer_relation_count','unresolved_consumer_xref_count',
+              'ambiguous_consumer_xref_count','ambiguous_reader_xref_count','edge_kind_counts',
+              'consumer_relevance_counts')}, indent=2))
+          PY
+
+      - name: Enforce sanitized semantic-only boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C7b consumer graph boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload state consumer graph
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c7b-state-consumers
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
