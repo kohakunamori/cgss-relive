@@ -1,0 +1,26 @@
+name: Test preservation domain core
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - server/domain/**
+      - tests/test_domain_core.py
+      - .github/workflows/test-domain-core.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run domain core tests
+        run: python -m unittest tests.test_domain_core -v
