@@ -5,6 +5,10 @@ contain reconstructed/proprietary payload bodies.  The server supplies the commo
 success envelope and encryption.  A template cannot target an ambiguous HTTP path:
 final 11.6.3 has several duplicate routes, and path-only HTTP dispatch cannot prove
 which endpoint record the client intended.
+
+Template stores can be composed.  This allows a conservative static baseline to
+be overlaid by stronger explicit reconstructions while preserving exact endpoint
+identity.  Overrides for a route are accepted only when endpoint_id is identical.
 """
 from __future__ import annotations
 
@@ -94,8 +98,27 @@ class ResponseTemplateStore:
     def routes(self) -> tuple[str, ...]:
         return tuple(sorted(self._templates))
 
+    @property
+    def count(self) -> int:
+        return len(self._templates)
+
     def get(self, route: str) -> ResponseTemplate | None:
         return self._templates.get(self._normalize_route(route))
+
+    def merged(self, override: "ResponseTemplateStore") -> "ResponseTemplateStore":
+        """Return a store where ``override`` wins for identical endpoint identities."""
+        combined = dict(self._templates)
+        for route in override.routes:
+            incoming = override.get(route)
+            assert incoming is not None
+            existing = combined.get(route)
+            if existing is not None and existing.endpoint_id != incoming.endpoint_id:
+                raise ValueError(
+                    f"response template merge identity mismatch for {route}: "
+                    f"{existing.endpoint_id} != {incoming.endpoint_id}"
+                )
+            combined[route] = incoming
+        return ResponseTemplateStore(combined)
 
     def __contains__(self, route: str) -> bool:
         return self.get(route) is not None
