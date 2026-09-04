@@ -4,7 +4,8 @@
 The output is a normal schema-1 ResponseTemplateStore document accepted by
 ``server.http_server --response-templates``.  C15 supplies only conservative
 empty-data candidates derived from C14.  Optional explicit templates override a
-C15 route only when the exact endpoint identity is unchanged.
+C15 route only when the exact endpoint identity is unchanged.  Exact JSON-like
+``data`` shapes are preserved; arrays/scalars are never coerced into objects.
 
 This command performs no network/device work and does not promote static evidence
 to client acceptance.
@@ -12,6 +13,7 @@ to client acceptance.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -35,7 +37,7 @@ def _document(store: ResponseTemplateStore) -> dict:
         assert template is not None
         item = {
             "endpoint_id": template.endpoint_id,
-            "data": dict(template.data),
+            "data": copy.deepcopy(template.data),
         }
         if template.evidence is not None:
             item["evidence"] = template.evidence
