@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Compile the opt-in C15 baseline plus stronger explicit templates for runtime.
+"""Compile final-client static response baselines plus stronger explicit templates.
 
 The output is a normal schema-1 ResponseTemplateStore document accepted by
-``server.http_server --response-templates``.  C15 supplies only conservative
-empty-data candidates derived from C14.  Optional explicit templates override a
-C15 route only when the exact endpoint identity is unchanged.  Exact JSON-like
-``data`` shapes are preserved; arrays/scalars are never coerced into objects.
+``server.http_server --response-templates``.
+
+Static layers are kept distinct before composition:
+
+- C15: 154 unique routes with zero concrete response fields/state mutations and
+  common-envelope-only base parser surface;
+- C18: parser-proven omission routes where every concrete business field is
+  optional/defaulted, with zero state mutations and common-envelope-only base
+  parser surface.
+
+Optional explicit templates override a static route only when the exact endpoint
+identity is unchanged. Exact JSON-like ``data`` shapes are preserved; arrays,
+scalars and null are never coerced into objects.
 
 This command performs no network/device work and does not promote static evidence
-to client acceptance.
+to untouched-client acceptance.
 """
 from __future__ import annotations
 
@@ -25,6 +34,10 @@ if str(ROOT) not in sys.path:
 from server.conservative_templates import (  # noqa: E402
     ConservativeTemplateError,
     load_conservative_empty_templates,
+)
+from server.optional_omission_templates import (  # noqa: E402
+    OptionalOmissionTemplateError,
+    load_optional_omission_templates,
 )
 from server.response_templates import ResponseTemplateStore  # noqa: E402
 from server.semantic_contracts import SemanticContractIndex  # noqa: E402
@@ -59,11 +72,16 @@ def main() -> int:
 
     try:
         semantic = SemanticContractIndex(args.semantic_db)
-        baseline = load_conservative_empty_templates(
+        c15 = load_conservative_empty_templates(
             args.effective_runtime_catalog,
             semantic_index=semantic,
         )
-        compiled = baseline
+        c18 = load_optional_omission_templates(
+            args.effective_runtime_catalog,
+            semantic_index=semantic,
+        )
+        static_baseline = c15.merged(c18)
+        compiled = static_baseline
         explicit_count = 0
         if args.explicit_templates is not None:
             explicit = ResponseTemplateStore.load(
@@ -71,8 +89,13 @@ def main() -> int:
                 semantic_index=semantic,
             )
             explicit_count = explicit.count
-            compiled = baseline.merged(explicit)
-    except (OSError, ValueError, ConservativeTemplateError) as exc:
+            compiled = static_baseline.merged(explicit)
+    except (
+        OSError,
+        ValueError,
+        ConservativeTemplateError,
+        OptionalOmissionTemplateError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -84,7 +107,9 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "c15_baseline_routes": baseline.count,
+                "c15_baseline_routes": c15.count,
+                "c18_optional_omission_routes": c18.count,
+                "static_baseline_routes": static_baseline.count,
                 "explicit_template_routes": explicit_count,
                 "compiled_template_routes": compiled.count,
                 "evidence_level": "static-template-candidate",
