@@ -83,9 +83,12 @@ jobs:
           assert db.execute("select count(*) from endpoints where route='/tool/signup_migration' and enum='SignUpMigration'").fetchone()[0]==2
           for route in ('/load/index','/live/start','/live/end','/gacha/exec'):
               assert db.execute('select count(*) from task_bindings where route=?',(route,)).fetchone()[0] > 0, route
-          # Refined requiredness must actually propagate into bound endpoint rows.
+          # Original C6 had bound required-path=19 and unknown-cfg=290. The
+          # validated tail refinement must improve those endpoint-bound counts.
           bound=dict(db.execute('select requiredness,count(*) from response_fields where endpoint_id is not null group by requiredness'))
-          assert bound.get('required-path',0) > 24, bound
+          assert bound.get('required-path',0) > 19, bound
+          assert bound.get('unknown-cfg',999999) < 290, bound
+          assert bound == d['response_requiredness_counts'], (bound,d['response_requiredness_counts'])
           print(json.dumps({**{k:d[k] for k in ('endpoint_count','endpoint_with_request_count','endpoint_with_response_count','request_field_binding_count','response_field_binding_count','unbound_request_contract_count','unbound_response_contract_count','response_requiredness_counts')},'bound_sqlite_requiredness':bound},indent=2))
           db.close()
           PY
