@@ -1,0 +1,123 @@
+name: Analyze C3 response field accesses
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-response-field-accesses.yml'
+      - 'scripts/analyze-response-field-accesses.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASELINE_ARTIFACT_ID: '9920654705'
+      INVENTORY_SHA256: 'c5c4106e4c4abacec4b6336433340f9e3dfa4a0d91820282c5a723f3c0abc543'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Fetch validated sanitized C0 inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline work/xapk work/dumper work/dump reports
+          curl --fail --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -o baseline.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
+          unzip -q baseline.zip -d baseline
+          echo "${INVENTORY_SHA256}  baseline/server-contract-inventory.json" | sha256sum -c -
+
+      - name: Prepare exact final native/string maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll | head -1)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
+          python -m pip install --disable-pip-version-check capstone pyelftools
+
+      - name: Classify response field accesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-response-field-accesses.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --inventory baseline/server-contract-inventory.json \
+            --output reports/response-field-accesses.json \
+            --markdown-output reports/response-field-accesses.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/response-field-accesses.json'))
+          assert d['schema']==1
+          assert d['response_method_count']==513, d['response_method_count']
+          assert d['field_candidate_count'] >= 1000, d['field_candidate_count']
+          assert d['response_method_literal_reference_count'] > 100, d['response_method_literal_reference_count']
+          assert d['classified_access_count'] > 100, d['classified_access_count']
+          print(json.dumps({k:d[k] for k in (
+            'response_method_count','field_candidate_count','literal_relocation_count',
+            'exact_literal_reference_count','response_method_literal_reference_count',
+            'classified_access_count','classified_unique_field_count','classified_method_count',
+            'access_style_counts','value_type_counts','optionality_counts',
+            'unclassified_response_literal_reference_count'
+          )},indent=2))
+          PY
+
+      - name: Enforce sanitized boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work baseline baseline.zip
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C3 field-access report boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload response field access report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c3-response-field-accesses
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
