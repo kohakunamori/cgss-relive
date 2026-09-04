@@ -1,0 +1,111 @@
+name: Build C6 server-facing DB tail-aware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/build-server-facing-contract-db-tail-aware.yml'
+      - 'scripts/build-server-facing-contract-db.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASELINE_ARTIFACT_ID: '9920654705'
+      C4_ARTIFACT_ID: '9922864461'
+      C5_ARTIFACT_ID: '9923983560'
+      ENDPOINTS_SHA256: '3173d45f54265bc491a166405713802bb8eccd52240446ab96856747a3ae6627'
+      C4_SHA256: '28c17c734bb8515a110aaef68c94ffcbe3fdcbdc4f7a74ab682e10d2bf3fc6ad'
+      C5_SHA256: 'b4636bec68e6e5a2312f23eec8e2be7afa5befab388e53ade8e72920dd4e7a43'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch validated sanitized contract inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline c4 c5 reports
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o baseline.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o c4.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C4_ARTIFACT_ID}/zip"
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o c5.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C5_ARTIFACT_ID}/zip"
+          unzip -q baseline.zip -d baseline
+          unzip -q c4.zip -d c4
+          unzip -q c5.zip -d c5
+          echo "${ENDPOINTS_SHA256}  baseline/endpoint-contracts.json" | sha256sum -c -
+          echo "${C4_SHA256}  c4/request-wire-contracts-11.6.3.json" | sha256sum -c -
+          echo "${C5_SHA256}  c5/response-wire-contracts-11.6.3.json" | sha256sum -c -
+          python - <<'PY'
+          import json
+          d=json.load(open('c5/response-wire-contracts-11.6.3.json'))
+          assert d['refinement']=='managed-direct-tail-exit-v1'
+          assert d['cfg_complete_method_count']==344
+          assert d['requiredness_counts']['unknown-cfg']==444
+          assert d['requiredness_counts']['required-path']==31
+          PY
+
+      - name: Build endpoint-centric JSON and SQLite contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-server-facing-contract-db.py \
+            --endpoint-contracts baseline/endpoint-contracts.json \
+            --c4 c4/request-wire-contracts-11.6.3.json \
+            --c5 c5/response-wire-contracts-11.6.3.json \
+            --json-output reports/server-facing-contracts-11.6.3.json \
+            --sqlite-output reports/contracts-11.6.3.sqlite \
+            --markdown-output reports/server-facing-contracts-11.6.3.md
+          python - <<'PY'
+          import json, sqlite3
+          d=json.load(open('reports/server-facing-contracts-11.6.3.json'))
+          assert d['schema']==1
+          assert d['endpoint_count']==538
+          assert d['endpoint_with_request_count']>=280
+          assert d['endpoint_with_response_count']>=330
+          assert d['request_field_binding_count']>=1000
+          assert d['response_field_binding_count']>=1900
+          assert d['unbound_request_contract_count']==0
+          db=sqlite3.connect('reports/contracts-11.6.3.sqlite')
+          assert db.execute('pragma quick_check').fetchone()[0]=='ok'
+          assert db.execute('select count(*) from endpoints').fetchone()[0]==538
+          assert db.execute('select count(*) from request_fields where endpoint_id is null').fetchone()[0]==0
+          assert db.execute('select count(*) from response_fields where endpoint_id is null').fetchone()[0]==d['unbound_response_contract_count']
+          assert db.execute("select count(*) from endpoints where route='/tool/signup_migration' and enum='SignUpMigration'").fetchone()[0]==2
+          for route in ('/load/index','/live/start','/live/end','/gacha/exec'):
+              assert db.execute('select count(*) from task_bindings where route=?',(route,)).fetchone()[0] > 0, route
+          # Refined requiredness must actually propagate into bound endpoint rows.
+          bound=dict(db.execute('select requiredness,count(*) from response_fields where endpoint_id is not null group by requiredness'))
+          assert bound.get('required-path',0) > 24, bound
+          print(json.dumps({**{k:d[k] for k in ('endpoint_count','endpoint_with_request_count','endpoint_with_response_count','request_field_binding_count','response_field_binding_count','unbound_request_contract_count','unbound_response_contract_count','response_requiredness_counts')},'bound_sqlite_requiredness':bound},indent=2))
+          db.close()
+          PY
+
+      - name: Enforce sanitized semantic-only boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf baseline c4 c5 baseline.zip c4.zip c5.zip
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped refined C6 contract DB boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload refined server-facing contract database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c6-server-facing-contract-db-tail-aware
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
