@@ -1,0 +1,153 @@
+name: Analyze C19 empty-object parser topology
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/analyze-empty-object-parser-topology.py
+      - tests/test_empty_object_parser_topology.py
+      - .github/workflows/analyze-empty-object-parser-topology.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      C17_RUN_ID: '33852041871'
+      C17_SHA256: '1901b2bb1a9e34e9dd958b72848ba7b6c854437baf6746f37a4461789c0b8b40'
+      C3_SHA256: 'd09d15466233d9429a33eb2f6ce8b7a19646c6afc12ab8983d43d427bd178b95'
+      XAPK_SHA256: '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d'
+      LIB_SHA256: '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+      META_SHA256: '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Install analysis dependencies and run unit tests
+        run: |
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python -m unittest discover -s tests -p 'test_empty_object_parser_topology.py' -v
+
+      - name: Download frozen C17/C3 evidence
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C17_RUN_ID }}
+          name: final-client-c17-shape-only-data-semantics
+          path: inputs/c17
+
+      - name: Verify C17/C3 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          C17=$(find inputs/c17 -type f -name 'c17-shape-only-data-semantics.json' -print -quit)
+          C3=$(find inputs/c17 -type f -name 'c3-response-field-accesses.json' -print -quit)
+          test -n "$C17"; test -n "$C3"
+          echo "${C17_SHA256}  $C17" | sha256sum -c -
+          echo "${C3_SHA256}  $C3" | sha256sum -c -
+          echo "C17=$C17" >> "$GITHUB_ENV"
+          echo "C3=$C3" >> "$GITHUB_ENV"
+
+      - name: Prepare exact final native maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk work/dumper work/dump reports
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo "${XAPK_SHA256}  work/final.xapk" | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo "${LIB_SHA256}  work/libil2cpp.so" | sha256sum -c -
+          echo "${META_SHA256}  work/global-metadata.dat" | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('work/dumper/config.json')
+          data = json.loads(path.read_text())
+          data['RequireAnyKey'] = False
+          data['GenerateScript'] = True
+          data['GenerateDummyDll'] = False
+          path.write_text(json.dumps(data, indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+
+      - name: Build C19 post-get-Keys topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-empty-object-parser-topology.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --c17 "$C17" \
+            --c3 "$C3" \
+            --output reports/c19-empty-object-parser-topology.json \
+            | tee reports/c19-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('reports/c19-empty-object-parser-topology.json').read_text())
+          assert data['schema'] == 1
+          assert data['target_route_count'] == 36, data['target_route_count']
+          assert all(row['empty_object_promotion'] == 'not-proven-by-c19-topology' for row in data['routes'])
+          print(json.dumps({
+              'target_route_count': data['target_route_count'],
+              'cfg_complete_route_count': data['cfg_complete_route_count'],
+              'route_without_post_keys_json_index_count': data['route_without_post_keys_json_index_count'],
+              'topology_signature_counts': data['topology_signature_counts'],
+          }, indent=2, sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work inputs
+          mkdir -p reports
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C19 report boundary' >&2
+            exit 1
+          fi
+          if find reports -maxdepth 1 -type f ! -name SHA256SUMS | grep -q .; then
+            find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+          else
+            : > reports/SHA256SUMS
+          fi
+
+      - name: Upload C19 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c19-empty-object-parser-topology
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
