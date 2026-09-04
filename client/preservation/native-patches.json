@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "artifact": "CGSS Android 11.6.3 preservation client",
+  "target": {
+    "file": "libunity.so",
+    "sha256": "b6ec9b930e48898d0b3dd292e8d1468c94d825058f2253f9980f6e5d559ac257"
+  },
+  "patches": []
+}

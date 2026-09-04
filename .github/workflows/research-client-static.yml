@@ -7,10 +7,13 @@ on:
   pull_request:
     paths:
       - "client/research/**"
+      - "client/preservation/**"
       - "scripts/build-research-client.ps1"
       - "scripts/install-research-client.ps1"
       - "scripts/extract-xapk-specimen.py"
       - "scripts/run-research-trace.py"
+      - "scripts/apply-client-patches.py"
+      - "tests/test_apply_client_patches.py"
       - ".github/workflows/research-client-static.yml"
 
 jobs:
@@ -19,13 +22,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compile Python research helpers
+      - name: Compile Python client helpers
         run: |
           python -m py_compile scripts/extract-xapk-specimen.py
           python -m py_compile scripts/run-research-trace.py
+          python -m py_compile scripts/apply-client-patches.py
+
+      - name: Test guarded client patch pipeline
+        run: python -m unittest tests.test_apply_client_patches -v
 
       - name: Parse Frida JavaScript
-        run: node --check client/research/frida/cgss-trace.js
+        run: |
+          node --check client/research/frida/cgss-trace.js
+          node --check client/research/frida/cgss-local-dns.js
+          node --check client/research/frida/cgss-unitytls-trace.js
+          node --check client/research/frida/cgss-ca-store-trace.js
 
       - name: Parse PowerShell scripts
         shell: pwsh

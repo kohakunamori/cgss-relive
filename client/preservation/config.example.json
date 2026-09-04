@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "mode": "local",
+  "services": {
+    "api": {
+      "base_url": "https://api.cgss.local/"
+    },
+    "asset": {
+      "base_url": "https://assets.cgss.local/"
+    },
+    "web": {
+      "base_url": "https://web.cgss.local/"
+    }
+  },
+  "tls": {
+    "trust_preservation_ca": true,
+    "preservation_ca_asset": "relive_ca.pem",
+    "disable_certificate_validation": false,
+    "disable_hostname_validation": false
+  },
+  "assets": {
+    "mode": "local",
+    "fallback_order": [
+      "local"
+    ]
+  },
+  "diagnostics": {
+    "enabled": false,
+    "protocol_observation": false
+  }
+}
