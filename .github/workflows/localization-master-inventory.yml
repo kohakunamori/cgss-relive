@@ -1,0 +1,86 @@
+name: Localization master inventory
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/localization-master-inventory.yml'
+      - 'localization/**'
+      - 'tests/test_localization_*.py'
+      - 'scripts/fetch-resource-bootstrap.py'
+
+permissions:
+  contents: read
+
+jobs:
+  master-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run localization unit tests
+        run: |
+          python -m unittest discover -s tests -p 'test_localization_*.py'
+
+      - name: Fetch frozen 10133800 manifest and master
+        run: |
+          python scripts/fetch-resource-bootstrap.py \
+            --version 10133800 \
+            --output work/final-resource \
+            --force
+
+      - name: Inventory text-bearing master fields without source strings
+        run: |
+          python localization/tools/inventory_master_text.py \
+            work/final-resource/master.mdb \
+            --output work/final-resource/master-text-inventory.json
+
+      - name: Validate sanitized inventory
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('work/final-resource/master-text-inventory.json')
+          report = json.loads(path.read_text(encoding='utf-8'))
+
+          assert report['schema_version'] == 1
+          assert report['quick_check'] == ['ok']
+          assert report['summary']['table_count'] > 0
+          assert report['summary']['text_column_count'] > 0
+          assert report['summary']['user_visible_candidate_count'] > 0
+
+          # The shareable report intentionally contains only schema/statistics.
+          for table in report['tables']:
+              assert set(table) == {'table', 'row_count', 'text_columns'}
+              for column in table['text_columns']:
+                  assert 'source' not in column
+                  assert 'sample' not in column
+                  assert 'value' not in column
+
+          print(json.dumps(report['summary'], sort_keys=True))
+          PY
+
+      - name: Remove proprietary resource material
+        if: always()
+        run: |
+          rm -f work/final-resource/manifest_10133800.db
+          rm -f work/final-resource/master.mdb
+          rm -f work/final-resource/all_dbmanifest.txt
+          rm -f work/final-resource/*.lz4
+          rm -f work/final-resource/resource-bootstrap.json
+          find work/final-resource -maxdepth 1 -type f -printf '%f\n' | sort || true
+
+      - name: Upload sanitized localization inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: localization-master-inventory
+          path: work/final-resource/master-text-inventory.json
+          if-no-files-found: warn
+          retention-days: 7
