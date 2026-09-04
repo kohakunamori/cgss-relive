@@ -1,0 +1,47 @@
+name: research-client-static
+
+on:
+  push:
+    branches:
+      - client-research-fixed
+  pull_request:
+    paths:
+      - "client/research/**"
+      - "scripts/build-research-client.ps1"
+      - "scripts/install-research-client.ps1"
+      - "scripts/run-research-trace.py"
+      - ".github/workflows/research-client-static.yml"
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Python trace launcher
+        run: python -m py_compile scripts/run-research-trace.py
+
+      - name: Parse Frida JavaScript
+        run: node --check client/research/frida/cgss-trace.js
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            'scripts/build-research-client.ps1',
+            'scripts/install-research-client.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw "PowerShell parse failed: $file"
+            }
+          }
