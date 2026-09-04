@@ -1,0 +1,150 @@
+name: Analyze C19b empty-object zero iteration
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/analyze-empty-object-zero-iteration.py
+      - tests/test_empty_object_zero_iteration.py
+      - .github/workflows/analyze-empty-object-zero-iteration.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      C19_RUN_ID: '33853439874'
+      C19_SHA256: '909f7c02badc4444d3014d3997d5e23a2dde8e2371fd2e0f651b7d876856df7f'
+      XAPK_SHA256: '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d'
+      LIB_SHA256: '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+      META_SHA256: '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Install analysis dependencies and run unit tests
+        run: |
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python -m unittest discover -s tests -p 'test_empty_object_zero_iteration.py' -v
+
+      - name: Download frozen C19 topology
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C19_RUN_ID }}
+          name: final-client-c19-empty-object-parser-topology
+          path: inputs/c19
+
+      - name: Verify frozen C19 topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          C19=$(find inputs/c19 -type f -name 'c19-empty-object-parser-topology.json' -print -quit)
+          test -n "$C19"
+          echo "${C19_SHA256}  $C19" | sha256sum -c -
+          echo "C19=$C19" >> "$GITHUB_ENV"
+
+      - name: Prepare exact final native maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk work/dumper work/dump reports
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo "${XAPK_SHA256}  work/final.xapk" | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo "${LIB_SHA256}  work/libil2cpp.so" | sha256sum -c -
+          echo "${META_SHA256}  work/global-metadata.dat" | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('work/dumper/config.json')
+          data = json.loads(path.read_text())
+          data['RequireAnyKey'] = False
+          data['GenerateScript'] = True
+          data['GenerateDummyDll'] = False
+          path.write_text(json.dumps(data, indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+
+      - name: Prove zero-iteration parser exits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-empty-object-zero-iteration.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --c19 "$C19" \
+            --output reports/c19b-empty-object-zero-iteration.json \
+            | tee reports/c19b-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('reports/c19b-empty-object-zero-iteration.json').read_text())
+          assert data['schema'] == 1
+          assert data['target_route_count'] == 36
+          assert all(row['untouched_client_acceptance'] is False for row in data['routes'])
+          print(json.dumps({
+              'target_route_count': data['target_route_count'],
+              'parser_empty_object_zero_path_route_count': data['parser_empty_object_zero_path_route_count'],
+              'proven_routes': [
+                  row['route'] for row in data['routes']
+                  if row['parser_empty_object_class'] == 'parser-empty-object-zero-path'
+              ],
+          }, indent=2, sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work inputs
+          mkdir -p reports
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C19b report boundary' >&2
+            exit 1
+          fi
+          if find reports -maxdepth 1 -type f ! -name SHA256SUMS | grep -q .; then
+            find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+          else
+            : > reports/SHA256SUMS
+          fi
+
+      - name: Upload C19b report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c19b-empty-object-zero-iteration
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
