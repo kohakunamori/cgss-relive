@@ -117,13 +117,23 @@ jobs:
           import json
           from pathlib import Path
           data = json.loads(Path('reports/c18b-task-response-consumers.json').read_text())
-          assert data['schema'] == 1
+          assert data['schema'] == 2
           assert data['source_c17_shape_only_route_count'] == 76
-          assert data['target_response_field_count'] == 99, data['target_response_field_count']
+          assert data['target_route_field_relation_count'] == 99, data['target_route_field_relation_count']
+          assert data['unique_native_parser_field_origin_count'] == 97, data['unique_native_parser_field_origin_count']
           assert data['direct_task_field_store_count'] > 0, data
           assert all(row['empty_value_promotion'] == 'not-proven-by-c18b' for row in data['fields'])
+          # Nested BnContent parser regression: only consent_state, not parent data,
+          # may own the scalar backing-field store after ToInt.
+          bn = [row for row in data['fields'] if row['route'] == '/bn_consent/get_state']
+          by_field = {row['response_field']: row for row in bn}
+          if by_field.get('data', {}).get('task_field_stores'):
+              raise SystemExit('nested parent data was incorrectly attributed to scalar task field')
+          if not by_field.get('consent_state', {}).get('task_field_stores'):
+              raise SystemExit('nested consent_state scalar task-field store was not recovered')
           print(json.dumps({
-              'target_response_field_count': data['target_response_field_count'],
+              'target_route_field_relation_count': data['target_route_field_relation_count'],
+              'unique_native_parser_field_origin_count': data['unique_native_parser_field_origin_count'],
               'direct_task_field_store_count': data['direct_task_field_store_count'],
               'task_owned_reader_count': data['task_owned_reader_count'],
               'direct_reader_caller_count': data['direct_reader_caller_count'],
@@ -152,7 +162,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-client-c18b-task-response-consumers
+          name: final-client-c18b-task-response-consumers-v2
           path: reports/
           if-no-files-found: error
           retention-days: 30
