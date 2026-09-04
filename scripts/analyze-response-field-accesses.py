@@ -289,6 +289,10 @@ def conversion_type(name: str | None, signature: str | None) -> str | None:
 
 def propagate_taint(ins: Any, md: Cs, tainted: set[str]) -> set[str]:
     out = set(tainted)
+
+    # Register copies/aliases. Capstone commonly renders MOV aliases directly,
+    # while some compiler forms use ORR xD, xzr, xS. The two-register case is
+    # sufficient for literal-pointer propagation here.
     if ins.id in {ARM64_INS_MOV, ARM64_INS_ORR} and len(ins.operands) >= 2:
         if ins.operands[0].type == ARM64_OP_REG and ins.operands[1].type == ARM64_OP_REG:
             dst = norm_reg(md.reg_name(ins.operands[0].reg))
@@ -298,6 +302,34 @@ def propagate_taint(ins: Any, md: Cs, tainted: set[str]) -> set[str]:
             else:
                 out.discard(dst)
             return out
+
+    # IL2CPP managed string literals are typically two-level loads:
+    #   ADRP/LDR xN, [GOT slot]   <- exact relocation reference found earlier
+    #   LDR      x1, [xN]         <- managed String* used as helper key
+    # Propagate taint through memory dereferences whose address base is tainted.
+    mnemonic = ins.mnemonic.lower()
+    if mnemonic.startswith(("ldr", "ldur")) and len(ins.operands) >= 2:
+        if ins.operands[0].type == ARM64_OP_REG and ins.operands[1].type == ARM64_OP_MEM:
+            dst = norm_reg(md.reg_name(ins.operands[0].reg))
+            base = norm_reg(md.reg_name(ins.operands[1].mem.base))
+            if base in out:
+                out.add(dst)
+            else:
+                out.discard(dst)
+            return out
+
+    # Preserve pointer taint across simple address arithmetic used for GOT/data
+    # addressing. Do not propagate through arbitrary arithmetic.
+    if mnemonic == "add" and len(ins.operands) >= 2:
+        if ins.operands[0].type == ARM64_OP_REG and ins.operands[1].type == ARM64_OP_REG:
+            dst = norm_reg(md.reg_name(ins.operands[0].reg))
+            src = norm_reg(md.reg_name(ins.operands[1].reg))
+            if src in out:
+                out.add(dst)
+            else:
+                out.discard(dst)
+            return out
+
     try:
         _reads, writes = ins.regs_access()
     except Exception:
@@ -338,6 +370,8 @@ def classify_ref(
             methods = by_rva.get(target, [])
             candidates = methods or [Method(target, "", None)]
             if access is None:
+                # Require the exact field-key taint to reach x1, the key argument
+                # used by JsonData.get_Item/Stage.JsonHelper in this client.
                 for method in candidates:
                     kind, value_type, optionality = helper_kind(method.name or None, method.signature)
                     if kind and "x1" in tainted:
