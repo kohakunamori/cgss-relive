@@ -6,14 +6,18 @@ server acceptance target.
 
 ## Policy
 
-There are two distinct artifacts:
+There are three distinct client artifacts:
 
-- **Untouched 11.6.3** remains the preservation acceptance client. A server-side
+- **Original 11.6.3** is the byte-exact frozen acceptance client. A server-side
   milestone such as visible Home is only considered proven when this client
-  reaches it without protocol-semantic patches.
-- **Research-fixed 11.6.3** is a locally rebuilt and locally signed diagnostic
-  client. It may change Android shell/network/debug configuration and add
-  instrumentation, but it must not silently make malformed API state valid.
+  reaches it without client compatibility changes.
+- **Preservation 11.6.3** is a thin compatibility client. It may change endpoint
+  routing, TLS trust, asset routing, and modern Android compatibility, but it
+  must keep original protocol parsers, game state, UI, Live, card, Home, and
+  resource semantics intact. See `../preservation/README.md`.
+- **Research 11.6.3** is Preservation behavior plus locally enabled diagnostic
+  instrumentation. Research conveniences must not silently make malformed API
+  state valid.
 
 Do not commit original APK/XAPK/splits, native game binaries, metadata, assets,
 production credentials, or research signing keys. Existing `.gitignore` rules
@@ -155,22 +159,36 @@ Attach to an already running game instead of spawning it with:
 python ./scripts/run-research-trace.py --attach
 ```
 
+## Current boundary findings
+
+Runtime experiments have already established two important environment facts:
+
+1. Android hosts/network-security configuration is not sufficient by itself for
+   the final Unity transport on the current rooted test device.
+2. UnityTLS loads its default CA store from the Android Conscrypt APEX and a
+   preservation CA not present in that store fails with verification mask
+   `0x8` before `/load/title` reaches the local compatibility server.
+
+The Frida scripts in this directory are evidence/diagnostic tools for those
+findings. They are not the intended long-term endpoint/TLS implementation.
+
 ## Next patch stages
 
 Changes should be added in this order and each stage should remain independently
 reviewable:
 
-1. prove whether Android user-CA/network-security changes actually affect the
-   final Unity transport;
-2. add more bounded parser/resource/work-data instrumentation based on the first
-   real runtime blocker;
-3. only after a native behavior is understood, add byte patches with the exact
-   `libil2cpp.so` hash **and expected original bytes** recorded next to each
-   patch point;
-4. keep protocol-bypass experiments explicitly labeled and never use them as
-   untouched-client acceptance evidence.
+1. move endpoint routing and additional CA trust into the thin Preservation
+   boundary without disabling hostname or certificate validation;
+2. route all native byte changes through the hash/expected-byte guarded patch
+   manifest under `client/preservation/`;
+3. use Research instrumentation to locate the first real resource/parser/runtime
+   blocker after the environment boundary is working;
+4. fix protocol/game-state failures in the compatibility server or resource
+   layer, not by making the client parser more permissive;
+5. keep any protocol-bypass experiment explicitly labeled and never use it as
+   Original-client acceptance evidence.
 
 In particular, do not make the research client automatically swallow missing
 `/load/index` keys, force `result_code=1`, skip resource initialization, or
 force `SceneManager` to Home as the normal development path. The purpose of the
-research client is to make failures observable, not to hide them.
+Research build is to make failures observable, not to hide them.

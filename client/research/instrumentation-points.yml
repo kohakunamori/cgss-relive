@@ -16,6 +16,7 @@ baseline:
     xapk_name: config.armeabi_v7a.apk
     sha256: a5b5a8dafcb35a3e30f8de74d34dd5d176aa394f81e324cebb19b1aeb1412c04
   libil2cpp_sha256: 2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5
+  libunity_sha256: b6ec9b930e48898d0b3dd292e8d1468c94d825058f2253f9980f6e5d559ac257
   global_metadata_sha256: 2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586
 
 # Entry-point instrumentation only. These are observation points, not semantic
@@ -58,3 +59,25 @@ points:
   - id: load.parse
     symbol: Stage.LoadTask.Parse
     rva: 0x04850a94
+
+# Native UnityTLS observation points recovered from the exact libunity.so above.
+# These record the actual verifier result/failure path and must never be reused
+# on another Unity binary without re-establishing the file hash and instruction
+# context.
+native_points:
+  - id: unitytls.default_ca_dispatch
+    module: libunity.so
+    identity: default-CA verification dispatch path
+    rva: 0x00bb0d98
+  - id: unitytls.explicit_verify_return
+    module: libunity.so
+    identity: instruction immediately after explicit verify call
+    rva: 0x00bb5b9c
+  - id: unitytls.default_verify_return
+    module: libunity.so
+    identity: instruction immediately after default verify callback
+    rva: 0x0166c790
+  - id: unitytls.verify_failure
+    module: libunity.so
+    identity: certificate verification failure block
+    rva: 0x0166c2ec
