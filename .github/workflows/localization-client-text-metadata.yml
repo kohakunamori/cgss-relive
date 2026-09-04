@@ -93,7 +93,7 @@ jobs:
           from pathlib import Path
 
           report = json.loads(Path('reports/localization-text-metadata.json').read_text())
-          assert report['schema_version'] == 1
+          assert report['schema_version'] == 2
           targets = report['targets']
           assert set(targets) == {
               'UnityEngine.UI.Text',
