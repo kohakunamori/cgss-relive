@@ -10,6 +10,12 @@ Optional ``--device-log LABEL=PATH`` accepts only the category-only output of
 matching run but never enter the HTTP/resource sequence, phase machine, or
 cross-run signature comparison. This prevents a logcat line from fabricating
 network progress while still surfacing TLS/crash/ANR evidence.
+
+Schema 5 also accepts the sanitized C9 ``contract_candidates`` emitted by the
+runtime contract layer.  A 501 ``contract_known_template_missing`` event is
+reported as an explicit semantic blocker with candidate endpoint IDs and only
+aggregate field/state counts.  It is not treated as client acceptance or as a
+successful endpoint response.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from typing import Any, Mapping
 
 FINAL_RESOURCE_VERSION = "10133800"
 RESOURCE_ROUTE_PREFIX = "@resource/"
+CONTRACT_BLOCKER_ERROR = "contract_known_template_missing"
 
 _ALLOWED_EVENT_KEYS = {
     "time",
@@ -30,6 +37,7 @@ _ALLOWED_EVENT_KEYS = {
     "status",
     "headers",
     "api_candidates",
+    "contract_candidates",
     "request_keys",
     "response_keys",
     "response_data_keys",
@@ -39,6 +47,18 @@ _ALLOWED_EVENT_KEYS = {
 _ALLOWED_HEADERS = {"APP-VER", "RES-VER", "X-Unity-Version"}
 _ALLOWED_RESPONSE_HEADERS = {"result_code", "required_res_ver", "app_ver"}
 _ALLOWED_API_CANDIDATE_KEYS = {"group", "key", "name", "literal_index"}
+_REQUIRED_CONTRACT_CANDIDATE_KEYS = {
+    "endpoint_id",
+    "request_field_count",
+    "response_field_count",
+    "required_response_field_count",
+    "unknown_response_field_count",
+    "exact_state_mutation_count",
+}
+_OPTIONAL_CONTRACT_CANDIDATE_KEYS = {"group", "key", "enum", "status"}
+_ALLOWED_CONTRACT_CANDIDATE_KEYS = (
+    _REQUIRED_CONTRACT_CANDIDATE_KEYS | _OPTIONAL_CONTRACT_CANDIDATE_KEYS
+)
 _ALLOWED_DEVICE_KEYS = {"schema", "time", "source", "category", "severity"}
 _ALLOWED_DEVICE_CATEGORIES = {
     "process_crash",
@@ -72,6 +92,56 @@ class EventSignature:
 def _expect_string_list(value: Any, field: str) -> None:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise UnsafeEventLog(f"{field} must be a list of strings")
+
+
+def _validate_contract_candidates(value: Any, *, line_number: int) -> None:
+    if not isinstance(value, list):
+        raise UnsafeEventLog(f"line {line_number}: contract_candidates must be a list")
+    endpoint_ids: set[int] = set()
+    for candidate in value:
+        if not isinstance(candidate, dict):
+            raise UnsafeEventLog(f"line {line_number}: malformed contract_candidates entry")
+        keys = set(candidate)
+        if not _REQUIRED_CONTRACT_CANDIDATE_KEYS <= keys:
+            missing = sorted(_REQUIRED_CONTRACT_CANDIDATE_KEYS - keys)
+            raise UnsafeEventLog(
+                f"line {line_number}: contract candidate missing fields: {missing}"
+            )
+        if keys - _ALLOWED_CONTRACT_CANDIDATE_KEYS:
+            raise UnsafeEventLog(
+                f"line {line_number}: contract candidate has unexpected fields: "
+                f"{sorted(keys - _ALLOWED_CONTRACT_CANDIDATE_KEYS)}"
+            )
+        for field in _REQUIRED_CONTRACT_CANDIDATE_KEYS:
+            if not isinstance(candidate[field], int) or candidate[field] < 0:
+                raise UnsafeEventLog(
+                    f"line {line_number}: contract candidate {field} must be a non-negative integer"
+                )
+        endpoint_id = candidate["endpoint_id"]
+        if endpoint_id <= 0 or endpoint_id in endpoint_ids:
+            raise UnsafeEventLog(
+                f"line {line_number}: contract candidate endpoint_id must be unique and positive"
+            )
+        endpoint_ids.add(endpoint_id)
+        if candidate["required_response_field_count"] > candidate["response_field_count"]:
+            raise UnsafeEventLog(
+                f"line {line_number}: required_response_field_count exceeds response_field_count"
+            )
+        if candidate["unknown_response_field_count"] > candidate["response_field_count"]:
+            raise UnsafeEventLog(
+                f"line {line_number}: unknown_response_field_count exceeds response_field_count"
+            )
+        for field in ("group", "enum", "status"):
+            if field in candidate and not isinstance(candidate[field], str):
+                raise UnsafeEventLog(
+                    f"line {line_number}: contract candidate {field} must be a string"
+                )
+        if "key" in candidate and (
+            not isinstance(candidate["key"], int) or candidate["key"] < 0
+        ):
+            raise UnsafeEventLog(
+                f"line {line_number}: contract candidate key must be a non-negative integer"
+            )
 
 
 def validate_event(value: Any, *, line_number: int) -> dict[str, Any]:
@@ -136,6 +206,10 @@ def validate_event(value: Any, *, line_number: int) -> dict[str, Any]:
                 raise UnsafeEventLog(f"line {line_number}: malformed api candidate strings")
             if not isinstance(candidate["key"], int) or not isinstance(candidate["literal_index"], int):
                 raise UnsafeEventLog(f"line {line_number}: malformed api candidate integers")
+
+    contract_candidates = value.get("contract_candidates")
+    if contract_candidates is not None:
+        _validate_contract_candidates(contract_candidates, line_number=line_number)
     return value
 
 
@@ -284,6 +358,37 @@ def _has_later_index(first_indices: list[int], later_indices: list[int]) -> bool
     return any(later > first for first in first_indices for later in later_indices)
 
 
+def _attach_candidates(target: dict[str, Any], event: Mapping[str, Any]) -> None:
+    if event.get("api_candidates"):
+        target["api_candidates"] = event["api_candidates"]
+    if event.get("contract_candidates"):
+        target["contract_candidates"] = event["contract_candidates"]
+
+
+def _semantic_blocker(events: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    for index, event in enumerate(events):
+        if event.get("error") != CONTRACT_BLOCKER_ERROR:
+            continue
+        candidates = event.get("contract_candidates")
+        safe_candidates = list(candidates) if isinstance(candidates, list) else []
+        endpoint_ids = [int(candidate["endpoint_id"]) for candidate in safe_candidates]
+        blocker = {
+            "event_index": index,
+            "route": str(event["route"]),
+            "status": int(event["status"]),
+            "candidate_endpoint_ids": endpoint_ids,
+            "route_identity_ambiguous": len(endpoint_ids) != 1,
+            "contract_candidates": safe_candidates,
+            "next_action": (
+                "resolve_endpoint_identity_before_template"
+                if len(endpoint_ids) != 1
+                else "reconstruct_required_response_shape_then_supply_explicit_template"
+            ),
+        }
+        return blocker
+    return None
+
+
 def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
     routes = [str(event["route"]) for event in events]
     check_indices = [index for index, route in enumerate(routes) if route == "/load/check"]
@@ -336,8 +441,7 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
             }
             if event.get("error"):
                 first_failure["error"] = event["error"]
-            if event.get("api_candidates"):
-                first_failure["api_candidates"] = event["api_candidates"]
+            _attach_candidates(first_failure, event)
             break
 
     after_load_index: dict[str, Any] | None = None
@@ -352,8 +456,9 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
             }
             if event.get("error"):
                 after_load_index["error"] = event["error"]
-            if event.get("api_candidates"):
-                after_load_index["api_candidates"] = event["api_candidates"]
+            _attach_candidates(after_load_index, event)
+
+    semantic_blocker = _semantic_blocker(events)
 
     phase = "no_http_request"
     if events:
@@ -376,6 +481,8 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         phase = "load_index_reached"
     if after_load_index is not None:
         phase = "post_load_index_observed"
+    if semantic_blocker is not None:
+        phase = "semantic_contract_blocker_observed"
 
     return {
         "events": len(events),
@@ -405,6 +512,7 @@ def analyze_events(events: list[Mapping[str, Any]]) -> dict[str, Any]:
         },
         "first_failure": first_failure,
         "after_load_index": after_load_index,
+        "semantic_contract_blocker": semantic_blocker,
         "sequence": [
             {
                 "route": sig.route,
@@ -542,7 +650,7 @@ def main() -> int:
         run_reports[label] = run_report
 
     report = {
-        "schema": 4,
+        "schema": 5,
         "final_resource_version": FINAL_RESOURCE_VERSION,
         "runs": run_reports,
         "comparison": compare_runs(loaded),
