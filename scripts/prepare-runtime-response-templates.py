@@ -10,7 +10,9 @@ Static layers are kept distinct before composition:
   common-envelope-only base parser surface;
 - C18: parser-proven omission routes where every concrete business field is
   optional/defaulted, with zero state mutations and common-envelope-only base
-  parser surface.
+  parser surface;
+- C27: parser-local dead-value proof where top-level ``data`` must exist but its
+  exact JsonData value is proven unobservable on every resolved parser path.
 
 Optional explicit templates override a static route only when the exact endpoint
 identity is unchanged. Exact JSON-like ``data`` shapes are preserved; arrays,
@@ -34,6 +36,10 @@ if str(ROOT) not in sys.path:
 from server.conservative_templates import (  # noqa: E402
     ConservativeTemplateError,
     load_conservative_empty_templates,
+)
+from server.dead_value_templates import (  # noqa: E402
+    DeadValueTemplateError,
+    load_dead_value_templates,
 )
 from server.optional_omission_templates import (  # noqa: E402
     OptionalOmissionTemplateError,
@@ -63,6 +69,11 @@ def main() -> int:
     parser.add_argument("--semantic-db", type=Path, required=True)
     parser.add_argument("--effective-runtime-catalog", type=Path, required=True)
     parser.add_argument(
+        "--dead-value-evidence",
+        type=Path,
+        help="optional sanitized C27 dead-value report to promote parser-local safe data",
+    )
+    parser.add_argument(
         "--explicit-templates",
         type=Path,
         help="optional stronger schema-1 templates; exact endpoint identity must match",
@@ -80,7 +91,13 @@ def main() -> int:
             args.effective_runtime_catalog,
             semantic_index=semantic,
         )
-        static_baseline = c15.merged(c18)
+        c27 = ResponseTemplateStore({})
+        if args.dead_value_evidence is not None:
+            c27 = load_dead_value_templates(
+                args.dead_value_evidence,
+                semantic_index=semantic,
+            )
+        static_baseline = c15.merged(c18).merged(c27)
         compiled = static_baseline
         explicit_count = 0
         if args.explicit_templates is not None:
@@ -95,6 +112,7 @@ def main() -> int:
         ValueError,
         ConservativeTemplateError,
         OptionalOmissionTemplateError,
+        DeadValueTemplateError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -109,6 +127,7 @@ def main() -> int:
             {
                 "c15_baseline_routes": c15.count,
                 "c18_optional_omission_routes": c18.count,
+                "c27_dead_value_routes": c27.count,
                 "static_baseline_routes": static_baseline.count,
                 "explicit_template_routes": explicit_count,
                 "compiled_template_routes": compiled.count,
