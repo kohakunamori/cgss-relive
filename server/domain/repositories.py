@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, ContextManager, Mapping, Protocol, runtime_checkable
 
 from .models import (
     CardOwnership,
@@ -37,6 +37,9 @@ class MasterDataRepository(Protocol):
 @runtime_checkable
 class PlayerStateRepository(Protocol):
     """Mutable archival profile state independent of HTTP/API DTOs."""
+
+    def transaction(self) -> ContextManager[None]:
+        ...
 
     def get_profile(self, player_id: str) -> PlayerProfile | None:
         ...
