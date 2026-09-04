@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Join schema-5 runtime blockers with sanitized C14 and optional C22 evidence.
+"""Join schema-5 runtime blockers with sanitized C14 and optional low-complexity evidence.
 
 This is an offline diagnostic join.  It never changes server responses and never
 adds parser field names or response values to runtime logs.  C14 contributes only
-aggregate contract counts/subsystems/provenance.  Optional C22 contributes only a
-runtime-safe low-complexity summary: effective shape, shape provenance,
-empty-value proof status, consumer resolution and next action.
+aggregate contract counts/subsystems/provenance.  Optional C22/C25 evidence
+contributes only a runtime-safe low-complexity summary: effective shape, shape
+provenance, empty-value proof status, consumer resolution and next action.
 
 A proven shape is not an empty-value proof, and neither is untouched-client or
 UI-visible acceptance.
@@ -179,7 +179,7 @@ def enrich(
             low_endpoint = low_summary.get("endpoint_id")
             if low_endpoint is not None and low_endpoint not in endpoint_ids:
                 raise EnrichmentError(
-                    f"runtime/C22 endpoint mismatch for route {route}: "
+                    f"runtime/low-complexity endpoint mismatch for route {route}: "
                     f"{low_endpoint} not in {endpoint_ids}"
                 )
 
@@ -195,15 +195,20 @@ def enrich(
             enriched_blocker["low_complexity_response_evidence"] = low_summary
         enriched_runs[label] = {"semantic_contract_blocker": enriched_blocker}
 
+    generation = low_complexity.generation if low_complexity else None
     return {
         "schema": OUTPUT_SCHEMA,
         "scope": (
             "runtime schema-5 semantic blockers enriched with aggregate C14 evidence"
-            + (" and runtime-safe C22 low-complexity evidence" if low_complexity else "")
+            + (
+                f" and runtime-safe {generation} low-complexity evidence"
+                if low_complexity else ""
+            )
         ),
         "source_runtime_schema": RUNTIME_SCHEMA,
         "source_catalog_schema": CATALOG_SCHEMA,
         "source_low_complexity_schema": 1 if low_complexity else None,
+        "source_low_complexity_generation": generation,
         "catalog_endpoint_count": catalog.get("endpoint_count"),
         "catalog_unique_route_count": catalog.get("unique_route_count"),
         "low_complexity_route_count": low_complexity.route_count if low_complexity else 0,
@@ -218,7 +223,7 @@ def main() -> int:
     parser.add_argument(
         "--low-complexity-evidence",
         type=Path,
-        help="optional sanitized C22 low-complexity evidence catalog",
+        help="optional sanitized C22/C25 low-complexity evidence catalog",
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
