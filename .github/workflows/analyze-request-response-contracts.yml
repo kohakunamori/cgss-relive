@@ -19,7 +19,8 @@ jobs:
     timeout-minutes: 10
     env:
       BASELINE_ARTIFACT_ID: '9920654705'
-      BASELINE_ARTIFACT_SHA256: '0e059e190568a60c86974cb898ecc32fe0f117138ecc6667a847639137c9ec1f'
+      INVENTORY_SHA256: 'c5c4106e4c4abacec4b6336433340f9e3dfa4a0d91820282c5a723f3c0abc543'
+      ENDPOINTS_SHA256: '3173d45f54265bc491a166405713802bb8eccd52240446ab96856747a3ae6627'
     steps:
       - uses: actions/checkout@v4
 
@@ -35,10 +36,11 @@ jobs:
             -H 'Accept: application/vnd.github+json' \
             -o baseline.zip \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
-          echo "${BASELINE_ARTIFACT_SHA256}  baseline.zip" | sha256sum -c -
           unzip -q baseline.zip -d baseline
           test -s baseline/server-contract-inventory.json
           test -s baseline/endpoint-contracts.json
+          echo "${INVENTORY_SHA256}  baseline/server-contract-inventory.json" | sha256sum -c -
+          echo "${ENDPOINTS_SHA256}  baseline/endpoint-contracts.json" | sha256sum -c -
           python - <<'PY'
           import json
           i=json.load(open('baseline/server-contract-inventory.json'))
