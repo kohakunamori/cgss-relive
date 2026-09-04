@@ -34,11 +34,16 @@ def compile_templates(
     effective_runtime_catalog: Path,
     output: Path,
     explicit_templates: Path | None = None,
+    enforce_final_counts: bool = True,
 ) -> tuple[int, int, int]:
-    semantic = SemanticContractIndex(semantic_db)
+    semantic = SemanticContractIndex(
+        semantic_db,
+        enforce_final_counts=enforce_final_counts,
+    )
     baseline = load_conservative_empty_templates(
         effective_runtime_catalog,
         semantic_index=semantic,
+        enforce_final_counts=enforce_final_counts,
     )
     compiled = baseline
     explicit_count = 0
