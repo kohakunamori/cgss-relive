@@ -192,7 +192,7 @@ jobs:
           python - <<'PY'
           import json
           d=json.load(open('reports/endpoint-contracts.json'))
-          assert d['schema']==3
+          assert d['schema']==4
           assert d['summary']['A']['proven_static'] >= 482
           print(json.dumps(d['summary'],indent=2))
           PY
