@@ -8,8 +8,12 @@ on:
     paths:
       - server/conservative_templates.py
       - server/response_templates.py
+      - server/template_response.py
       - scripts/prepare-runtime-response-templates.py
+      - scripts/run-rooted-full-service-stack.py
       - tests/test_conservative_runtime_templates.py
+      - tests/test_full_service_stack_wrapper.py
+      - tests/test_template_response.py
       - .github/workflows/compile-c15-runtime-templates.yml
 
 permissions:
@@ -60,11 +64,17 @@ jobs:
           echo "C14=$C14" >> "$GITHUB_ENV"
           echo "C9=$C9" >> "$GITHUB_ENV"
 
-      - name: Run conservative runtime unit and wire tests
-        run: python -m unittest discover -s tests -p 'test_conservative_runtime_templates.py' -v
+      - name: Run C15 runtime and shape tests
+        run: |
+          python -m unittest discover -s tests -p 'test_conservative_runtime_templates.py' -v
+          python -m unittest discover -s tests -p 'test_template_response.py' -v
+          if test -f tests/test_full_service_stack_wrapper.py; then
+            python -m unittest discover -s tests -p 'test_full_service_stack_wrapper.py' -v
+          fi
 
       - name: Compile real C15 runtime template baseline
         run: |
+          mkdir -p out
           python scripts/prepare-runtime-response-templates.py \
             --semantic-db "$C9" \
             --effective-runtime-catalog "$C14" \
@@ -89,7 +99,7 @@ jobs:
               raise SystemExit(f'expected 154 compiled C15 routes, got {store.count}')
           for route in ('/account_notice/accept', '/birthday/save', '/card_storage/setting'):
               template = store.get(route)
-              if template is None or dict(template.data) != {}:
+              if template is None or template.data != {}:
                   raise SystemExit(f'missing expected conservative route: {route}')
           summary = json.loads(Path('out/c15-runtime-compile-summary.json').read_text())
           if summary['device_acceptance'] is not False:
