@@ -8,16 +8,20 @@ on:
     paths:
       - scripts/analyze-nested-response-dto-metadata-c35.py
       - tests/test_nested_response_dto_metadata_c35.py
+      - tools/DummyMetadataScanner/**
       - .github/workflows/analyze-nested-response-dto-metadata-c35.yml
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      C33_RUN_ID: '33866234775'
+      C33_SHA256: '72ecb59e677affd2ffb5cf8bf04b7da5996ed2726d8351de75ba852aa6749176'
       XAPK_SHA256: '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d'
       LIB_SHA256: '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
       META_SHA256: '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
@@ -33,7 +37,24 @@ jobs:
       - name: Run C35 unit tests
         run: python -m unittest discover -s tests -p 'test_nested_response_dto_metadata_c35.py' -v
 
-      - name: Prepare exact final dump metadata
+      - name: Download frozen C33 task DTO metadata
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C33_RUN_ID }}
+          name: final-client-c33-jsonutility-task-dto-metadata
+          path: inputs/c33
+
+      - name: Verify frozen C33
+        shell: bash
+        run: |
+          set -euo pipefail
+          C33=$(find inputs/c33 -type f -name 'c33-jsonutility-task-dto-metadata.json' -print -quit)
+          test -n "$C33"
+          echo "${C33_SHA256}  $C33" | sha256sum -c -
+          echo "C33=$C33" >> "$GITHUB_ENV"
+
+      - name: Prepare exact final dump and DummyDll metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -59,34 +80,50 @@ jobs:
           import json
           from pathlib import Path
           p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
-          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=True
           p.write_text(json.dumps(d,indent=2))
           PY
           DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
+          DUMMY=$(find work/dump -type f -name 'Assembly-CSharp.dll' -print -quit)
+          test -n "$DUMMY"
+          dotnet run --project tools/DummyMetadataScanner/DummyMetadataScanner.csproj -- \
+            "$DUMMY" work/dummy-type-map.json
+          test -s work/dummy-type-map.json
 
-      - name: Recover nested DTO metadata
+      - name: Recover exact nested DTO metadata
         shell: bash
         run: |
           set -euo pipefail
           python scripts/analyze-nested-response-dto-metadata-c35.py \
             --dump-cs work/dump/dump.cs \
+            --dummy-type-map work/dummy-type-map.json \
+            --c33 "$C33" \
             --output reports/c35-nested-response-dto-metadata.json \
             | tee reports/c35-summary.json
           python - <<'PY'
           import json
           from pathlib import Path
           d=json.loads(Path('reports/c35-nested-response-dto-metadata.json').read_text())
-          assert d['schema']==1
+          assert d['schema']==2
           assert d['target_task_count']==4
+          assert d['identity_proof']=='DummyDll-NestedClass+four-task-TypeDefIndex-calibration'
+          assert d['c33_task_nested_ref_count'] >= 4
+          assert d['unresolved_c33_task_nested_ref_count']==0
           assert d['untouched_client_acceptance'] is False
           assert d['ui_visible_success'] is False
           candidates={r['type']:r for r in d['response_candidates']}
-          assert 'Stage.ConcertMVFinishMVLoadingTask.ResponseDataMain' in candidates
-          assert 'Stage.ConcertMVStartTask.ResponseDataMain' in candidates
+          for name in (
+            'Stage.ConcertMVFinishMVLoadingTask.ResponseDataMain',
+            'Stage.ConcertMVStartTask.ResponseDataMain',
+          ):
+            assert name in candidates, name
+            assert candidates[name]['field_count'] > 0, name
           print(json.dumps({
+            'dummy_typedef_to_dump_index_delta':d['dummy_typedef_to_dump_index_delta'],
             'task_nested_type_counts':d['task_nested_type_counts'],
+            'c33_task_nested_refs':d['c33_task_nested_refs'],
             'response_candidate_count':d['response_candidate_count'],
             'response_candidates':d['response_candidates'],
           },indent=2,sort_keys=True))
@@ -97,9 +134,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf work
+          rm -rf work inputs
           mkdir -p reports
-          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name '*.dll' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
             echo 'raw specimen escaped C35 report boundary' >&2
             exit 1
           fi
@@ -109,7 +146,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: final-client-c35-nested-response-dto-metadata
+          name: final-client-c35-nested-response-dto-metadata-v2
           path: reports/
           if-no-files-found: error
           retention-days: 30
