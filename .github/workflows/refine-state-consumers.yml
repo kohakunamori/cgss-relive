@@ -1,0 +1,81 @@
+name: Refine C7b state consumers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/refine-state-consumers.yml'
+      - 'scripts/refine-state-consumers.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      C7B_ARTIFACT_ID: '9923665139'
+      C7B_ARTIFACT_SHA256: '4008c390ef841694cdd30349d5a625e4306c369864ea80eb36a878631046885c'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact C7b artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work reports
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o work/c7b.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C7B_ARTIFACT_ID}/zip"
+          echo "${C7B_ARTIFACT_SHA256}  work/c7b.zip" | sha256sum -c -
+          unzip -q work/c7b.zip -d work/c7b
+          test -s work/c7b/state-consumers-11.6.3.json
+
+      - name: Refine direct consumer evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/refine-state-consumers.py \
+            --input work/c7b/state-consumers-11.6.3.json \
+            --output reports/state-consumers-11.6.3.json \
+            --markdown-output reports/state-consumers-11.6.3.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/state-consumers-11.6.3.json'))
+          assert d['schema']==2
+          assert d['state_type_count']==171
+          assert d['reader_method_count']==2235
+          assert d['reader_xref_count']==10416
+          assert d['self_tail_relation_suppressed_count']>=1
+          assert d['unresolved_xref_edge_kind_counts'].get('BL',0)==0
+          assert d['unresolved_xref_edge_kind_counts'].get('B-tail',0)>=1
+          print(json.dumps({k:d[k] for k in (
+            'unique_reader_consumer_relation_count','consumer_method_count','game_owned_consumer_count',
+            'state_types_with_consumers','endpoint_state_consumer_relation_count',
+            'self_tail_relation_suppressed_count','unresolved_xref_edge_kind_counts',
+            'relation_edge_kind_counts','consumer_generated_kind_counts')}, indent=2))
+          PY
+
+      - name: Enforce sanitized boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped refined C7b boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload refined state consumer graph
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c7b-state-consumers-refined
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
