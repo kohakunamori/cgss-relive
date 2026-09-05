@@ -99,7 +99,7 @@ jobs:
           python - <<'PY'
           import json
           d=json.load(open('reports/unit-edit-endpoint-11.6.3.json'))
-          assert d['schema'] == 1
+          assert d['schema'] == 2
           assert d['endpoint_count'] >= 1
           assert d['type_count'] >= 1
           print(json.dumps(d, indent=2, ensure_ascii=False))
