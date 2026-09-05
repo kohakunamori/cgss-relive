@@ -1,8 +1,8 @@
 """Persistent client-facing numeric identities for compatibility adapters.
 
 The preservation domain deliberately uses opaque semantic IDs (for example
-``card:1``).  Final CGSS DTOs, however, expose positive numeric owned-card serials
-and unit IDs.  This store keeps that mapping stable across server restarts without
+``card:1``). Final CGSS DTOs, however, expose positive numeric owned-card serials
+and unit IDs. This store keeps that mapping stable across server restarts without
 claiming that the client numeric identity is the domain primary-key semantics.
 """
 
@@ -92,6 +92,13 @@ class SQLiteCompatibilityIdentityStore:
         if not domain_id:
             raise ValueError("domain identity must be non-empty")
 
+    @staticmethod
+    def _require_numeric_identity(player_id: str, numeric_id: int) -> None:
+        if not player_id:
+            raise ValueError("player_id must be non-empty")
+        if numeric_id <= 0:
+            raise ValueError("client numeric identity must be positive")
+
     def _ensure(
         self,
         *,
@@ -147,6 +154,16 @@ class SQLiteCompatibilityIdentityStore:
             (player_id, user_card_id),
         ).fetchone()
         return None if row is None else int(row["serial_id"])
+
+    def get_user_card_id(self, player_id: str, serial_id: int) -> str | None:
+        """Resolve a client-facing owned-card serial back to the domain identity."""
+
+        self._require_numeric_identity(player_id, serial_id)
+        row = self._conn.execute(
+            "SELECT user_card_id FROM card_identity_bindings WHERE player_id = ? AND serial_id = ?",
+            (player_id, serial_id),
+        ).fetchone()
+        return None if row is None else str(row["user_card_id"])
 
     def get_unit_id(self, player_id: str, domain_unit_id: str) -> int | None:
         self._require_identity(player_id, domain_unit_id)
