@@ -94,6 +94,19 @@ class BootstrapCoreTests(unittest.TestCase):
         self.assertEqual(exchange.response["data_headers"]["udid"], self.udid)
         self.assertEqual(cgss_codec.decode_body(exchange.response_body, self.udid), exchange.response)
 
+    def test_bn_consent_state_exchange(self) -> None:
+        body = cgss_codec.encode_body(self.request, self.udid, dynamic_key=self.request_key)
+        exchange = bootstrap_core.process_bn_consent_state_request(
+            self._headers("10133800"),
+            body,
+            servertime=1_700_000_000,
+            dynamic_key=self.response_key,
+        )
+        self.assertEqual(exchange.request, self.request)
+        self.assertEqual(exchange.response["data_headers"]["result_code"], 1)
+        self.assertEqual(exchange.response["data"], {"consent_state": 0})
+        self.assertEqual(cgss_codec.decode_body(exchange.response_body, self.udid), exchange.response)
+
     def test_complete_success_exchange(self) -> None:
         body = cgss_codec.encode_body(self.request, self.udid, dynamic_key=self.request_key)
         exchange = bootstrap_core.process_load_check_request(

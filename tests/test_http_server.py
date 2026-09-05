@@ -172,10 +172,18 @@ class HTTPBootstrapServerTests(unittest.TestCase):
             host, port = server.server_address[:2]
             try:
                 conn = http.client.HTTPConnection(host, port, timeout=5)
-                conn.request("POST", "/bn_consent/get_state", body=b"", headers={"Content-Length": "0"})
+                conn.request(
+                    "POST",
+                    "/bn_consent/get_state",
+                    body=self._request_body(),
+                    headers=self._headers(),
+                )
                 response = conn.getresponse()
-                self.assertEqual(response.status, 404)
-                response.read()
+                self.assertEqual(response.status, 200)
+                body = response.read()
+                decoded = cgss_codec.decode_body(body, self.udid)
+                self.assertEqual(decoded["data_headers"]["result_code"], 1)
+                self.assertEqual(decoded["data"], {"consent_state": 0})
                 conn.close()
             finally:
                 server.shutdown()
@@ -183,7 +191,7 @@ class HTTPBootstrapServerTests(unittest.TestCase):
                 thread.join(timeout=2)
 
             event = json.loads(event_path.read_text(encoding="utf-8").strip())
-            self.assertEqual(event["error"], "endpoint_not_implemented")
+            self.assertEqual(event["status"], 200)
             self.assertEqual(
                 event["api_candidates"],
                 [{"group": "A", "key": 14, "name": "BnContentGetState", "literal_index": 23438}],

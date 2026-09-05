@@ -42,7 +42,9 @@ class ApiRegistryTests(unittest.TestCase):
                     "/load/title",
                     "/load/index",
                     "/load/update_agreement_status",
+                    "/bn_consent/get_state",
                     "/bnid/status_check/check",
+                    "/migration/index",
                     "/tool/signup",
                     "/tool/signup_migration",
                 }
@@ -50,7 +52,7 @@ class ApiRegistryTests(unittest.TestCase):
         )
         self.assertEqual(
             api_registry.EMPTY_SUCCESS_HTTP_ROUTES,
-            frozenset({"/load/set_cache_clear_flg", "/load/update_agreement_status"}),
+            frozenset({"/load/set_cache_clear_flg", "/load/update_agreement_status", "/migration/index"}),
         )
 
     def test_home_is_update_only_in_verified_runtime_subset(self) -> None:

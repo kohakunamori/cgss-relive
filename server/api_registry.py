@@ -44,6 +44,7 @@ TITLE = A_LOAD_BY_KEY[10]
 LOAD_INDEX = A_LOAD_BY_KEY[11]
 LOAD_GET_EXTERNAL_SITE_URL = A_LOAD_BY_KEY[12]
 LOAD_UPDATE_AGREEMENT_STATUS = A_LOAD_BY_KEY[13]
+BN_CONSENT_GET_STATE = ApiEndpoint("A", "BnContentGetState", 14, "bn_consent/get_state", 23438)
 
 # Final native proof status:
 # - SetCacheClearFlgTask has no Parse override -> common NetworkTask.Parse only.
@@ -73,6 +74,7 @@ BOOTSTRAP_HTTP_ROUTES = frozenset(
         route(TITLE.path),
         route(LOAD_INDEX.path),
         route(LOAD_UPDATE_AGREEMENT_STATUS.path),
+        route(BN_CONSENT_GET_STATE.path),
     }
 )
 
@@ -81,9 +83,16 @@ EMPTY_SUCCESS_HTTP_ROUTES = frozenset(route(endpoint.path) for endpoint in EMPTY
 # Runtime-proven early bootstrap routes outside the small embedded A-load subset.
 # Their complete ApiType key/literal identities are intentionally not guessed here.
 MIGRATION_STATUS_CHECK_HTTP_ROUTE = "/bnid/status_check/check"
+MIGRATION_INDEX_HTTP_ROUTE = "/migration/index"
 LOGIN_SIGNUP_HTTP_ROUTES = frozenset({"/tool/signup", "/tool/signup_migration"})
+EMPTY_SUCCESS_HTTP_ROUTES = frozenset({*EMPTY_SUCCESS_HTTP_ROUTES, MIGRATION_INDEX_HTTP_ROUTE})
 BOOTSTRAP_HTTP_ROUTES = frozenset(
-    {*BOOTSTRAP_HTTP_ROUTES, MIGRATION_STATUS_CHECK_HTTP_ROUTE, *LOGIN_SIGNUP_HTTP_ROUTES}
+    {
+        *BOOTSTRAP_HTTP_ROUTES,
+        MIGRATION_STATUS_CHECK_HTTP_ROUTE,
+        MIGRATION_INDEX_HTTP_ROUTE,
+        *LOGIN_SIGNUP_HTTP_ROUTES,
+    }
 )
 
 

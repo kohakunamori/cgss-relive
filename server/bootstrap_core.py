@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from . import cgss_codec
+from .bn_consent import NORMAL_CONSENT_STATE, encode_bn_consent_state_response
 from .empty_success import encode_empty_success_response
 from .header_codec import decode_header_value
 from .load_check import FINAL_RESOURCE_VERSION, encode_load_check_response
@@ -158,6 +159,32 @@ def process_login_signup_request(
         dynamic_key=dynamic_key,
         viewer_id=viewer_id,
         user_id=user_id,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_bn_consent_state_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+    consent_state: int = NORMAL_CONSENT_STATE,
+) -> BootstrapExchange:
+    """Decode ``/bn_consent/get_state`` and return the proven integer state field."""
+    udid, request = decode_client_request(headers, body, route="bn_consent/get_state")
+    sid = _get_header(headers, "SID")
+    response = encode_bn_consent_state_response(
+        udid,
+        sid=sid,
+        servertime=servertime,
+        consent_state=consent_state,
+        dynamic_key=dynamic_key,
     )
     return BootstrapExchange(
         udid=udid,

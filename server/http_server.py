@@ -20,6 +20,7 @@ from typing import Any, Mapping, Type
 
 from .api_registry import (
     ApiEndpoint,
+    BN_CONSENT_GET_STATE,
     BOOTSTRAP_HTTP_ROUTES,
     EMPTY_SUCCESS_HTTP_ROUTES,
     LOAD_INDEX,
@@ -33,6 +34,7 @@ from .api_registry import (
 )
 from .bootstrap_core import (
     process_empty_success_request,
+    process_bn_consent_state_request,
     process_load_check_request,
     process_load_index_request,
     process_load_title_request,
@@ -52,6 +54,7 @@ ROUTE_VERSION_CHECK = api_route(VERSION_CHECK.path)
 ROUTE_TITLE = api_route(TITLE.path)
 ROUTE_LOAD_INDEX = api_route(LOAD_INDEX.path)
 ROUTE_MIGRATION_STATUS_CHECK = MIGRATION_STATUS_CHECK_HTTP_ROUTE
+ROUTE_BN_CONSENT_GET_STATE = api_route(BN_CONSENT_GET_STATE.path)
 
 
 def make_handler(
@@ -60,6 +63,7 @@ def make_handler(
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
     accept_old_resource_version: bool = False,
+    resource_is_s3: bool = False,
     viewer_id: int = 1,
     user_id: int = 1,
 ) -> Type[BaseHTTPRequestHandler]:
@@ -165,13 +169,15 @@ def make_handler(
                         headers,
                         body,
                         final_res_ver=final_res_ver,
-                        is_s3=False,
+                        is_s3=resource_is_s3,
                         accept_old_resource_version=accept_old_resource_version,
                     )
                 elif route == ROUTE_TITLE:
                     exchange = process_load_title_request(headers, body)
                 elif route == ROUTE_MIGRATION_STATUS_CHECK:
                     exchange = process_migration_check_request(headers, body)
+                elif route == ROUTE_BN_CONSENT_GET_STATE:
+                    exchange = process_bn_consent_state_request(headers, body)
                 elif route in LOGIN_SIGNUP_HTTP_ROUTES:
                     exchange = process_login_signup_request(
                         headers, body, route=route, viewer_id=viewer_id, user_id=user_id
@@ -209,6 +215,7 @@ def create_server(
     event_log: Path | None = None,
     api_index: Mapping[str, tuple[ApiEndpoint, ...]] | None = None,
     accept_old_resource_version: bool = False,
+    resource_is_s3: bool = False,
     viewer_id: int = 1,
     user_id: int = 1,
 ) -> ThreadingHTTPServer:
@@ -220,6 +227,7 @@ def create_server(
             event_log,
             api_index,
             accept_old_resource_version,
+            resource_is_s3,
             viewer_id,
             user_id,
         ),
@@ -251,6 +259,14 @@ def main() -> int:
         help=(
             "diagnostic only: return result_code=1 for an old RES-VER while still "
             "supplying required_res_ver; bypasses the native 214 gate"
+        ),
+    )
+    parser.add_argument(
+        "--resource-is-s3",
+        action="store_true",
+        help=(
+            "return data.isS3=true from /load/check so the final client selects "
+            "the CDN resource URL family instead of storages"
         ),
     )
     parser.add_argument(
@@ -350,6 +366,7 @@ def main() -> int:
         event_log=args.event_log,
         api_index=api_index,
         accept_old_resource_version=args.accept_old_resource_version,
+        resource_is_s3=args.resource_is_s3,
         viewer_id=args.viewer_id,
         user_id=args.user_id,
     )
@@ -366,6 +383,7 @@ def main() -> int:
         print("load/check resource policy: diagnostic direct success + required_res_ver advance")
     else:
         print("load/check resource policy: native 214 negotiation on mismatch")
+    print(f"load/check resource URL family: {'S3/CDN' if args.resource_is_s3 else 'storages'}")
     if args.event_log:
         print(f"sanitized event log: {args.event_log}")
     if args.api_map:

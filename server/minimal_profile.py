@@ -7,11 +7,10 @@ The profiles are intentionally layered:
 * starter visible: one synthetic owned card/unit record using a card proven to
   exist in the independently verified final 10133800 master database.
 
-Final-client static analysis distinguishes the guarded ``user_card_list`` Cenere
-merge block from the separate seven-hard-field container whose literal key is
-``cs_gacha_data_cenere`` and which actually calls ``WorkCardData.AddCardData``.
-The starter card therefore lives in that latter container; ``user_card_list``
-remains empty to avoid a speculative duplicate insertion.
+Final-client runtime tracing closes the owned-card path: the active
+``WorkCardData.AddCardData`` callsite reads ``data.user_card_list``. The separate
+``cs_gacha_data_cenere`` object is Cenere metadata; it is release-flag gated and
+currently requires only ``cenere_id`` on the exercised preservation path.
 
 The final ``Stage.BaseTask.setupTutorial`` gate is also statically closed:
 response ``tutorial_flag=100`` maps to local ``TutorialData.step=1000`` and saves
@@ -85,9 +84,9 @@ HOME_CANDIDATE_EMPTY_LIST_SECTIONS = (
     "master_plus_live_list",
 )
 
-# Exact literal at the 0x4858D70 guarded card parser that invokes
-# WorkCardData.AddCardData before reading the seven hard fields below.
-STARTER_WORK_CARD_SECTION = "cs_gacha_data_cenere"
+# Runtime-proven final-client owned-card source for WorkCardData.AddCardData.
+STARTER_WORK_CARD_SECTION = "user_card_list"
+STARTER_CENERE_SECTION = "cs_gacha_data_cenere"
 STARTER_CARD_REQUIRED_FIELDS = (
     "serial_id",
     "card_id",
@@ -115,8 +114,12 @@ STARTER_UNIT_REQUIRED_FIELDS = (
 # state. No historical account payload is copied into the profile.
 STARTER_CARD_ID = 100001
 STARTER_SERIAL_ID = 1
+STARTER_CENERE_ID = 1
 STARTER_UNIT_ID = 1
 STARTER_UNIT_SLOT = 1
+STARTER_CARD_RELEASE_FLAG = 33
+STARTER_CARD_RELEASE_KEY = "cenere_update_2023_start_time"
+STARTER_CARD_RELEASE_TIME = 1
 
 
 def build_minimal_load_index_data(
@@ -176,6 +179,10 @@ def build_home_candidate_load_index_data(
     for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
         data[section] = []
     data["music_list"] = {"normal": []}
+    data["loading_tips_info"] = {
+        "possession_sticker_data": {},
+        "loading_sticker_num": 0,
+    }
     return data
 
 
@@ -191,8 +198,12 @@ def build_starter_visible_load_index_data(
         producer_name=producer_name,
         now=now,
     )
-    # user_card_list is intentionally left as the Home candidate's empty list.
-    # The final AddCardData path is guarded by the literal key below.
+    # Final-client runtime evidence proves the cs_gacha_data_cenere card merge
+    # is gated by ReleaseFlagDictionary.GetIsReleased(33). The enum-to-key path
+    # resolves flag 33 to cenere_update_2023_start_time in common_define; any
+    # positive release time <= current server time is released.
+    data["common_define"][STARTER_CARD_RELEASE_KEY] = STARTER_CARD_RELEASE_TIME
+    data[STARTER_CENERE_SECTION] = {"cenere_id": STARTER_CENERE_ID}
     data[STARTER_WORK_CARD_SECTION] = [
         {
             "serial_id": STARTER_SERIAL_ID,
@@ -220,6 +231,9 @@ def build_starter_visible_load_index_data(
     # startup resolves chara id from the WorkCardData card and has no proven
     # WorkCharaData consumer.
     data["user_info"]["leader_serial_id"] = STARTER_SERIAL_ID
+    # Runtime LoadTask.Parse evidence (0x485def4..0x485df4c) hard-reads the
+    # active 1-based unit slot from user_info before iterating user_unit_list.
+    data["user_info"]["unit_slot"] = STARTER_UNIT_SLOT
     return data
 
 
@@ -262,6 +276,14 @@ def validate_home_candidate_profile(data: dict[str, Any]) -> list[str]:
         errors.append("music_list")
     elif not isinstance(music.get("normal"), list):
         errors.append("music_list.normal")
+    loading_tips = data.get("loading_tips_info")
+    if not isinstance(loading_tips, dict):
+        errors.append("loading_tips_info")
+    else:
+        if not isinstance(loading_tips.get("possession_sticker_data"), dict):
+            errors.append("loading_tips_info.possession_sticker_data")
+        if loading_tips.get("loading_sticker_num") != 0:
+            errors.append("loading_tips_info.loading_sticker_num")
     return errors
 
 
@@ -274,23 +296,25 @@ def _missing_item_fields(item: Any, fields: tuple[str, ...], prefix: str) -> lis
 def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
     """Validate the statically-derived one-card starter-visible contract."""
     errors = validate_home_candidate_profile(data)
+    common = data.get("common_define")
+    if not isinstance(common, dict) or common.get(STARTER_CARD_RELEASE_KEY) != STARTER_CARD_RELEASE_TIME:
+        errors.append(f"common_define.{STARTER_CARD_RELEASE_KEY}")
 
-    # Keep the ambiguous/Cenere user_card_list path empty: the proven
-    # WorkCardData.AddCardData path is STARTER_WORK_CARD_SECTION.
-    user_cards = data.get("user_card_list")
-    if user_cards != []:
-        errors.append("user_card_list")
+    cenere = data.get(STARTER_CENERE_SECTION)
+    if cenere != {"cenere_id": STARTER_CENERE_ID}:
+        errors.append(STARTER_CENERE_SECTION)
 
     cards = data.get(STARTER_WORK_CARD_SECTION)
     card_prefix = f"{STARTER_WORK_CARD_SECTION}[0]"
     if not isinstance(cards, list) or len(cards) != 1:
         errors.append(f"{STARTER_WORK_CARD_SECTION}[1]")
     else:
-        errors.extend(_missing_item_fields(cards[0], STARTER_CARD_REQUIRED_FIELDS, card_prefix))
-        if isinstance(cards[0], dict):
-            if cards[0].get("serial_id") != STARTER_SERIAL_ID:
+        card = cards[0]
+        errors.extend(_missing_item_fields(card, STARTER_CARD_REQUIRED_FIELDS, card_prefix))
+        if isinstance(card, dict):
+            if card.get("serial_id") != STARTER_SERIAL_ID:
                 errors.append(f"{card_prefix}.serial_id")
-            if cards[0].get("card_id") != STARTER_CARD_ID:
+            if card.get("card_id") != STARTER_CARD_ID:
                 errors.append(f"{card_prefix}.card_id")
 
     units = data.get("user_unit_list")
@@ -316,6 +340,8 @@ def validate_starter_visible_profile(data: dict[str, Any]) -> list[str]:
 
     user = data.get("user_info")
     if isinstance(user, dict):
+        if user.get("unit_slot") != STARTER_UNIT_SLOT:
+            errors.append("user_info.unit_slot")
         leader = user.get("leader_serial_id")
         if leader is not None and leader != STARTER_SERIAL_ID:
             errors.append("user_info.leader_serial_id")

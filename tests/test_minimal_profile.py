@@ -10,6 +10,11 @@ from server.minimal_profile import (
     REQUIRED_COMMON_DEFINE_FIELDS,
     REQUIRED_USER_INFO_FIELDS,
     STARTER_CARD_ID,
+    STARTER_CENERE_ID,
+    STARTER_CARD_RELEASE_FLAG,
+    STARTER_CARD_RELEASE_KEY,
+    STARTER_CARD_RELEASE_TIME,
+    STARTER_CENERE_SECTION,
     STARTER_SERIAL_ID,
     STARTER_UNIT_ID,
     STARTER_UNIT_SLOT,
@@ -48,17 +53,28 @@ class MinimalProfileTests(unittest.TestCase):
         for section in HOME_CANDIDATE_EMPTY_LIST_SECTIONS:
             self.assertEqual(data[section], [])
         self.assertEqual(data["music_list"], {"normal": []})
-        self.assertNotIn(STARTER_WORK_CARD_SECTION, data)
+        self.assertEqual(
+            data["loading_tips_info"],
+            {"possession_sticker_data": {}, "loading_sticker_num": 0},
+        )
+        self.assertEqual(data[STARTER_WORK_CARD_SECTION], [])
+        self.assertNotIn(STARTER_CENERE_SECTION, data)
 
     def test_home_candidate_validator_rejects_wrong_shapes(self) -> None:
         data = build_home_candidate_load_index_data(now=1)
         data[HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0]] = {}
         data["music_list"] = {"normal": {}}
+        data["loading_tips_info"] = {
+            "possession_sticker_data": [],
+            "loading_sticker_num": -1,
+        }
         self.assertEqual(
             validate_home_candidate_profile(data),
             [
                 HOME_CANDIDATE_EMPTY_LIST_SECTIONS[0],
                 "music_list.normal",
+                "loading_tips_info.possession_sticker_data",
+                "loading_tips_info.loading_sticker_num",
             ],
         )
 
@@ -72,9 +88,7 @@ class MinimalProfileTests(unittest.TestCase):
         self.assertEqual(validate_starter_visible_profile(data), [])
         self.assertEqual(validate_home_candidate_profile(data), [])
 
-        # user_card_list belongs to the separate guarded Cenere-merge path. The
-        # actual WorkCardData.AddCardData parser is the exact literal section.
-        self.assertEqual(data["user_card_list"], [])
+        self.assertEqual(data[STARTER_CENERE_SECTION], {"cenere_id": STARTER_CENERE_ID})
         self.assertEqual(len(data[STARTER_WORK_CARD_SECTION]), 1)
         card = data[STARTER_WORK_CARD_SECTION][0]
         self.assertEqual(card["serial_id"], STARTER_SERIAL_ID)
@@ -106,6 +120,11 @@ class MinimalProfileTests(unittest.TestCase):
         # startup has no WorkCharaData consumer, so do not fabricate a row.
         self.assertEqual(data["user_chara_list"], [])
         self.assertEqual(data["user_info"]["leader_serial_id"], STARTER_SERIAL_ID)
+        self.assertEqual(data["user_info"]["unit_slot"], STARTER_UNIT_SLOT)
+        self.assertEqual(
+            data["common_define"][STARTER_CARD_RELEASE_KEY],
+            STARTER_CARD_RELEASE_TIME,
+        )
 
     def test_starter_visible_validator_rejects_broken_references(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
@@ -114,17 +133,14 @@ class MinimalProfileTests(unittest.TestCase):
         data["user_unit_list"][0]["unit_id"] = 2
         data["user_unit_list"][0]["serial_id_0"] = 2
         data["user_info"]["leader_serial_id"] = 2
+        data["user_info"]["unit_slot"] = 2
         errors = validate_starter_visible_profile(data)
         self.assertIn(f"{STARTER_WORK_CARD_SECTION}[0].card_id", errors)
         self.assertIn("user_unit_list[0].unit_slot", errors)
         self.assertIn("user_unit_list[0].unit_id", errors)
         self.assertIn("user_unit_list[0].serial_id_0", errors)
         self.assertIn("user_info.leader_serial_id", errors)
-
-    def test_starter_visible_validator_rejects_user_card_duplicate_path(self) -> None:
-        data = build_starter_visible_load_index_data(now=1)
-        data["user_card_list"] = [dict(data[STARTER_WORK_CARD_SECTION][0])]
-        self.assertIn("user_card_list", validate_starter_visible_profile(data))
+        self.assertIn("user_info.unit_slot", errors)
 
     def test_starter_visible_validator_rejects_unneeded_user_chara_state(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
@@ -134,7 +150,10 @@ class MinimalProfileTests(unittest.TestCase):
     def test_starter_visible_validator_requires_work_card_section(self) -> None:
         data = build_starter_visible_load_index_data(now=1)
         del data[STARTER_WORK_CARD_SECTION]
-        self.assertIn(f"{STARTER_WORK_CARD_SECTION}[1]", validate_starter_visible_profile(data))
+        self.assertIn(
+            f"{STARTER_WORK_CARD_SECTION}[1]",
+            validate_starter_visible_profile(data),
+        )
 
     def test_starter_visible_validator_requires_unit_id_field(self) -> None:
         data = build_starter_visible_load_index_data(now=1)

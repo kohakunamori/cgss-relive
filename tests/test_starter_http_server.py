@@ -72,7 +72,7 @@ class StarterVisibleHTTPTests(unittest.TestCase):
             self.assertEqual(decoded["data_headers"]["result_code"], 1)
             data = decoded["data"]
             self.assertEqual(data, profile)
-            self.assertEqual(data["user_card_list"], [])
+            self.assertEqual(len(data["user_card_list"]), 1)
             self.assertEqual(data[STARTER_WORK_CARD_SECTION][0]["card_id"], STARTER_CARD_ID)
             self.assertEqual(
                 data[STARTER_WORK_CARD_SECTION][0]["serial_id"],

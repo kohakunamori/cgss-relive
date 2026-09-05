@@ -2,8 +2,11 @@
 
 Authoritative continuation point for `kohakunamori/cgss-relive`.
 
-**Do not restart solved research.** Fetch current `main`, verify CI, then continue
-from original-client runtime integration.
+**Do not restart solved research.** The authoritative local worktree is
+`D:\Project\cgss-relive`, branch `client-research-fixed`. Use AgentDock for host,
+ADB, Frida, and device operations; WebCodex is retired. Preserve the current
+working tree before any branch/reset operation, verify tests/CI, then continue
+from the first unsupported post-Home dependency.
 
 ## Mission
 
@@ -365,7 +368,40 @@ Login_Bonus    7
 Asset_Download 8
 ```
 
-Visible Home is still runtime-pending.
+Visible Home is now **runtime-closed on the original 11.6.3 client**.
+
+2026-09-05 first-time Asset Download evidence on OnePlus 8T (`b57d21c6`):
+
+```text
+AssetDownload.FinishLoadCommonData @ 0x398850c
+ -> AssetDownload.FinishLoadStandardData @ 0x3988624
+ -> SceneManager.ChangeView(view=6, is_force=false)
+ -> Stage.Home.Start @ 0x3ec16f8
+ -> Stage.Home.FinishLoad @ 0x3ec49ac
+ -> Stage.Home.StartViewProcess @ 0x3ecce20
+```
+
+No parser return, result code, scene ID, verifier result, or callback was forced.
+The 4927-item first-time predownload completed through the original Asset Download
+UI while asset traffic used the official CDN family. The main runtime trace
+contains no exception/error signal after Home entry.
+
+A subsequent cold start is even stronger: the observed scene sequence is exactly
+`4 -> 5 -> 6` with **no view 8**, `/load/index` returns naturally, then the same
+`Home.Start -> Home.FinishLoad -> Home.StartViewProcess` lifecycle executes.
+This proves the first-time predownload state persisted and Home is reproducibly
+reachable rather than a one-run transition.
+
+Research-only evidence (gitignored):
+
+```text
+work/runtime/home-official-assets-s3-clean.jsonl
+work/runtime/asset-download-completion-live.jsonl
+work/runtime/cgss-home-after-download.png
+work/runtime/home-cold-after-download.jsonl
+work/runtime/cgss-home-cold-verified.png
+work/runtime-api-home-cold-after-download.jsonl
+```
 
 ## TLS / local topology
 
@@ -472,24 +508,30 @@ Expected high-level progression:
 
 ## Remaining blockers
 
-Deterministic/static/server-side bootstrap work is now deliberately close to
-exhaustion. `load_state` / `next_api` are no longer response blockers. Decisive
-missing evidence is actual original-client runtime:
+The original-client bootstrap/Home milestone is closed. Do **not** spend more time
+on CA trust, `/load/check` 214, resource initialization, `/load/index`, owned-card
+startup, first-time predownload, or Home-entry mechanics unless a later cold run
+produces contradictory evidence.
 
-1. untouched 11.6.3 trusts the system-installed CA and reaches `/load/check`;
-2. native 214 produces real resource-plane traffic;
-3. resource initialization completes and `/load/index` is reached;
-4. reduced starter is accepted and Home visibly renders;
-5. capture the first unsupported post-Home endpoint/local-state dependency and
-   implement only that.
+Next work starts **after Home**:
 
-Do not manufacture success responses or claim Home acceptance from server 200s,
-CI, or static callgraphs.
+1. observe the first user-visible Home interaction or naturally scheduled task
+   that requests an unsupported API/local-state dependency;
+2. identify the exact native parser/consumer for that one dependency;
+3. implement the smallest clean-room server/state contract supported by runtime
+   evidence;
+4. add a focused test and rerun the original client;
+5. repeat one blocker at a time.
+
+Preserve the same rule: never manufacture success responses, force scenes, swallow
+exceptions, bypass parsers, or convert research-only Frida instrumentation into a
+preservation requirement.
 
 ## Issue state
 
 ```text
 #1 M0 final specimen: closed
 #2 M1 final 10133800 resource freeze: closed
-#3 M2 final transport/startup/Home acceptance: open
+#3 M2 final transport/startup/Home acceptance: closed 2026-09-05
+#4 M3 post-Home offline functionality recovery: open
 ```
