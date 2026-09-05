@@ -8,6 +8,7 @@ on:
       - '.github/workflows/analyze-unit-edit-endpoint.yml'
       - 'scripts/analyze-unit-edit-endpoint.py'
       - 'scripts/analyze-unit-edit-native-semantics.py'
+      - 'scripts/analyze-unit-main-semantics.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
 
@@ -106,6 +107,22 @@ jobs:
           assert 'MemberUnitEditTask' in names
           assert 'MemberUnitEditTaskParam' in names
           assert 'MemberUnitEditTaskParam.UnitInfo' in names
+          print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Recover exact main-unit managed metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-unit-main-semantics.py \
+            --dump-cs work/dump/dump.cs \
+            --output reports/unit-edit-main-unit-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/unit-edit-main-unit-11.6.3.json'))
+          assert d['schema'] == 1
+          assert any('GetMainUnit(' in row['matched_methods'] for row in d['types'])
+          assert any('GetUnitSerial(' in row['matched_methods'] for row in d['types'])
           print(json.dumps(d, indent=2, ensure_ascii=False))
           PY
 
