@@ -5,7 +5,7 @@ The report is intentionally sanitized. It emits only:
 - exact final ApiType entries whose enum/path contains both ``unit`` and ``edit``;
 - exact Il2CppDumper type blocks whose type name contains ``UnitEdit``;
 - selected fields and method signatures/RVAs from those blocks;
-- exact script.json method records whose managed name contains ``UnitEdit``.
+- exact script.json methods owned by those already-selected UnitEdit types.
 
 No raw binaries, dump.cs, script.json, or bulk decompilation are emitted.
 """
@@ -29,7 +29,7 @@ FIELD_HINTS = (
 MAX_BLOCK_LINES = 320
 MAX_FIELDS = 80
 MAX_METHODS = 100
-MAX_SCRIPT_METHODS = 120
+MAX_SCRIPT_METHODS = 160
 
 
 def as_int(value: Any) -> int:
@@ -115,12 +115,16 @@ def type_blocks(lines: list[str]) -> list[dict[str, Any]]:
     return output
 
 
-def script_methods(path: Path) -> list[dict[str, Any]]:
+def script_methods(path: Path, selected_types: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Return methods owned by exact selected types, not substring-matched closures."""
+
     doc = json.loads(path.read_text(encoding="utf-8"))
     rows: list[dict[str, Any]] = []
+    owner_tokens = tuple(f".{type_name}$$" for type_name in selected_types)
+    bare_tokens = tuple(f"{type_name}$$" for type_name in selected_types)
     for raw in doc.get("ScriptMethod", []):
         name = str(raw.get("Name") or "")
-        if "unitedit" not in name.lower():
+        if not any(token in name for token in owner_tokens) and not name.startswith(bare_tokens):
             continue
         rows.append(
             {
@@ -131,7 +135,9 @@ def script_methods(path: Path) -> list[dict[str, Any]]:
         )
     rows.sort(key=lambda row: (row["address"], row["name"]))
     if len(rows) > MAX_SCRIPT_METHODS:
-        raise RuntimeError(f"UnitEdit script method surface unexpectedly large: {len(rows)}")
+        raise RuntimeError(
+            f"exact UnitEdit type-owned method surface unexpectedly large: {len(rows)}"
+        )
     return rows
 
 
@@ -147,10 +153,10 @@ def main() -> int:
     lines = args.dump_cs.read_text(encoding="utf-8", errors="replace").splitlines()
     endpoints = endpoint_rows(api_map)
     types = type_blocks(lines)
-    methods = script_methods(args.script_json)
+    methods = script_methods(args.script_json, tuple(row["type"] for row in types))
 
     report = {
-        "schema": 1,
+        "schema": 2,
         "target": "unit-edit",
         "endpoint_count": len(endpoints),
         "type_count": len(types),
@@ -161,7 +167,7 @@ def main() -> int:
         "evidence_boundary": {
             "api_map": "exact final 11.6.3 delivered map",
             "types": "exact final 11.6.3 Il2CppDumper metadata",
-            "methods": "exact final 11.6.3 Il2CppDumper script metadata",
+            "methods": "exact final 11.6.3 Il2CppDumper script metadata constrained by selected types",
             "runtime_acceptance": False,
             "ui_visible_success": False,
         },
@@ -170,6 +176,7 @@ def main() -> int:
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps({
         "endpoints": endpoints,
+        "type_names": [row["type"] for row in types],
         "types": types,
         "script_methods": methods,
     }, indent=2, ensure_ascii=False))
