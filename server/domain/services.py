@@ -7,7 +7,7 @@ write persistence rows directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -30,6 +30,16 @@ _POLICY_EVIDENCE = Evidence(
     EvidenceKind.POLICY,
     source="preservation-bootstrap-policy",
     note="project-selected archival bootstrap behavior; not production-server proof",
+)
+
+_CARD_PROTECTION_EVIDENCE = Evidence(
+    EvidenceStatus.PROVEN_STATIC,
+    EvidenceKind.EXACT,
+    source="final-11.6.3 WorkCardData.CardData",
+    note=(
+        "response protect is written to independent _isProtect state by SetResponseProtect; "
+        "endpoint request binding is tracked separately"
+    ),
 )
 
 
@@ -230,3 +240,48 @@ class PreservationProfileService:
         if snapshot is None:
             raise KeyError(f"unknown archival player {player_id!r}")
         return snapshot
+
+    def set_card_protection(
+        self,
+        player_id: str,
+        user_card_id: str,
+        is_protected: bool,
+    ) -> ChangeSet:
+        """Set the proven card-protection state for one owned card instance.
+
+        This command is route-agnostic. The final client proves the semantic state
+        itself; a separate endpoint adapter must prove how a wire request identifies
+        the card and desired value before calling this method.
+        """
+
+        card = next(
+            (
+                candidate
+                for candidate in self._repository.list_cards(player_id)
+                if candidate.user_card_id == user_card_id
+            ),
+            None,
+        )
+        if card is None:
+            raise KeyError(
+                f"unknown owned card {user_card_id!r} for archival player {player_id!r}"
+            )
+        desired = bool(is_protected)
+        if card.is_protected == desired:
+            return ChangeSet()
+
+        updated = replace(card, is_protected=desired)
+        with self._repository.transaction():
+            self._repository.save_card(updated)
+
+        return ChangeSet(
+            entities=(
+                EntityChange(
+                    category="card",
+                    entity_id=user_card_id,
+                    operation=ChangeOperation.UPDATE,
+                    values={"is_protected": desired},
+                    evidence=_CARD_PROTECTION_EVIDENCE,
+                ),
+            )
+        )
