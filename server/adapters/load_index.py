@@ -11,7 +11,9 @@ Important boundary:
   serial IDs;
 * adapter bindings explicitly map domain entities to client-facing numeric IDs;
 * final-11.6.3 proven card semantics (star lesson step, love, protect) come directly
-  from ``CardOwnership`` and are no longer adapter-only compatibility values.
+  from ``CardOwnership``;
+* unit costume arrays remain client compatibility state and are projected only when
+  a saved compatibility record exists.
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ _RESOURCE_USER_INFO_FIELDS = (
 
 
 def _default_resource_kind_map() -> dict[str, str]:
-    # Keys are CGSS wire fields; values are preservation-domain resource kinds.
     return {field: field for field in _RESOURCE_USER_INFO_FIELDS}
 
 
@@ -66,18 +67,35 @@ class UnitLoadIndexBinding:
 
 
 @dataclass(frozen=True)
-class LoadIndexProjectionPolicy:
-    """Wire/compatibility policy for one ``/load/index`` projection.
+class UnitCosmeticLoadIndexSlot:
+    """One saved final-client unit slot's optional compatibility-only costume state."""
 
-    Values such as storage caps and producer rank are still preservation defaults.
-    They live here rather than in the domain model until exact business semantics
-    are recovered.
-    """
+    position: int
+    dress_type: int
+    dress_2d_type: int
+    dress_storage_id: int
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.position < FINAL_UNIT_SLOT_COUNT:
+            raise ValueError("unit cosmetic position is outside final-client slot count")
+        for name, value in (
+            ("dress_type", self.dress_type),
+            ("dress_2d_type", self.dress_2d_type),
+            ("dress_storage_id", self.dress_storage_id),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class LoadIndexProjectionPolicy:
+    """Wire/compatibility policy for one ``/load/index`` projection."""
 
     viewer_id: int
     now: int
     card_bindings: Mapping[str, CardLoadIndexBinding] = field(default_factory=dict)
     unit_bindings: Mapping[str, UnitLoadIndexBinding] = field(default_factory=dict)
+    unit_cosmetics: Mapping[str, tuple[UnitCosmeticLoadIndexSlot, ...]] = field(default_factory=dict)
     leader_user_card_id: str | None = None
     resource_kind_map: Mapping[str, str] = field(default_factory=_default_resource_kind_map)
     comment: str = ""
@@ -103,21 +121,28 @@ class LoadIndexProjectionPolicy:
 
         cards = dict(self.card_bindings)
         units = dict(self.unit_bindings)
+        cosmetics = {key: tuple(value) for key, value in self.unit_cosmetics.items()}
         resource_map = dict(self.resource_kind_map)
         if any(not key for key in cards):
             raise ValueError("card binding domain IDs must be non-empty")
         if any(not key for key in units):
             raise ValueError("unit binding domain IDs must be non-empty")
+        if any(not key for key in cosmetics):
+            raise ValueError("unit cosmetic domain IDs must be non-empty")
+        for domain_unit_id, slots in cosmetics.items():
+            positions = [slot.position for slot in slots]
+            if len(set(positions)) != len(positions):
+                raise ValueError(f"duplicate cosmetic slot for unit {domain_unit_id!r}")
         if set(resource_map) != set(_RESOURCE_USER_INFO_FIELDS):
             raise ValueError(
-                "resource_kind_map must map exactly: "
-                + ", ".join(_RESOURCE_USER_INFO_FIELDS)
+                "resource_kind_map must map exactly: " + ", ".join(_RESOURCE_USER_INFO_FIELDS)
             )
         if any(not value for value in resource_map.values()):
             raise ValueError("domain resource kinds must be non-empty")
 
         object.__setattr__(self, "card_bindings", MappingProxyType(cards))
         object.__setattr__(self, "unit_bindings", MappingProxyType(units))
+        object.__setattr__(self, "unit_cosmetics", MappingProxyType(cosmetics))
         object.__setattr__(self, "resource_kind_map", MappingProxyType(resource_map))
 
 
@@ -210,8 +235,8 @@ def project_home_snapshot_to_load_index_data(
         for member in unit.members:
             if member.position >= FINAL_UNIT_SLOT_COUNT:
                 raise ValueError(
-                    f"unit member position {member.position} exceeds final-client "
-                    f"slot count {FINAL_UNIT_SLOT_COUNT}"
+                    f"unit member position {member.position} exceeds final-client slot count "
+                    f"{FINAL_UNIT_SLOT_COUNT}"
                 )
             if member.user_card_id not in card_by_id:
                 raise ValueError(
@@ -226,13 +251,21 @@ def project_home_snapshot_to_load_index_data(
             serial_slots[member.position] = card_binding.serial_id
 
         projected: dict[str, object] = {
-            "unit_slot": unit.slot + 1,  # final wire value is proven 1-based
+            "unit_slot": unit.slot + 1,
             "unit_id": binding.unit_id,
             "name": unit.name or "",
         }
         projected.update(
             {f"serial_id_{index}": serial_slots[index] for index in range(FINAL_UNIT_SLOT_COUNT)}
         )
+
+        # Final LoadTask helpers guard each formatted cosmetic key before reading it.
+        # Omit these keys until UnitEdit (or another exact source) has persisted them.
+        for slot in policy.unit_cosmetics.get(unit.unit_id, ()):
+            projected[f"dress_type_{slot.position}"] = slot.dress_type
+            projected[f"dress_2d_type_{slot.position}"] = slot.dress_2d_type
+            projected[f"dress_storage_id_{slot.position}"] = slot.dress_storage_id
+
         projected_units.append(projected)
 
     data["user_unit_list"] = projected_units
@@ -245,11 +278,6 @@ def project_home_snapshot_to_load_index_data(
             raise ValueError("leader_user_card_id has no load-index card binding")
         user_info["leader_serial_id"] = leader_binding.serial_id
 
-    # Exact parser analysis established that an empty user_chara_list is safe and
-    # current Home startup does not prove a WorkCharaData dependency.
     data["user_chara_list"] = []
-    # Keep the ambiguous user_card_list merge path empty; WorkCardData creation is
-    # driven by cs_gacha_data_cenere above.
     data["user_card_list"] = []
-
     return data
