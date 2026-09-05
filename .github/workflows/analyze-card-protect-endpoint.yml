@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/analyze-card-protect-endpoint.yml'
       - 'scripts/analyze-card-protect-endpoint.py'
+      - 'scripts/analyze-member-protect-flow.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
       - 'scripts/validate-api-map.py'
@@ -86,6 +87,7 @@ jobs:
           test -n "$DLL"
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
+          test -s work/dump/script.json
 
       - name: Discover protection endpoint and task metadata
         shell: bash
@@ -99,7 +101,30 @@ jobs:
           import json
           d=json.load(open('reports/card-protect-endpoint-11.6.3.json'))
           assert d['schema'] == 1
+          assert any(row['name'] == 'MemberProtect' and row['key'] == 29 and row['path'] == 'member/protect_card' for row in d['endpoints'])
           print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Trace MemberProtect native flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check pyelftools
+          python scripts/analyze-member-protect-flow.py \
+            --script-json work/dump/script.json \
+            --lib work/libil2cpp.so \
+            --output reports/member-protect-flow-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/member-protect-flow-11.6.3.json'))
+          assert d['schema'] == 1
+          assert any('MemberProtectCardTask$$Parse' in row['name'] for row in d['selected_methods'])
+          print(json.dumps({
+              'selected_methods': d['selected_methods'],
+              'protection_accessors': d['protection_accessors'],
+              'flow_edges': d['flow_edges'],
+              'protection_accessor_direct_xrefs': d['protection_accessor_direct_xrefs'],
+          }, indent=2, ensure_ascii=False))
           PY
 
       - name: Enforce sanitized report boundary
