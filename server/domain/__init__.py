@@ -42,6 +42,7 @@ from .services import (
     PreservationProfileService,
     StarterCardGrant,
 )
+from .unit_services import PreservationUnitService, UnitMembershipUpdate
 
 __all__ = [
     "BootstrapPolicy",
@@ -65,6 +66,7 @@ __all__ = [
     "PlayerResource",
     "PlayerStateRepository",
     "PreservationProfileService",
+    "PreservationUnitService",
     "RandomSource",
     "ResourceChange",
     "Reward",
@@ -77,4 +79,5 @@ __all__ = [
     "SystemClock",
     "Unit",
     "UnitMember",
+    "UnitMembershipUpdate",
 ]
