@@ -10,6 +10,10 @@ from .load_index import (
     UnitLoadIndexBinding,
     project_home_snapshot_to_load_index_data,
 )
+from .member_favorite import (
+    MemberFavoriteEditRequest,
+    parse_member_favorite_edit_request,
+)
 from .member_protect import (
     MemberProtectRequest,
     parse_member_protect_request,
@@ -24,10 +28,12 @@ from .unit_edit import (
 __all__ = [
     "CardLoadIndexBinding",
     "LoadIndexProjectionPolicy",
+    "MemberFavoriteEditRequest",
     "MemberProtectRequest",
     "MemberUnitEditRequest",
     "MemberUnitEditUnitInfo",
     "UnitLoadIndexBinding",
+    "parse_member_favorite_edit_request",
     "parse_member_protect_request",
     "parse_member_unit_edit_request",
     "project_home_snapshot_to_load_index_data",
