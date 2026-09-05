@@ -3,9 +3,9 @@
 
 This report is intentionally narrow and sanitized. It exports only the task's
 SetParameter/Parse methods, compact request-param type outlines, managed string
-literals, named direct calls, and a tiny full instruction listing when a target
-method is small enough. Raw specimen bytes and bulk Il2CppDumper output never leave
-the workflow.
+literals, named direct calls, and a bounded full instruction listing when a target
+method stays below the explicit cap. Raw specimen bytes and bulk Il2CppDumper
+output never leave the workflow.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ MAX_LITERAL_LENGTH = 160
 LITERAL_WINDOW = 10
 CONTEXT_RADIUS = 7
 MAX_NAMED_CALLS = 360
-MAX_TINY_INSTRUCTIONS = 120
+MAX_TINY_INSTRUCTIONS = 320
 MAX_OUTLINE_LINES = 160
 INTEREST_TERMS = (
     "Story", "WorkStoryData", "JsonData", "BaseTask$$Parse", "NetworkUtil",
@@ -320,7 +320,7 @@ def main() -> int:
         "type_outlines": compact_param_outlines(args.dump_cs),
         "limits": {
             "only_story_release_event_story_task_methods": True,
-            "tiny_listing_instruction_cap": MAX_TINY_INSTRUCTIONS,
+            "bounded_full_instruction_cap": MAX_TINY_INSTRUCTIONS,
             "runtime_acceptance": False,
             "ui_visible_success": False,
         },
