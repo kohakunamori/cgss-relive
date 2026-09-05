@@ -172,3 +172,13 @@ class SQLiteCompatibilityIdentityStore:
             (player_id, domain_unit_id),
         ).fetchone()
         return None if row is None else int(row["client_unit_id"])
+
+    def get_domain_unit_id(self, player_id: str, client_unit_id: int) -> str | None:
+        """Resolve a client-facing numeric unit ID back to the domain identity."""
+
+        self._require_numeric_identity(player_id, client_unit_id)
+        row = self._conn.execute(
+            "SELECT domain_unit_id FROM unit_identity_bindings WHERE player_id = ? AND client_unit_id = ?",
+            (player_id, client_unit_id),
+        ).fetchone()
+        return None if row is None else str(row["domain_unit_id"])
