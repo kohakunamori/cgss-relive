@@ -36,15 +36,17 @@ class DomainLoadIndexAdapterTests(unittest.TestCase):
             self.now,
         )
         self.card = CardOwnership(
-            "card:alpha",
-            self.profile.player_id,
-            100001,
-            20,
-            456,
-            3,
-            True,
-            True,
-            self.now,
+            user_card_id="card:alpha",
+            player_id=self.profile.player_id,
+            master_card_id=100001,
+            level=20,
+            experience=456,
+            skill_level=3,
+            star_lesson_step=2,
+            love=77,
+            is_protected=True,
+            favorite=True,
+            acquired_at=self.now,
         )
         self.unit = Unit(
             "unit:main",
@@ -54,7 +56,7 @@ class DomainLoadIndexAdapterTests(unittest.TestCase):
             members=(UnitMember(0, self.card.user_card_id),),
         )
 
-    def test_projection_maps_domain_state_and_explicit_wire_bindings(self) -> None:
+    def test_projection_maps_domain_state_and_numeric_wire_bindings(self) -> None:
         snapshot = HomeStateSnapshot(
             profile=self.profile,
             resources=(
@@ -67,14 +69,7 @@ class DomainLoadIndexAdapterTests(unittest.TestCase):
         policy = LoadIndexProjectionPolicy(
             viewer_id=42,
             now=1_788_552_000,
-            card_bindings={
-                self.card.user_card_id: CardLoadIndexBinding(
-                    serial_id=7001,
-                    step=2,
-                    love=77,
-                    protect=1,
-                )
-            },
+            card_bindings={self.card.user_card_id: CardLoadIndexBinding(serial_id=7001)},
             unit_bindings={self.unit.unit_id: UnitLoadIndexBinding(unit_id=9001)},
             leader_user_card_id=self.card.user_card_id,
         )
@@ -162,15 +157,17 @@ class DomainLoadIndexAdapterTests(unittest.TestCase):
 
     def test_duplicate_client_serials_are_rejected(self) -> None:
         second = CardOwnership(
-            "card:beta",
-            self.profile.player_id,
-            100002,
-            1,
-            0,
-            1,
-            False,
-            False,
-            self.now,
+            user_card_id="card:beta",
+            player_id=self.profile.player_id,
+            master_card_id=100002,
+            level=1,
+            experience=0,
+            skill_level=1,
+            star_lesson_step=0,
+            love=0,
+            is_protected=False,
+            favorite=False,
+            acquired_at=self.now,
         )
         snapshot = HomeStateSnapshot(profile=self.profile, cards=(self.card, second))
         with self.assertRaisesRegex(ValueError, "duplicate CGSS card serial_id"):
