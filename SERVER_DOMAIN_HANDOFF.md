@@ -9,21 +9,16 @@ analysis/server-contracts-11.6.3
 Read together with `CLIENT_CONTRACT_HANDOFF.md`, `docs/server-domain-model-v0.md`
 and `docs/load-index-11.6.3.md`.
 
-## Objective and evidence boundary
-
-The implementation unit is a preservation domain model, not one database/table per
-HTTP endpoint. The final client contract work remains the evidence source. A thin
-client compatibility patch may remove obsolete transport/auth/infrastructure, while
-original parser/state/UI/gameplay behavior remains the compatibility target.
+## Evidence boundary
 
 Keep these levels separate:
 
 1. preservation design/policy;
-2. final-client static semantic evidence + server CI/integration tests;
-3. runtime endpoint acceptance by the target client;
+2. final-client static/native/parser evidence + server CI/integration tests;
+3. target-client runtime endpoint acceptance;
 4. real-device/UI-visible success.
 
-Nothing here proves a new real-device Home success.
+The work below is level 1/2. It does **not** prove new target-client or UI success.
 
 ## Current continuation point
 
@@ -33,23 +28,23 @@ Domain-design baseline:
 2a42e89af5cee120b6a67144108f96597f2319e1
 ```
 
-Latest branch HEAD at this refresh:
+Latest stable code commit before this handoff refresh:
 
 ```text
-ab7d45c1c1ff3a916c1208b49d999e53d2dd4e5a
-ci: trace member protect native call flow
+1c8a2ebbfc750982f32be3ebd3350e56afd532cf
+ci: cover dynamic application HTTP routes
 ```
 
-Always re-read branch HEAD before writing because multiple agents may use this same
+Always re-read branch HEAD before writing because multiple agents may use the same
 branch.
 
-## Implemented layering
+## Architecture now implemented
 
 ```text
 CGSS 11.6.3 client
         |
         v
-CGSS compatibility adapter
+CGSS wire adapter
         |
         v
 application/controller
@@ -68,41 +63,37 @@ client numeric serial/unit identities
 
 Rules:
 
-- database schema != response DTO schema;
-- database schema != client `Work*` / `Savedata*` layout;
-- master data stays read-only and referenced by stable IDs;
-- client numeric IDs are not silently made domain primary keys;
-- preservation defaults are explicit policy;
-- exact / inferred / policy evidence stays distinguishable;
-- do not disable SQLite thread checks just to satisfy `ThreadingHTTPServer`.
+- DB schema != API response DTO;
+- DB schema != client `Work*`/`Savedata*` layout;
+- immutable master data remains separate;
+- client numeric IDs are not domain primary-key semantics;
+- exact/inferred/policy evidence stays explicit;
+- SQLite worker threads open their own short-lived connections;
+- static/CI success is never reported as client/UI success.
 
-## Domain core
+## Domain core / D1 state
 
-`server/domain/core.py` / `providers.py` provide:
+Implemented:
 
 - Evidence / EvidenceStatus / EvidenceKind
-- Reward
-- ResourceChange / EntityChange / ChangeSet
-- Clock / FixedClock / SystemClock
-- RandomSource / SeededRandomSource
-- IdGenerator / SequentialIdGenerator
-
-D1 semantic entities in `server/domain/models.py`:
-
+- ChangeSet / EntityChange / ResourceChange / Reward
+- Clock / Random / Id providers
 - PlayerProfile
 - PlayerResource
 - CardOwnership
-- UnitMember
-- Unit
+- Unit / UnitMember
 - FeatureUnlock
 - HomeStateSnapshot
 
-## CardOwnership semantics — final 11.6.3 proven-static
+## CardOwnership — final 11.6.3 semantics
 
-A targeted exact-specimen pass (`Analyze WorkCardData field semantics`, run
-`33910221352`) closed the three previously ambiguous card fields.
+Exact-specimen workflow:
 
-Current `CardOwnership` durable card state includes:
+```text
+33910221352  Analyze WorkCardData field semantics  success
+```
+
+Durable card state includes:
 
 ```text
 master_card_id
@@ -115,58 +106,33 @@ is_protected
 favorite
 ```
 
-Final-client evidence:
-
-- wire `step` is stored in card `_step` and read through `get_starLessonStep()`;
-- star-rank/card UI consumers use that value;
-- wire `love` maps to independent card `_love` and is consumed by LoveMax / LIVE /
-  gift-related logic;
-- wire `protect` maps to independent `_isProtect` state;
-- `CardData.SetResponseProtect(int protectFlag)` writes that protection state;
-- `favorite` is independent and must not be conflated with protect.
-
-Therefore `/load/index` now maps directly:
+Final-client proven-static mappings:
 
 ```text
-CardOwnership.star_lesson_step -> step
-CardOwnership.love             -> love
-CardOwnership.is_protected     -> protect (0/1)
+wire step    -> CardOwnership.star_lesson_step
+wire love    -> CardOwnership.love
+wire protect -> CardOwnership.is_protected
 ```
 
-`CardLoadIndexBinding` now carries only the stable positive client `serial_id`.
+`favorite` is independent from protection.
 
-## SQLite mutable state — schema v2
+## SQLite domain schema v2
 
-`server/domain/persistence.py` currently uses:
+`server/domain/persistence.py`:
 
 ```text
 SCHEMA_VERSION = 2
-```
-
-Mutable tables remain:
-
-```text
-schema_metadata
-players
-player_resources
-user_cards
-units
-unit_members
-feature_unlocks
 ```
 
 v1 -> v2 migration:
 
 ```text
 locked -> is_protected
-add star_lesson_step INTEGER NOT NULL DEFAULT 0
-add love             INTEGER NOT NULL DEFAULT 0
+add star_lesson_step DEFAULT 0
+add love DEFAULT 0
 ```
 
-Migration tests prove an old v1 protected/locked card preserves the boolean state,
-while newly introduced progression values default to zero.
-
-Relevant successful domain run after the migration:
+Migration and round-trip tests are green:
 
 ```text
 33946077505  Test preservation domain core  success
@@ -181,65 +147,42 @@ Relevant successful domain run after the migration:
 (player_id, domain unit_id)      -> positive CGSS unit_id
 ```
 
-It also now provides the reverse lookup needed by mutation endpoints:
+and reverse lookup:
 
 ```text
 (player_id, CGSS serial_id) -> domain user_card_id
 ```
 
-The numeric client identity stays adapter state rather than domain PK semantics.
+The mapping is stable across restarts and stays outside the domain model.
 
 ## Domain-backed `/load/index`
 
-The current path is:
+Current read path:
 
 ```text
 SQLite archival profile
  -> PreservationProfileService
  -> HomeStateSnapshot
- -> stable compatibility IDs
- -> final-11.6.3 load/index adapter
- -> existing CGSS codec/HTTP stack
+ -> compatibility identity map
+ -> final-client /load/index adapter
+ -> CGSS codec/HTTP
 ```
 
-`SQLiteDomainLoadIndexData` opens short-lived SQLite connections inside each HTTP
-worker thread instead of sharing one connection with `check_same_thread=False`.
-
-CI run `33909792669` proves at server-integration level:
-
-1. first real HTTP `/load/index` reads stamina=100 from SQLite;
-2. persisted domain state changes to stamina=42;
-3. second HTTP `/load/index` returns 42;
-4. the client card serial remains stable between both responses.
-
-This is not target-client runtime acceptance.
-
-## First mutation command: card protection
-
-`PreservationProfileService.set_card_protection(player_id, user_card_id, bool)` is
-implemented and route-agnostic.
-
-Properties:
-
-- validates ownership;
-- updates `CardOwnership.is_protected` transactionally;
-- repeated assignment to the existing state is a no-op;
-- returns normalized `ChangeSet`;
-- mutation evidence is `PROVEN_STATIC / EXACT` for the durable card state itself;
-- route/request semantics are intentionally tracked separately.
-
-The compatibility identity store can reverse a request `serial_id` into the domain
-`user_card_id`.
-
-Tests for this command + reverse identity lookup are green:
+Server integration run:
 
 ```text
-33946293619  Test preservation domain core  success
+33909792669  Test preservation domain core  success
 ```
 
-## Exact final endpoint: A:29 MemberProtect
+It proves:
 
-Targeted exact 11.6.3 analysis closed the route and request shape:
+1. HTTP `/load/index` reads mutable SQLite state;
+2. a DB mutation is visible on the next request;
+3. client numeric card identity stays stable.
+
+## A:29 MemberProtect exact contract
+
+Exact final 11.6.3 route/request:
 
 ```text
 group/key : A:29
@@ -249,139 +192,253 @@ task      : Stage.MemberProtectCardTask
 request   : MemberProtectCardTaskParam.serial_ids : int[]
 ```
 
-Exact task metadata:
+There is no wire protect bool.
+
+Adapter:
 
 ```text
-MemberProtectCardTask.SetParameter(int[] serialIds)
-MemberProtectCardTask.Parse()
+server/adapters/member_protect.py
 ```
 
-There is **no protect bool in the network request**. Do not bind
-`set_card_protection(..., bool)` directly from request input until mutation semantics
-are proven.
+parses exactly `serial_ids[]` without manufacturing a state flag.
 
-Related exact UI/client signatures do carry a boolean locally, e.g. callback or UI
-helpers of the form:
+## A:29 exact response semantics — CLOSED
 
-```text
-CallbackProtectFunc.Invoke(int serialId, bool flag)
-ChangeListProtectCard(int serialId, bool isProtect)
-```
-
-so local UI state and network request shape must remain distinct.
-
-## A:29 native flow evidence
-
-Enhanced targeted workflow:
+Response-semantic exact-specimen workflow:
 
 ```text
-run       33946353055
+run       33946538333
 conclusion success
 artifact  final-client-card-protect-endpoint
-artifact id 9963452595
+artifact id 9963511531
+artifact digest sha256:255f5cb275baf58bb5c7cf1ef0ac0b2e6cedd07f48fb991ff10ce329df122a53
 ```
 
-Sanitized reports:
+Sanitized report:
 
 ```text
-card-protect-endpoint-11.6.3.json
-member-protect-flow-11.6.3.json
+member-protect-response-semantics-11.6.3.json
 ```
 
-Direct final-client flow facts:
+`MemberProtectCardTask.Parse()` references exactly the relevant response keys:
 
 ```text
-ActionProtect(serialId)
- -> SetPeotectSerialId(...)
- -> ActionProtectCorou
- -> StartMemberProtectTask
- -> List<int>.ToArray
- -> MemberProtectCardTask.SetParameter(serialIds)
- -> NetworkManager.Connect
+data
+protect_card_list
 ```
 
-`MemberProtectCardTask.Parse()`:
+For every requested serial the final client:
 
-- calls `BaseTask.Parse()`;
-- performs multiple `LitJson.JsonData` item/count/key operations;
-- resolves owned cards through `WorkCardData.GetCardDataWithSerial`;
-- performs ObscuredBool conversion;
-- therefore response handling is not yet proven to be empty-success.
+1. resolves `WorkCardData.GetCardDataWithSerial(serial)`;
+2. writes `false` directly to the `_isProtect` backing state;
+3. scans `response.data.protect_card_list`;
+4. if the serial is present, writes `true` back to `_isProtect`.
 
-The targeted direct-xref pass did **not** find a direct call from
-`MemberProtectCardTask.Parse()` to `CardData.SetResponseProtect`. The only direct
-xref to `SetResponseProtect` in that pass was from `MemberEvolutionTask.Parse()`.
-This does not prove MemberProtect leaves protection untouched: it may mutate the
-backing field through another path or derive/toggle state. Indirect dispatch and raw
-field writes were not closed by that pass.
+Therefore the final-client-visible response contract is proven:
 
-## Current blocker — A:29 response semantics
+```json
+{
+  "data": {
+    "protect_card_list": [1, 7, 42]
+  }
+}
+```
 
-Do not implement the final wire handler by guessing a toggle yet.
+The list is server-authoritative resulting protection membership for the request.
+The preservation adapter emits only the protected subset of requested serials; that
+is sufficient for the exact final parser and avoids claiming that production
+returned a global protected-card list.
 
-Next exact question:
+## A:29 mutation algorithm evidence
+
+The durable field and response membership are `PROVEN_STATIC / EXACT`.
+
+The production server's internal mutation code is unavailable. The preservation
+command currently uses **toggle semantics**, marked:
 
 ```text
-MemberProtectCardTask.Parse
- -> exact response string keys
- -> response collection/object shape
- -> resulting protect value derivation
- -> direct/raw card state write or client-side toggle
+EvidenceStatus.PROVEN_STATIC
+EvidenceKind.INFERRED
 ```
 
-Only after that is closed should the endpoint adapter decide between semantics such
-as:
+Reasoning/evidence:
+
+- the network request contains only `serial_ids[]`, no desired bool;
+- the final client uses the same MemberProtect action for protection state changes;
+- UI helpers carry local bool state but the task strips that to serial IDs;
+- response membership communicates the resulting state;
+- no paired unprotect network request has been recovered;
+- `ChangeProtectIcon()` derives bool state from list membership.
+
+Do not promote toggle from `INFERRED` to `EXACT` without stronger production/runtime
+evidence.
+
+## Domain mutation commands
+
+Exact state setter:
 
 ```text
-serial_ids[] -> toggle each selected card
+PreservationProfileService.set_card_protection(...)
 ```
 
-or
+A:29 preservation command:
 
 ```text
-serial_ids[] + server response result -> explicit resulting protection state
+PreservationProfileService.toggle_card_protection(player_id, user_card_ids)
 ```
 
-## Next implementation after response semantics close
+Properties:
 
-Add a generic dynamic application-route hook to `server/http_server.py`; do not add
-business logic directly into the bootstrap handler.
+- validates all ownership before mutation;
+- updates the batch in one transaction;
+- returns normalized `ChangeSet`;
+- duplicate IDs are rejected because duplicate-toggle semantics are unrecovered;
+- empty batch is a no-op;
+- resulting `is_protected` values are durable SQLite state.
 
-Target test chain:
+Domain/identity command tests:
 
 ```text
-/load/index -> protect=0
-POST /member/protect_card with exact encrypted request
- -> domain mutation
- -> exact/minimal proven response
-/load/index -> protect=<proven resulting value>
+33946293619  Test preservation domain core  success
 ```
 
-If toggle semantics are proven, repeat the request and prove the second transition
-back as well.
+## A:29 application layer
 
-## Broader remaining work
+Implemented:
 
-After A:29 becomes the first complete write-state loop:
+```text
+server/application/member_protect.py
+```
 
-1. UpdateUnit / unit persistence command;
-2. favorite-card semantics and route;
-3. master.mdb semantic mappings for card/idol/item/story/music/mission;
-4. additional `user_info` durable state vs compatibility-policy split;
-5. startup snapshots vs shared response deltas;
-6. Story/Commu and Live domain state transitions;
-7. patched-client runtime acceptance;
-8. actual device/UI-visible Home and feature verification.
+Flow:
+
+```text
+serial_ids[]
+ -> compatibility serial -> domain card lookup
+ -> validate whole batch
+ -> inferred atomic toggle command
+ -> read resulting HomeStateSnapshot
+ -> exact protect_card_list response projection
+```
+
+Thread-safe SQLite facade:
+
+```text
+SQLiteMemberProtectHandler
+```
+
+opens short-lived domain/identity connections per HTTP request.
+
+## Generic dynamic HTTP application extension
+
+Implemented:
+
+```text
+server/application_http.py
+server/bootstrap_core.py::process_application_request
+```
+
+It is endpoint-agnostic:
+
+```text
+encrypted CGSS request
+ -> common decode
+ -> registered application handler(decoded request)
+ -> endpoint data mapping
+ -> common success envelope
+ -> common CGSS encryption
+```
+
+Unregistered routes delegate to the existing HTTP handler unchanged. Business logic
+is not embedded into the bootstrap server.
+
+## FIRST COMPLETE SERVER-SIDE WRITE LOOP — CLOSED
+
+Integration test:
+
+```text
+tests/test_domain_application_member_protect_http.py
+```
+
+Successful workflow:
+
+```text
+33947000143  Test preservation domain core  success
+```
+
+The test uses real project CGSS body/header codecs and real HTTP sockets:
+
+```text
+/load/index
+ -> serial_id=1, protect=0
+
+POST /member/protect_card
+ request data: serial_ids=[1]
+ -> domain SQLite mutation
+ -> response data.protect_card_list=[1]
+
+/load/index
+ -> same serial_id=1, protect=1
+
+POST /member/protect_card again
+ -> response data.protect_card_list=[]
+
+/load/index
+ -> same serial_id=1, protect=0
+```
+
+This proves the server-side chain:
+
+```text
+CGSS encrypted request
+ -> exact request adapter
+ -> persistent identity resolution
+ -> domain command
+ -> SQLite mutation
+ -> exact response adapter
+ -> CGSS encrypted response
+ -> subsequent domain-backed load/index reflects mutation
+```
+
+It does **not** prove untouched/patched target-client acceptance yet.
+
+## Immediate continuation
+
+1. expose the domain-backed load/index + A:29 application handlers through a direct
+   local preservation-server runner/config;
+2. run the same A:29 exchange against the patched/final client when device runtime is
+   ready;
+3. keep the static starter-template path as differential fallback;
+4. start the next write-state slice, preferably UpdateUnit, using the same pattern:
+
+```text
+exact request
+ -> domain command
+ -> exact/minimal response
+ -> next load/index state persistence
+```
+
+5. then recover favorite-card state, Story/Commu, Live and other domains.
+
+## Broader remaining gaps
+
+- master.mdb semantic mappings for card/idol/item/story/music/mission/etc.;
+- more durable `user_info` fields vs compatibility policy;
+- startup snapshot vs shared response delta conventions;
+- Unit/deck mutation semantics;
+- Story/Commu state transitions;
+- Live start/end/reward transitions;
+- patched-client runtime acceptance;
+- actual device/UI-visible Home/features.
 
 ## Agent continuation checklist
 
-1. Fetch `analysis/server-contracts-11.6.3` and re-read HEAD.
-2. Do not redo C0-C9 or bootstrap protocol research.
-3. Treat `step/love/protect` as closed final-client durable card semantics.
-4. Treat A:29 route/request as exact, but its response/mutation algorithm as still
-   unresolved.
-5. Reuse existing response-field/C5/C9 evidence before adding a new broad pass.
-6. Keep domain state, client identity, endpoint DTO, codec/HTTP and master data in
-   separate layers.
-7. Update this handoff after each coherent tranche with exact commit/run IDs.
-8. Never report CI/static success as real-device/Home success.
+1. Fetch `analysis/server-contracts-11.6.3`; confirm HEAD before writing.
+2. Do not redo C0-C9/bootstrap protocol archaeology.
+3. Treat card step/love/protect durable semantics as closed final-client evidence.
+4. Treat A:29 request and `protect_card_list` response as exact.
+5. Treat A:29 toggle algorithm as `PROVEN_STATIC / INFERRED`, not exact.
+6. Preserve domain / client-ID / wire DTO / transport / master-data layer separation.
+7. Reuse `server/application_http.py` for new dynamic endpoints.
+8. Update this file with commit SHA + CI run after every coherent tranche.
+9. Never report static/CI success as real-device or UI success.
