@@ -6,10 +6,12 @@ load/index template. It currently registers:
 * domain-backed ``/load/index``;
 * A:29 ``/member/protect_card``;
 * A:22 ``/favorite/edit``;
-* A:19 ``/unit/edit``.
+* A:19 ``/unit/edit``;
+* A:47 ``/story/start`` compatibility initialization.
 
 Starter profile/card/unit values are explicit preservation provisioning policy, not
-claims about the production account-creation service.
+claims about the production account-creation service. ``/story/start`` is likewise
+a parser-safe compatibility route and does not claim historical response parity.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from .application import (
     SQLiteMemberFavoriteEditHandler,
     SQLiteMemberProtectHandler,
     SQLiteMemberUnitEditHandler,
+    StoryStartController,
 )
 from .application_http import create_application_server
 from .domain import (
@@ -190,6 +193,7 @@ def main() -> int:
         master_revision=args.master_revision,
         resource_revision=args.resource_revision,
     )
+    story_start = StoryStartController()
 
     httpd = create_application_server(
         args.host,
@@ -198,6 +202,7 @@ def main() -> int:
             "/member/protect_card": member_protect,
             "/favorite/edit": member_favorite,
             "/unit/edit": member_unit_edit,
+            "/story/start": story_start,
         },
         final_res_ver=args.resource_revision,
         load_index_data=load_index_data,
@@ -215,7 +220,7 @@ def main() -> int:
     print(f"cgss-relive domain API listening on {scheme}://{bound_host}:{bound_port}")
     print(f"domain DB: {args.domain_db}")
     print(f"compatibility identity DB: {args.identity_db}")
-    print("dynamic routes: /load/index, /member/protect_card, /favorite/edit, /unit/edit")
+    print("dynamic routes: /load/index, /member/protect_card, /favorite/edit, /unit/edit, /story/start")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

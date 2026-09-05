@@ -16,6 +16,7 @@ from .member_protect import (
     MemberProtectController,
     SQLiteMemberProtectHandler,
 )
+from .story_start import StoryStartController
 from .unit_edit import (
     MemberUnitEditConfig,
     MemberUnitEditController,
@@ -36,4 +37,5 @@ __all__ = [
     "SQLiteMemberFavoriteEditHandler",
     "SQLiteMemberProtectHandler",
     "SQLiteMemberUnitEditHandler",
+    "StoryStartController",
 ]
