@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import unittest
 
-from server.adapters.identity_store import SQLiteCompatibilityIdentityStore
+from server.adapters.identity_store import (
+    SQLiteCompatibilityIdentityStore,
+    UnitCompatibilitySlot,
+)
 from server.application import MemberUnitEditConfig, MemberUnitEditController
 from server.domain import (
     CardOwnership,
@@ -64,21 +67,21 @@ class MemberUnitEditApplicationTests(unittest.TestCase):
         self.domain.close()
 
     @staticmethod
-    def request(serial_ids: list[int]) -> dict[str, object]:
+    def request(serial_ids: list[int], *, main_unit_id: int = 1) -> dict[str, object]:
         return {
             "unit_info_list": [
                 {
                     "unit_id": 1,
                     "serial_ids": serial_ids,
-                    "dress_types": [0, 0, 0, 0, 0],
-                    "dress_2d_types": [0, 0, 0, 0, 0],
-                    "dress_storage_ids": [0, 0, 0, 0, 0],
+                    "dress_types": [101, 0, 202, 0, 0],
+                    "dress_2d_types": [11, 0, 22, 0, 0],
+                    "dress_storage_ids": [1001, 0, 2002, 0, 0],
                 }
             ],
-            "main_unit_id": 1,
+            "main_unit_id": main_unit_id,
         }
 
-    def test_handle_replaces_members_and_returns_exact_empty_endpoint_data(self) -> None:
+    def test_handle_replaces_members_and_persists_compatibility_state(self) -> None:
         response = self.controller.handle(self.request([3, 0, 1, 0, 0]))
         self.assertEqual(response, {})
         unit = self.domain.list_units("player:1")[0]
@@ -88,6 +91,17 @@ class MemberUnitEditApplicationTests(unittest.TestCase):
         )
         self.assertEqual(unit.slot, 0)
         self.assertEqual(unit.name, "Primary")
+        self.assertEqual(self.identities.get_main_unit("player:1"), "unit:1")
+        self.assertEqual(
+            self.identities.get_unit_compatibility_slots("player:1", "unit:1"),
+            (
+                UnitCompatibilitySlot(0, 101, 11, 1001),
+                UnitCompatibilitySlot(1, 0, 0, 0),
+                UnitCompatibilitySlot(2, 202, 22, 2002),
+                UnitCompatibilitySlot(3, 0, 0, 0),
+                UnitCompatibilitySlot(4, 0, 0, 0),
+            ),
+        )
 
     def test_invalid_parallel_slot_count_rejects_without_mutation(self) -> None:
         before = self.domain.list_units("player:1")
@@ -95,12 +109,22 @@ class MemberUnitEditApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.controller.handle(request)
         self.assertEqual(self.domain.list_units("player:1"), before)
+        self.assertIsNone(self.identities.get_main_unit("player:1"))
+        self.assertEqual(self.identities.get_unit_compatibility_slots("player:1", "unit:1"), ())
 
     def test_unknown_serial_rejects_without_mutation(self) -> None:
         before = self.domain.list_units("player:1")
         with self.assertRaises(ValueError):
             self.controller.handle(self.request([999, 0, 1, 0, 0]))
         self.assertEqual(self.domain.list_units("player:1"), before)
+        self.assertIsNone(self.identities.get_main_unit("player:1"))
+
+    def test_unknown_main_unit_rejects_before_membership_mutation(self) -> None:
+        before = self.domain.list_units("player:1")
+        with self.assertRaises(ValueError):
+            self.controller.handle(self.request([3, 0, 1, 0, 0], main_unit_id=99))
+        self.assertEqual(self.domain.list_units("player:1"), before)
+        self.assertEqual(self.identities.get_unit_compatibility_slots("player:1", "unit:1"), ())
 
 
 if __name__ == "__main__":
