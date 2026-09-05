@@ -6,10 +6,18 @@ from .load_index import (
     DynamicLoadIndexData,
     SQLiteDomainLoadIndexData,
 )
+from .member_protect import (
+    MemberProtectConfig,
+    MemberProtectController,
+    SQLiteMemberProtectHandler,
+)
 
 __all__ = [
     "DomainLoadIndexConfig",
     "DomainLoadIndexController",
     "DynamicLoadIndexData",
+    "MemberProtectConfig",
+    "MemberProtectController",
     "SQLiteDomainLoadIndexData",
+    "SQLiteMemberProtectHandler",
 ]
