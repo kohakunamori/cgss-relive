@@ -9,8 +9,10 @@ exports only sanitized evidence for three managed methods:
 - LiveSelectParty.<StartUnitEditTask>d__296.MoveNext (when present)
 
 For each method it records referenced managed string literals and selected direct
-managed calls with small instruction contexts. It never emits raw bytes or bulk
-disassembly.
+managed calls with small instruction contexts. For exceptionally small methods
+(up to eight instructions) it also records the complete sanitized instruction
+listing so trivial constant-return parsers can be closed without exporting a bulk
+disassembly. It never emits raw bytes or bulk disassembly.
 """
 from __future__ import annotations
 
@@ -37,6 +39,7 @@ MAX_LITERAL_LENGTH = 160
 LITERAL_WINDOW = 10
 CONTEXT_RADIUS = 6
 MAX_SELECTED_CALLS = 180
+MAX_TINY_FULL_INSTRUCTIONS = 8
 
 INTEREST_TERMS = (
     "BaseTask$$Parse",
@@ -268,6 +271,12 @@ def analyze_method(
             }
         )
 
+    tiny_full_instruction_listing = (
+        [sanitize_instruction(ins, by_rva) for ins in insns]
+        if len(insns) <= MAX_TINY_FULL_INSTRUCTIONS
+        else []
+    )
+
     return {
         "name": method.name,
         "rva": method.address,
@@ -276,6 +285,7 @@ def analyze_method(
         "signature": method.signature,
         "instruction_count": len(insns),
         "named_direct_call_count": named_direct_call_count,
+        "tiny_full_instruction_listing": tiny_full_instruction_listing,
         "referenced_string_literals": sorted(unique_literals.values(), key=lambda row: row["load_rva"]),
         "selected_direct_calls": calls,
     }
@@ -315,6 +325,7 @@ def main() -> int:
         "methods": reports,
         "limits": {
             "bounded_methods_only": True,
+            "tiny_complete_listing_max_instructions": MAX_TINY_FULL_INSTRUCTIONS,
             "direct_calls_only": True,
             "indirect_dispatch_recovered": False,
             "runtime_acceptance": False,
