@@ -37,8 +37,21 @@ _CARD_PROTECTION_EVIDENCE = Evidence(
     EvidenceKind.EXACT,
     source="final-11.6.3 WorkCardData.CardData",
     note=(
-        "response protect is written to independent _isProtect state by SetResponseProtect; "
-        "endpoint request binding is tracked separately"
+        "response protect is stored in independent _isProtect state; "
+        "endpoint command semantics are tracked separately"
+    ),
+)
+
+_MEMBER_PROTECT_TOGGLE_EVIDENCE = Evidence(
+    EvidenceStatus.PROVEN_STATIC,
+    EvidenceKind.INFERRED,
+    source="final-11.6.3 A:29 MemberProtect",
+    note=(
+        "A:29 accepts only serial_ids and returns data.protect_card_list; final client "
+        "rebuilds requested-card protection from that authoritative membership list. "
+        "Using a toggle command is the preservation inference for the single protect/"
+        "unprotect action until runtime or stronger server-side evidence proves the "
+        "production mutation algorithm."
     ),
 )
 
@@ -247,12 +260,7 @@ class PreservationProfileService:
         user_card_id: str,
         is_protected: bool,
     ) -> ChangeSet:
-        """Set the proven card-protection state for one owned card instance.
-
-        This command is route-agnostic. The final client proves the semantic state
-        itself; a separate endpoint adapter must prove how a wire request identifies
-        the card and desired value before calling this method.
-        """
+        """Set the proven card-protection state for one owned card instance."""
 
         card = next(
             (
@@ -284,4 +292,55 @@ class PreservationProfileService:
                     evidence=_CARD_PROTECTION_EVIDENCE,
                 ),
             )
+        )
+
+    def toggle_card_protection(
+        self,
+        player_id: str,
+        user_card_ids: tuple[str, ...],
+    ) -> ChangeSet:
+        """Atomically toggle protection for a batch of owned cards.
+
+        The durable protection field and response membership semantics are exact
+        final-client evidence.  Toggle is intentionally marked *inferred*: A:29 has
+        one serial-id-only request for both protect/unprotect UI actions, but the
+        production server's internal mutation code is not available.
+
+        Duplicate IDs are rejected rather than assigned an invented sequential or
+        set-normalization meaning.  The untouched client is expected to submit each
+        selected owned-card serial once.
+        """
+
+        requested = tuple(user_card_ids)
+        if any(not user_card_id for user_card_id in requested):
+            raise ValueError("user_card_ids must be non-empty identities")
+        if len(set(requested)) != len(requested):
+            raise ValueError("duplicate card identities have unresolved toggle semantics")
+        if not requested:
+            return ChangeSet()
+
+        cards = {card.user_card_id: card for card in self._repository.list_cards(player_id)}
+        missing = [user_card_id for user_card_id in requested if user_card_id not in cards]
+        if missing:
+            raise KeyError(
+                f"unknown owned cards for archival player {player_id!r}: {missing!r}"
+            )
+
+        updates = [replace(cards[user_card_id], is_protected=not cards[user_card_id].is_protected) for user_card_id in requested]
+        with self._repository.transaction():
+            for card in updates:
+                self._repository.save_card(card)
+
+        return ChangeSet(
+            entities=tuple(
+                EntityChange(
+                    category="card",
+                    entity_id=card.user_card_id,
+                    operation=ChangeOperation.UPDATE,
+                    values={"is_protected": card.is_protected},
+                    evidence=_MEMBER_PROTECT_TOGGLE_EVIDENCE,
+                )
+                for card in updates
+            ),
+            metadata={"command_semantics": "member-protect-toggle-inferred"},
         )
