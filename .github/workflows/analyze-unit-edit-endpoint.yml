@@ -9,6 +9,7 @@ on:
       - 'scripts/analyze-unit-edit-endpoint.py'
       - 'scripts/analyze-unit-edit-native-semantics.py'
       - 'scripts/analyze-unit-main-semantics.py'
+      - 'scripts/analyze-unit-main-native.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
 
@@ -128,6 +129,23 @@ jobs:
 
       - name: Install native analysis dependencies
         run: python -m pip install --disable-pip-version-check capstone pyelftools
+
+      - name: Resolve exact main-unit scalar conversion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-unit-main-native.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --output reports/unit-edit-main-unit-native-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/unit-edit-main-unit-native-11.6.3.json'))
+          assert d['schema'] == 1
+          text='\n'.join(d['instructions'])
+          assert 'Stage.WorkUnitData$$GetMainUnit' in text
+          print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
 
       - name: Trace UnitEdit request/response native semantics
         shell: bash
