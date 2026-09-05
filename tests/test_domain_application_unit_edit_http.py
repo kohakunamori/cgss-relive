@@ -8,7 +8,10 @@ import threading
 import unittest
 
 from server import cgss_codec
-from server.adapters.identity_store import SQLiteCompatibilityIdentityStore
+from server.adapters.identity_store import (
+    SQLiteCompatibilityIdentityStore,
+    UnitCompatibilitySlot,
+)
 from server.application import (
     DomainLoadIndexConfig,
     MemberUnitEditConfig,
@@ -32,7 +35,7 @@ def synthetic_header_encode(value: str) -> str:
 
 
 class MemberUnitEditHTTPIntegrationTests(unittest.TestCase):
-    def test_encrypted_unit_edit_round_trip_persists_into_load_index(self) -> None:
+    def test_encrypted_unit_edit_round_trip_persists_members_cosmetics_and_main_unit(self) -> None:
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             domain_path = tmp_path / "domain.sqlite3"
@@ -160,9 +163,9 @@ class MemberUnitEditHTTPIntegrationTests(unittest.TestCase):
                     {
                         "unit_id": 1,
                         "serial_ids": [3, 0, 1, 0, 0],
-                        "dress_types": [0, 0, 0, 0, 0],
-                        "dress_2d_types": [0, 0, 0, 0, 0],
-                        "dress_storage_ids": [0, 0, 0, 0, 0],
+                        "dress_types": [101, 0, 202, 0, 0],
+                        "dress_2d_types": [11, 0, 22, 0, 0],
+                        "dress_storage_ids": [1001, 0, 2002, 0, 0],
                     }
                 ],
                 "main_unit_id": 1,
@@ -174,6 +177,10 @@ class MemberUnitEditHTTPIntegrationTests(unittest.TestCase):
                     [before[f"serial_id_{index}"] for index in range(5)],
                     [1, 2, 0, 0, 0],
                 )
+                for index in range(5):
+                    self.assertNotIn(f"dress_type_{index}", before)
+                    self.assertNotIn(f"dress_2d_type_{index}", before)
+                    self.assertNotIn(f"dress_storage_id_{index}", before)
 
                 response = post("/unit/edit", request)
                 self.assertEqual(response["data"], {})
@@ -183,6 +190,18 @@ class MemberUnitEditHTTPIntegrationTests(unittest.TestCase):
                 self.assertEqual(
                     [after[f"serial_id_{index}"] for index in range(5)],
                     [3, 0, 1, 0, 0],
+                )
+                self.assertEqual(
+                    [after[f"dress_type_{index}"] for index in range(5)],
+                    [101, 0, 202, 0, 0],
+                )
+                self.assertEqual(
+                    [after[f"dress_2d_type_{index}"] for index in range(5)],
+                    [11, 0, 22, 0, 0],
+                )
+                self.assertEqual(
+                    [after[f"dress_storage_id_{index}"] for index in range(5)],
+                    [1001, 0, 2002, 0, 0],
                 )
 
                 with SQLiteDomainStore.open(
@@ -194,6 +213,19 @@ class MemberUnitEditHTTPIntegrationTests(unittest.TestCase):
                     self.assertEqual(
                         persisted.members,
                         (UnitMember(0, "card:3"), UnitMember(2, "card:1")),
+                    )
+
+                with SQLiteCompatibilityIdentityStore.open(identity_path) as identities:
+                    self.assertEqual(identities.get_main_unit("archival-player"), "unit:1")
+                    self.assertEqual(
+                        identities.get_unit_compatibility_slots("archival-player", "unit:1"),
+                        (
+                            UnitCompatibilitySlot(0, 101, 11, 1001),
+                            UnitCompatibilitySlot(1, 0, 0, 0),
+                            UnitCompatibilitySlot(2, 202, 22, 2002),
+                            UnitCompatibilitySlot(3, 0, 0, 0),
+                            UnitCompatibilitySlot(4, 0, 0, 0),
+                        ),
                     )
             finally:
                 server.shutdown()
