@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from server.adapters import MemberProtectRequest, parse_member_protect_request
+from server.adapters import (
+    MemberProtectRequest,
+    parse_member_protect_request,
+    project_member_protect_response_data,
+)
 
 
 class MemberProtectRequestAdapterTests(unittest.TestCase):
@@ -17,6 +21,21 @@ class MemberProtectRequestAdapterTests(unittest.TestCase):
             parse_member_protect_request({"serial_ids": []}),
             MemberProtectRequest(()),
         )
+
+    def test_response_projects_protected_requested_subset_in_request_order(self) -> None:
+        request = MemberProtectRequest((7, 3, 9))
+        self.assertEqual(
+            project_member_protect_response_data(request, (9, 7)),
+            {"protect_card_list": [7, 9]},
+        )
+        self.assertEqual(
+            project_member_protect_response_data(request, ()),
+            {"protect_card_list": []},
+        )
+
+    def test_response_rejects_unrequested_membership(self) -> None:
+        with self.assertRaises(ValueError):
+            project_member_protect_response_data(MemberProtectRequest((7,)), (8,))
 
     def test_rejects_unproven_or_invalid_shapes(self) -> None:
         for invalid in (
