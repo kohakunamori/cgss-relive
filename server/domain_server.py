@@ -1,10 +1,11 @@
 """Runnable domain-backed CGSS preservation API.
 
-This is the first application entry point that serves mutable archival state rather
-than a fixed load/index template.  It currently registers:
+This application entry point serves mutable archival state rather than a fixed
+load/index template. It currently registers:
 
 * domain-backed ``/load/index``;
-* A:29 ``/member/protect_card``.
+* A:29 ``/member/protect_card``;
+* A:19 ``/unit/edit``.
 
 Starter profile/card/unit values are explicit preservation provisioning policy, not
 claims about the production account-creation service.
@@ -19,8 +20,10 @@ from pathlib import Path
 from .application import (
     DomainLoadIndexConfig,
     MemberProtectConfig,
+    MemberUnitEditConfig,
     SQLiteDomainLoadIndexData,
     SQLiteMemberProtectHandler,
+    SQLiteMemberUnitEditHandler,
 )
 from .application_http import create_application_server
 from .domain import (
@@ -53,7 +56,7 @@ def provision_archival_profile(
 ) -> str:
     """Ensure one deterministic archival profile and starter unit exist.
 
-    Returns the domain user-card ID used as the load/index leader.  Unit creation is
+    Returns the domain user-card ID used as the load/index leader. Unit creation is
     provisioning policy and intentionally stays out of endpoint/domain command
     semantics.
     """
@@ -170,11 +173,21 @@ def main() -> int:
         master_revision=args.master_revision,
         resource_revision=args.resource_revision,
     )
+    member_unit_edit = SQLiteMemberUnitEditHandler(
+        args.domain_db,
+        args.identity_db,
+        config=MemberUnitEditConfig(args.player_id),
+        master_revision=args.master_revision,
+        resource_revision=args.resource_revision,
+    )
 
     httpd = create_application_server(
         args.host,
         args.port,
-        application_handlers={"/member/protect_card": member_protect},
+        application_handlers={
+            "/member/protect_card": member_protect,
+            "/unit/edit": member_unit_edit,
+        },
         final_res_ver=args.resource_revision,
         load_index_data=load_index_data,
         event_log=args.event_log,
@@ -191,7 +204,7 @@ def main() -> int:
     print(f"cgss-relive domain API listening on {scheme}://{bound_host}:{bound_port}")
     print(f"domain DB: {args.domain_db}")
     print(f"compatibility identity DB: {args.identity_db}")
-    print("dynamic routes: /load/index, /member/protect_card")
+    print("dynamic routes: /load/index, /member/protect_card, /unit/edit")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
