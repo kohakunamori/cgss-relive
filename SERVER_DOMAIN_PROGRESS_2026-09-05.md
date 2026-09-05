@@ -1,13 +1,12 @@
 # SERVER DOMAIN PROGRESS SNAPSHOT — 2026-09-05
 
-Authoritative continuation snapshot for the active server-domain/business work on:
+Historical progress snapshot for the server-domain/business work that was developed
+on `analysis/server-contracts-11.6.3`. That line was integrated with the validated
+Home/client branch on 2026-09-05; current continuation is on `main`.
 
-```text
-analysis/server-contracts-11.6.3
-```
-
-This file supersedes the stale continuation point in `SERVER_DOMAIN_HANDOFF.md` for
-work completed after A:19. Keep the older handoff as historical context.
+This file superseded the stale continuation point in `SERVER_DOMAIN_HANDOFF.md` for
+work completed after A:19. Keep both as evidence/history and use
+`docs/research/2026-09-05-server-domain-integration.md` for the integration checkpoint.
 
 ## Evidence boundary
 

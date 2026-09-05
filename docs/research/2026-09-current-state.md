@@ -6,7 +6,7 @@ This file is the short authoritative status summary. For continuation details, r
 ## Workspace / execution
 
 - Authoritative worktree: `D:\Project\cgss-relive`.
-- Active research branch: `client-research-fixed`.
+- Authoritative continuation branch: `main` after the validated 2026-09-05 Home + server-domain integration.
 - Host/device operations use AgentDock. WebCodex is retired.
 - Real-device target: OnePlus 8T, ADB serial `b57d21c6`.
 - Do not touch unrelated ADB/emulator endpoints.

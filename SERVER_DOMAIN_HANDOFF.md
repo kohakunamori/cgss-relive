@@ -1,13 +1,12 @@
 # SERVER DOMAIN HANDOFF — CGSS preservation server
 
-Authoritative continuation note for the server-domain/business phase on:
+Historical handoff for the server-domain/business phase. This line was merged into
+the validated Home/client line on 2026-09-05 and is now continued from `main`.
+The former `analysis/server-contracts-11.6.3` branch is archival history only.
 
-```text
-analysis/server-contracts-11.6.3
-```
-
-Read together with `CLIENT_CONTRACT_HANDOFF.md`, `docs/server-domain-model-v0.md`
-and `docs/load-index-11.6.3.md`.
+Read together with `CLIENT_CONTRACT_HANDOFF.md`, `docs/server-domain-model-v0.md`,
+`docs/load-index-11.6.3.md`, and
+`docs/research/2026-09-05-server-domain-integration.md`.
 
 ## Evidence boundary
 
@@ -480,7 +479,7 @@ Then proceed to Story/Commu and Live state transitions.
 
 ## Agent continuation checklist
 
-1. Fetch `analysis/server-contracts-11.6.3`; confirm HEAD before writing.
+1. Fetch `main`; confirm HEAD before writing.
 2. Do not redo C0-C9/bootstrap protocol archaeology.
 3. Treat card step/love/protect durable mappings as closed final-client evidence.
 4. Treat A:29 request/response as exact; toggle algorithm remains inferred.

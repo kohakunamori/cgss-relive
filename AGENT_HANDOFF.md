@@ -3,10 +3,12 @@
 Authoritative continuation point for `kohakunamori/cgss-relive`.
 
 **Do not restart solved research.** The authoritative local worktree is
-`D:\Project\cgss-relive`, branch `client-research-fixed`. Use AgentDock for host,
-ADB, Frida, and device operations; WebCodex is retired. Preserve the current
-working tree before any branch/reset operation, verify tests/CI, then continue
-from the first unsupported post-Home dependency.
+`D:\Project\cgss-relive`. The validated Home/client line and the server-domain
+contract line were integrated on 2026-09-05; `main` is the authoritative
+continuation branch after that integration. Use AgentDock for host, ADB, Frida,
+and device operations; WebCodex is retired. Preserve the current working tree
+before any branch/reset operation, verify tests/CI, then continue from the first
+unsupported post-Home dependency.
 
 ## Mission
 
