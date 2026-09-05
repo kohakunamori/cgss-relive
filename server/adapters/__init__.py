@@ -10,10 +10,13 @@ from .load_index import (
     UnitLoadIndexBinding,
     project_home_snapshot_to_load_index_data,
 )
+from .member_protect import MemberProtectRequest, parse_member_protect_request
 
 __all__ = [
     "CardLoadIndexBinding",
     "LoadIndexProjectionPolicy",
+    "MemberProtectRequest",
     "UnitLoadIndexBinding",
+    "parse_member_protect_request",
     "project_home_snapshot_to_load_index_data",
 ]
