@@ -1,15 +1,19 @@
-"""Final-CGSS 11.6.3 adapter for ``member/protect_card`` request data.
+"""Final-CGSS 11.6.3 adapter for ``member/protect_card``.
 
 Exact final metadata proves ``MemberProtectCardTaskParam.serial_ids : int[]`` and no
-wire boolean flag.  This module therefore parses only that proven request shape. It
-does not infer the resulting protection state; toggle/set semantics belong to the
-application command only after ``MemberProtectCardTask.Parse`` is closed.
+wire boolean flag. Exact final Parse analysis also proves response
+``data.protect_card_list``. For each requested serial the client clears protection,
+then sets it true iff that serial appears in ``protect_card_list``.
+
+This module owns only those proven wire shapes. The server mutation algorithm
+(toggle vs another rule) remains an application/domain concern with its own evidence
+label.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -39,3 +43,32 @@ def parse_member_protect_request(request: Any) -> MemberProtectRequest:
     # Preserve order and duplicates: exact metadata proves an int[] but does not
     # prove that the client/server contract normalizes or rejects duplicates.
     return MemberProtectRequest(tuple(serials))
+
+
+def project_member_protect_response_data(
+    request: MemberProtectRequest,
+    protected_serial_ids: Iterable[int],
+) -> dict[str, object]:
+    """Build the minimal exact ``data`` object consumed by final 11.6.3 Parse.
+
+    The parser only tests requested serials for membership. To avoid manufacturing a
+    claim that production returned the player's global protected-card set, the
+    preservation response returns the protected subset of the requested serials in
+    request order.
+    """
+
+    protected = set(protected_serial_ids)
+    if any(type(serial_id) is not int or serial_id <= 0 for serial_id in protected):
+        raise ValueError("protected serial IDs must be positive integers")
+    requested_set = set(request.serial_ids)
+    unexpected = protected - requested_set
+    if unexpected:
+        raise ValueError(
+            f"member/protect response cannot include unrequested serial IDs: {sorted(unexpected)!r}"
+        )
+
+    return {
+        "protect_card_list": [
+            serial_id for serial_id in request.serial_ids if serial_id in protected
+        ]
+    }
