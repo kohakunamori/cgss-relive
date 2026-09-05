@@ -50,7 +50,7 @@ class StoryStartHTTPIntegrationTests(unittest.TestCase):
             decoded = cgss_codec.decode_body(payload, udid)
             conn.close()
 
-            self.assertEqual(decoded["result_code"], 1)
+            self.assertEqual(decoded["data_headers"]["result_code"], 1)
             self.assertEqual(decoded["data"], {})
 
             # Managed/native evidence proves an Int32 story_id.  A string must fail
