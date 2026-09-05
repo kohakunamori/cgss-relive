@@ -15,13 +15,21 @@ from .member_protect import (
     parse_member_protect_request,
     project_member_protect_response_data,
 )
+from .unit_edit import (
+    MemberUnitEditRequest,
+    MemberUnitEditUnitInfo,
+    parse_member_unit_edit_request,
+)
 
 __all__ = [
     "CardLoadIndexBinding",
     "LoadIndexProjectionPolicy",
     "MemberProtectRequest",
+    "MemberUnitEditRequest",
+    "MemberUnitEditUnitInfo",
     "UnitLoadIndexBinding",
     "parse_member_protect_request",
+    "parse_member_unit_edit_request",
     "project_home_snapshot_to_load_index_data",
     "project_member_protect_response_data",
 ]
