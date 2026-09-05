@@ -53,9 +53,6 @@ class PlayerStateRepository(Protocol):
     def set_resource(self, resource: PlayerResource) -> None:
         ...
 
-    def get_card(self, player_id: str, user_card_id: str) -> CardOwnership | None:
-        ...
-
     def list_cards(self, player_id: str) -> tuple[CardOwnership, ...]:
         ...
 
