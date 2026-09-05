@@ -1,13 +1,13 @@
-"""Transport-independent bootstrap logic for the first CGSS relive server.
+"""Transport-independent bootstrap and reconstructed-route logic.
 
 This module accepts HTTP-like headers plus raw encrypted bodies and returns
-wire-compatible early-bootstrap responses. Socket/TLS/DNS concerns are kept out
-of this layer so reconstructed CGSS contracts can be tested deterministically.
+wire-compatible responses. Socket/TLS/DNS concerns are kept out of this layer so
+reconstructed CGSS contracts can be tested deterministically.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from . import cgss_codec
 from .empty_success import encode_empty_success_response
@@ -53,13 +53,7 @@ def process_load_check_request(
     is_s3: bool | None = False,
     accept_old_resource_version: bool = False,
 ) -> BootstrapExchange:
-    """Decode a final-client load/check request and build its encrypted reply.
-
-    The HTTP-facing server defaults ``is_s3`` to false so a successful version
-    check selects the statically reconstructed storages-host URL family. Set
-    ``accept_old_resource_version`` only for controlled runtime differential
-    tests; normal behavior still returns 214 on a resource-version mismatch.
-    """
+    """Decode a final-client load/check request and build its encrypted reply."""
     udid, request = decode_client_request(headers, body, route="load/check")
     current_res_ver = _get_header(headers, "RES-VER") or ""
     sid = _get_header(headers, "SID")
@@ -166,15 +160,46 @@ def process_template_request(
     servertime: int | None = None,
     dynamic_key: bytes | None = None,
 ) -> BootstrapExchange:
-    """Encode one explicitly supplied reconstructed non-bootstrap response.
-
-    The template contains only the endpoint ``data`` object.  Common success
-    headers, SID propagation and CGSS encryption are generated here so local
-    runtime experiments do not need a bespoke Python handler for every newly
-    reconstructed route.
-    """
+    """Encode one explicitly supplied reconstructed non-bootstrap response."""
     clean_route = "/" + route.split("?", 1)[0].lstrip("/")
     udid, request = decode_client_request(headers, body, route=clean_route.lstrip("/"))
+    sid = _get_header(headers, "SID")
+    response = encode_template_success_response(
+        udid,
+        data,
+        sid=sid,
+        servertime=servertime,
+        dynamic_key=dynamic_key,
+    )
+    return BootstrapExchange(
+        udid=udid,
+        request=request,
+        response=response.payload,
+        response_body=response.body,
+    )
+
+
+def process_application_request(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    route: str,
+    handler: Callable[[Any], Mapping[str, Any]],
+    servertime: int | None = None,
+    dynamic_key: bytes | None = None,
+) -> BootstrapExchange:
+    """Run a dynamic application handler behind the common CGSS transport envelope.
+
+    ``handler`` receives the decoded endpoint request object and returns only the
+    endpoint ``data`` object. Domain/application code therefore stays independent of
+    UDID headers, encryption, SID propagation and common response headers.
+    """
+
+    clean_route = "/" + route.split("?", 1)[0].lstrip("/")
+    udid, request = decode_client_request(headers, body, route=clean_route.lstrip("/"))
+    data = handler(request)
+    if not isinstance(data, Mapping):
+        raise ValueError("application handler must return a mapping data object")
     sid = _get_header(headers, "SID")
     response = encode_template_success_response(
         udid,
