@@ -7,6 +7,7 @@ import unittest
 from server.domain import (
     BootstrapPolicy,
     EvidenceKind,
+    EvidenceStatus,
     FixedClock,
     InitialUnlock,
     PreservationProfileService,
@@ -106,6 +107,37 @@ class DomainServiceTests(unittest.TestCase):
         self.assertEqual(second.snapshot.profile.name, "First")
         self.assertEqual(second.snapshot.cards[0].user_card_id, "card:1")
         self.assertEqual(second.snapshot.resources, ())
+
+    def test_card_protection_command_persists_exact_semantic_state(self) -> None:
+        self.service.bootstrap_profile(
+            BootstrapPolicy(name="Protect", starter_cards=(StarterCardGrant(1001),)),
+            player_id="player:archive",
+        )
+
+        changes = self.service.set_card_protection("player:archive", "card:1", True)
+        self.assertEqual(len(changes.entities), 1)
+        change = changes.entities[0]
+        self.assertEqual(change.category, "card")
+        self.assertEqual(change.entity_id, "card:1")
+        self.assertEqual(change.values["is_protected"], True)
+        self.assertIsNotNone(change.evidence)
+        assert change.evidence is not None
+        self.assertEqual(change.evidence.status, EvidenceStatus.PROVEN_STATIC)
+        self.assertEqual(change.evidence.kind, EvidenceKind.EXACT)
+        self.assertTrue(self.service.get_home_snapshot("player:archive").cards[0].is_protected)
+
+        unchanged = self.service.set_card_protection("player:archive", "card:1", True)
+        self.assertTrue(unchanged.is_empty)
+        self.service.set_card_protection("player:archive", "card:1", False)
+        self.assertFalse(self.service.get_home_snapshot("player:archive").cards[0].is_protected)
+
+    def test_card_protection_rejects_unknown_owned_card(self) -> None:
+        self.service.bootstrap_profile(
+            BootstrapPolicy(name="Protect", starter_cards=(StarterCardGrant(1001),)),
+            player_id="player:archive",
+        )
+        with self.assertRaises(KeyError):
+            self.service.set_card_protection("player:archive", "missing", True)
 
     def test_unknown_master_reference_rolls_back_entire_bootstrap(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown master reference"):
