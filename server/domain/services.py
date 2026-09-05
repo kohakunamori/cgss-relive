@@ -1,7 +1,7 @@
 """Initial D1 application/domain services for archival profile bootstrap and Home.
 
 Bootstrap defaults are explicit preservation policy, not reconstructed production
-server behavior.  CGSS endpoint adapters should call these services rather than
+server behavior. CGSS endpoint adapters should call these services rather than
 write persistence rows directly.
 """
 
@@ -39,7 +39,9 @@ class StarterCardGrant:
     level: int = 1
     experience: int = 0
     skill_level: int = 0
-    locked: bool = False
+    star_lesson_step: int = 0
+    love: int = 0
+    is_protected: bool = False
     favorite: bool = False
 
     def __post_init__(self) -> None:
@@ -49,6 +51,8 @@ class StarterCardGrant:
             raise ValueError("starter card level must be at least 1")
         if self.experience < 0 or self.skill_level < 0:
             raise ValueError("starter card progression must be non-negative")
+        if self.star_lesson_step < 0 or self.love < 0:
+            raise ValueError("starter card star_lesson_step/love must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -166,7 +170,9 @@ class PreservationProfileService:
                     level=grant.level,
                     experience=grant.experience,
                     skill_level=grant.skill_level,
-                    locked=grant.locked,
+                    star_lesson_step=grant.star_lesson_step,
+                    love=grant.love,
+                    is_protected=grant.is_protected,
                     favorite=grant.favorite,
                     acquired_at=now,
                 )
