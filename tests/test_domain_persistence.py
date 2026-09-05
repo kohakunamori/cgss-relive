@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+import sqlite3
+from tempfile import TemporaryDirectory
 import unittest
 
 from server.domain import (
@@ -61,8 +64,10 @@ class DomainPersistenceTests(unittest.TestCase):
             master_card_id=100001,
             level=1,
             experience=0,
-            skill_level=0,
-            locked=False,
+            skill_level=1,
+            star_lesson_step=3,
+            love=77,
+            is_protected=True,
             favorite=True,
             acquired_at=self.now,
         )
@@ -92,8 +97,61 @@ class DomainPersistenceTests(unittest.TestCase):
         self.assertEqual(snapshot.profile, profile)
         self.assertEqual(snapshot.resources[0].amount, 100)
         self.assertEqual(snapshot.cards[0], card)
+        self.assertEqual(snapshot.cards[0].star_lesson_step, 3)
+        self.assertEqual(snapshot.cards[0].love, 77)
+        self.assertTrue(snapshot.cards[0].is_protected)
         self.assertEqual(snapshot.units[0].members, (UnitMember(0, "card:1"),))
         self.assertEqual(snapshot.unlocks[0].master_ref_id, 200001)
+
+    def test_v1_card_state_migrates_to_proven_v2_semantics(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "domain-v1.sqlite3"
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE schema_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '1');
+                CREATE TABLE user_cards (
+                    user_card_id TEXT PRIMARY KEY,
+                    player_id TEXT NOT NULL,
+                    master_card_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL,
+                    experience INTEGER NOT NULL,
+                    skill_level INTEGER NOT NULL,
+                    locked INTEGER NOT NULL,
+                    favorite INTEGER NOT NULL,
+                    acquired_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO user_cards(
+                    user_card_id, player_id, master_card_id, level, experience,
+                    skill_level, locked, favorite, acquired_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("card:legacy", "player:legacy", 100001, 1, 12, 2, 1, 0, self.now.isoformat()),
+            )
+            conn.commit()
+            conn.close()
+
+            with SQLiteDomainStore.open(path) as migrated:
+                self.assertEqual(migrated.schema_version, 2)
+                cards = migrated.list_cards("player:legacy")
+                self.assertEqual(len(cards), 1)
+                card = cards[0]
+                self.assertEqual(card.user_card_id, "card:legacy")
+                self.assertEqual(card.experience, 12)
+                self.assertEqual(card.skill_level, 2)
+                self.assertEqual(card.star_lesson_step, 0)
+                self.assertEqual(card.love, 0)
+                self.assertTrue(card.is_protected)
+                self.assertFalse(card.favorite)
 
     def test_transaction_rolls_back_multiple_mutations(self) -> None:
         profile = self._save_player()
@@ -119,15 +177,17 @@ class DomainPersistenceTests(unittest.TestCase):
         second = self._save_player("player:2")
         self.store.save_card(
             CardOwnership(
-                "card:2",
-                second.player_id,
-                2,
-                1,
-                0,
-                0,
-                False,
-                False,
-                self.now,
+                user_card_id="card:2",
+                player_id=second.player_id,
+                master_card_id=2,
+                level=1,
+                experience=0,
+                skill_level=0,
+                star_lesson_step=0,
+                love=0,
+                is_protected=False,
+                favorite=False,
+                acquired_at=self.now,
             )
         )
         with self.assertRaisesRegex(ValueError, "another player"):
