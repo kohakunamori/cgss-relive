@@ -21,16 +21,22 @@ class CompatibilityIdentityStoreTests(unittest.TestCase):
                 self.assertEqual(store.ensure_card_serial("p1", "card:a"), 1)
                 self.assertEqual(store.ensure_card_serial("p1", "card:b"), 2)
                 self.assertEqual(store.get_card_serial("p2", "card:x"), 1)
+                self.assertEqual(store.get_user_card_id("p1", 1), "card:a")
+                self.assertEqual(store.get_user_card_id("p1", 2), "card:b")
+                self.assertEqual(store.get_user_card_id("p2", 1), "card:x")
+                self.assertIsNone(store.get_user_card_id("p1", 999))
                 self.assertEqual(store.get_unit_id("p1", "unit:a"), 1)
                 self.assertEqual(store.ensure_card_serial("p1", "card:c"), 3)
 
-    def test_rejects_empty_domain_identity(self) -> None:
+    def test_rejects_invalid_identities(self) -> None:
         with TemporaryDirectory() as tmp:
             with SQLiteCompatibilityIdentityStore.open(Path(tmp) / "compat.sqlite3") as store:
                 with self.assertRaises(ValueError):
                     store.ensure_card_serial("", "card:a")
                 with self.assertRaises(ValueError):
                     store.ensure_unit_id("p1", "")
+                with self.assertRaises(ValueError):
+                    store.get_user_card_id("p1", 0)
 
 
 if __name__ == "__main__":
