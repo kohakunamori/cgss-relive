@@ -19,7 +19,7 @@ class MasterDataRepository(Protocol):
     """Read-only access to frozen master data.
 
     The interface is intentionally generic while CGSS master-table semantics are
-    still being normalized.  Domain services may ask whether a referenced master
+    still being normalized. Domain services may ask whether a referenced master
     entity exists and retrieve a read-only record by semantic kind + stable ID.
     """
 
@@ -51,6 +51,9 @@ class PlayerStateRepository(Protocol):
         ...
 
     def set_resource(self, resource: PlayerResource) -> None:
+        ...
+
+    def get_card(self, player_id: str, user_card_id: str) -> CardOwnership | None:
         ...
 
     def list_cards(self, player_id: str) -> tuple[CardOwnership, ...]:
