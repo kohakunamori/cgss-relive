@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/analyze-unit-edit-endpoint.yml'
       - 'scripts/analyze-unit-edit-endpoint.py'
+      - 'scripts/analyze-unit-edit-native-semantics.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
 
@@ -85,6 +86,8 @@ jobs:
           test -n "$DLL"
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
+          test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
 
       - name: Discover exact UnitEdit endpoint and task metadata
         shell: bash
@@ -98,9 +101,33 @@ jobs:
           import json
           d=json.load(open('reports/unit-edit-endpoint-11.6.3.json'))
           assert d['schema'] == 3
-          assert d['endpoint_count'] >= 1
-          assert d['candidate_type_count'] >= 1
-          assert d['detailed_type_count'] >= 1
+          assert any(row['group'] == 'A' and row['key'] == 19 and row['name'] == 'MemberUnitEdit' and row['path'] == 'unit/edit' for row in d['endpoints'])
+          names={row['type'] for row in d['types']}
+          assert 'MemberUnitEditTask' in names
+          assert 'MemberUnitEditTaskParam' in names
+          assert 'MemberUnitEditTaskParam.UnitInfo' in names
+          print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Install native analysis dependencies
+        run: python -m pip install --disable-pip-version-check capstone pyelftools
+
+      - name: Trace UnitEdit request/response native semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-unit-edit-native-semantics.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --output reports/unit-edit-native-semantics-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/unit-edit-native-semantics-11.6.3.json'))
+          assert d['schema'] == 1
+          names=[m['name'] for m in d['methods']]
+          assert any(name.endswith('MemberUnitEditTask$$SetParameter') for name in names)
+          assert any(name.endswith('MemberUnitEditTask$$Parse') for name in names)
           print(json.dumps(d, indent=2, ensure_ascii=False))
           PY
 
@@ -110,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf work
-          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
             echo 'raw specimen escaped UnitEdit analysis boundary' >&2
             exit 1
           fi
