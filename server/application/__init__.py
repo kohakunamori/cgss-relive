@@ -6,6 +6,11 @@ from .load_index import (
     DynamicLoadIndexData,
     SQLiteDomainLoadIndexData,
 )
+from .member_favorite import (
+    MemberFavoriteEditConfig,
+    MemberFavoriteEditController,
+    SQLiteMemberFavoriteEditHandler,
+)
 from .member_protect import (
     MemberProtectConfig,
     MemberProtectController,
@@ -21,11 +26,14 @@ __all__ = [
     "DomainLoadIndexConfig",
     "DomainLoadIndexController",
     "DynamicLoadIndexData",
+    "MemberFavoriteEditConfig",
+    "MemberFavoriteEditController",
     "MemberProtectConfig",
     "MemberProtectController",
     "MemberUnitEditConfig",
     "MemberUnitEditController",
     "SQLiteDomainLoadIndexData",
+    "SQLiteMemberFavoriteEditHandler",
     "SQLiteMemberProtectHandler",
     "SQLiteMemberUnitEditHandler",
 ]

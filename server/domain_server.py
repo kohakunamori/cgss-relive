@@ -5,6 +5,7 @@ load/index template. It currently registers:
 
 * domain-backed ``/load/index``;
 * A:29 ``/member/protect_card``;
+* A:22 ``/favorite/edit``;
 * A:19 ``/unit/edit``.
 
 Starter profile/card/unit values are explicit preservation provisioning policy, not
@@ -19,9 +20,11 @@ from pathlib import Path
 
 from .application import (
     DomainLoadIndexConfig,
+    MemberFavoriteEditConfig,
     MemberProtectConfig,
     MemberUnitEditConfig,
     SQLiteDomainLoadIndexData,
+    SQLiteMemberFavoriteEditHandler,
     SQLiteMemberProtectHandler,
     SQLiteMemberUnitEditHandler,
 )
@@ -173,6 +176,13 @@ def main() -> int:
         master_revision=args.master_revision,
         resource_revision=args.resource_revision,
     )
+    member_favorite = SQLiteMemberFavoriteEditHandler(
+        args.domain_db,
+        args.identity_db,
+        config=MemberFavoriteEditConfig(args.player_id),
+        master_revision=args.master_revision,
+        resource_revision=args.resource_revision,
+    )
     member_unit_edit = SQLiteMemberUnitEditHandler(
         args.domain_db,
         args.identity_db,
@@ -186,6 +196,7 @@ def main() -> int:
         args.port,
         application_handlers={
             "/member/protect_card": member_protect,
+            "/favorite/edit": member_favorite,
             "/unit/edit": member_unit_edit,
         },
         final_res_ver=args.resource_revision,
@@ -204,7 +215,7 @@ def main() -> int:
     print(f"cgss-relive domain API listening on {scheme}://{bound_host}:{bound_port}")
     print(f"domain DB: {args.domain_db}")
     print(f"compatibility identity DB: {args.identity_db}")
-    print("dynamic routes: /load/index, /member/protect_card, /unit/edit")
+    print("dynamic routes: /load/index, /member/protect_card, /favorite/edit, /unit/edit")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
