@@ -9,6 +9,8 @@ on:
       - server/domain/**
       - server/adapters/**
       - server/application/**
+      - server/application_http.py
+      - server/bootstrap_core.py
       - server/requirements.txt
       - tests/test_domain_*.py
       - .github/workflows/test-domain-core.yml
