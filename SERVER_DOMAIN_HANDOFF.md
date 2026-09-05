@@ -31,8 +31,8 @@ Domain-design baseline:
 Latest stable code commit before this handoff refresh:
 
 ```text
-1c8a2ebbfc750982f32be3ebd3350e56afd532cf
-ci: cover dynamic application HTTP routes
+af7f68d6bb069f008505276f83a99dd9a2e92f00
+tests: cover encrypted UnitEdit persistence loop
 ```
 
 Always re-read branch HEAD before writing because multiple agents may use the same
@@ -150,7 +150,8 @@ Migration and round-trip tests are green:
 and reverse lookup:
 
 ```text
-(player_id, CGSS serial_id) -> domain user_card_id
+(player_id, CGSS serial_id)       -> domain user_card_id
+(player_id, CGSS client unit_id)  -> domain unit_id
 ```
 
 The mapping is stable across restarts and stays outside the domain model.
@@ -178,7 +179,7 @@ It proves:
 
 1. HTTP `/load/index` reads mutable SQLite state;
 2. a DB mutation is visible on the next request;
-3. client numeric card identity stays stable.
+3. client numeric card/unit identities stay stable.
 
 ## A:29 MemberProtect exact contract
 
@@ -214,12 +215,6 @@ artifact id 9963511531
 artifact digest sha256:255f5cb275baf58bb5c7cf1ef0ac0b2e6cedd07f48fb991ff10ce329df122a53
 ```
 
-Sanitized report:
-
-```text
-member-protect-response-semantics-11.6.3.json
-```
-
 `MemberProtectCardTask.Parse()` references exactly the relevant response keys:
 
 ```text
@@ -244,90 +239,216 @@ Therefore the final-client-visible response contract is proven:
 }
 ```
 
-The list is server-authoritative resulting protection membership for the request.
-The preservation adapter emits only the protected subset of requested serials; that
-is sufficient for the exact final parser and avoids claiming that production
-returned a global protected-card list.
-
-## A:29 mutation algorithm evidence
-
-The durable field and response membership are `PROVEN_STATIC / EXACT`.
-
-The production server's internal mutation code is unavailable. The preservation
-command currently uses **toggle semantics**, marked:
-
-```text
-EvidenceStatus.PROVEN_STATIC
-EvidenceKind.INFERRED
-```
-
-Reasoning/evidence:
-
-- the network request contains only `serial_ids[]`, no desired bool;
-- the final client uses the same MemberProtect action for protection state changes;
-- UI helpers carry local bool state but the task strips that to serial IDs;
-- response membership communicates the resulting state;
-- no paired unprotect network request has been recovered;
-- `ChangeProtectIcon()` derives bool state from list membership.
-
-Do not promote toggle from `INFERRED` to `EXACT` without stronger production/runtime
+The durable field and response membership are `PROVEN_STATIC / EXACT`. The
+production server's internal mutation code is unavailable; the preservation command
+currently uses toggle semantics and marks that algorithm `PROVEN_STATIC / INFERRED`.
+Do not promote the toggle algorithm to exact without stronger production/runtime
 evidence.
 
-## Domain mutation commands
+## FIRST COMPLETE SERVER-SIDE WRITE LOOP — A:29 CLOSED
 
-Exact state setter:
-
-```text
-PreservationProfileService.set_card_protection(...)
-```
-
-A:29 preservation command:
+Application:
 
 ```text
-PreservationProfileService.toggle_card_protection(player_id, user_card_ids)
+server/application/member_protect.py
+SQLiteMemberProtectHandler
 ```
 
-Properties:
-
-- validates all ownership before mutation;
-- updates the batch in one transaction;
-- returns normalized `ChangeSet`;
-- duplicate IDs are rejected because duplicate-toggle semantics are unrecovered;
-- empty batch is a no-op;
-- resulting `is_protected` values are durable SQLite state.
-
-Domain/identity command tests:
+Integration test:
 
 ```text
-33946293619  Test preservation domain core  success
+tests/test_domain_application_member_protect_http.py
+33947000143  Test preservation domain core  success
 ```
 
-## A:29 application layer
+The real project codec + HTTP loop proves:
+
+```text
+/load/index protect=0
+ -> encrypted POST /member/protect_card
+ -> SQLite mutation
+ -> exact protect_card_list response
+ -> next /load/index protect=1
+```
+
+and a second request returns the card to protect=0 under the preservation toggle
+algorithm.
+
+## A:19 MemberUnitEdit exact contract — CLOSED
+
+Targeted exact-final workflow:
+
+```text
+run       33948379527
+conclusion success
+artifact  final-client-unit-edit-endpoint
+artifact id 9964039219
+```
+
+Exact final route:
+
+```text
+group/key : A:19
+ApiType   : MemberUnitEdit
+path      : unit/edit
+task      : Stage.MemberUnitEditTask
+```
+
+Exact managed request DTO:
+
+```text
+MemberUnitEditTaskParam : BaseParam
+  unit_info_list : MemberUnitEditTaskParam.UnitInfo[]
+  main_unit_id   : int
+
+MemberUnitEditTaskParam.UnitInfo
+  unit_id           : int
+  serial_ids        : int[]
+  dress_types       : int[]
+  dress_2d_types    : int[]
+  dress_storage_ids : int[]
+```
+
+Exact task methods:
+
+```text
+MemberUnitEditTask.SetParameter
+RVA 0x489CD08
+void SetParameter(int mainUnit, Dictionary<int,int> unitDataList)
+
+MemberUnitEditTask.Parse
+RVA 0x489D1B8
+protected override int Parse()
+```
+
+`SetParameter` exact/native evidence shows:
+
+- `mainUnit` is written into request `main_unit_id`;
+- it iterates the unit-data dictionary;
+- it calls `ModifyMemberUnitLocal` before/while constructing request state;
+- per member position it reads `GetUnitSerial`, `GetCostumeId`, `GetCostume2dId`,
+  and `GetClosetId`;
+- therefore the serial and three dress/costume arrays are real parallel client
+  compatibility state, not historical-server guesses.
+
+## A:19 response semantics — EXACT EMPTY ENDPOINT DATA
+
+The final `MemberUnitEditTask.Parse()` body is exactly eight bytes / two ARM64
+instructions:
+
+```text
+0x489D1B8: mov x1, xzr
+0x489D1BC: b Stage.BaseTask$$Parse
+```
+
+Therefore A:19 consumes only the common task response and has no endpoint-specific
+response members. The preservation handler returns:
+
+```json
+{"data": {}}
+```
+
+through the existing common success envelope/codec. This is final-client
+`PROVEN_STATIC / EXACT` response-consumer evidence, not a guessed empty template.
+
+## Unit domain mutation command
 
 Implemented:
 
 ```text
-server/application/member_protect.py
+server/domain/unit_services.py
+PreservationUnitService.replace_members(...)
 ```
 
-Flow:
+Properties:
+
+- replaces one or more existing Unit membership lists atomically;
+- validates all units and referenced owned cards before first write;
+- duplicate unit updates rejected;
+- invalid unit/card rejects the entire batch with no partial mutation;
+- preserves Unit slot and name;
+- identical membership is a no-op;
+- no domain schema migration was required;
+- member ordering/positions are `PROVEN_STATIC / EXACT` from final WorkUnitData and
+  `/load/index user_unit_list` semantics.
+
+Compatibility identity store now supports reverse client-unit lookup as well as
+reverse card-serial lookup.
+
+## A:19 application/wire adapter
+
+Implemented:
 
 ```text
-serial_ids[]
- -> compatibility serial -> domain card lookup
- -> validate whole batch
- -> inferred atomic toggle command
- -> read resulting HomeStateSnapshot
- -> exact protect_card_list response projection
+server/adapters/unit_edit.py
+server/application/unit_edit.py
 ```
 
-Thread-safe SQLite facade:
+The request adapter preserves all exact request arrays and does not invent costume
+semantics.
+
+The application controller currently closes the semantic membership portion:
 
 ```text
-SQLiteMemberProtectHandler
+client unit_id
+ -> compatibility domain-unit lookup
+
+serial_ids[0..4]
+ -> zero = empty client slot
+ -> positive serial -> domain owned-card lookup
+ -> UnitMember(position, user_card_id)
+ -> atomic PreservationUnitService.replace_members
 ```
 
-opens short-lived domain/identity connections per HTTP request.
+It validates that all four parallel arrays contain exactly the final-client standard
+five unit slots. `main_unit_id` and the three dress/costume arrays are intentionally
+not persisted into the semantic Unit model yet because their durable server-domain
+meaning is not closed.
+
+`SQLiteMemberUnitEditHandler` opens short-lived SQLite domain/identity connections
+per HTTP worker request.
+
+## SECOND COMPLETE SERVER-SIDE WRITE LOOP — A:19 CLOSED FOR MEMBERSHIP
+
+Runnable domain server now registers:
+
+```text
+/load/index
+/member/protect_card
+/unit/edit
+```
+
+UnitEdit integration tests:
+
+```text
+tests/test_domain_application_unit_edit.py
+tests/test_domain_application_unit_edit_http.py
+33948525124  Test preservation domain core  success
+```
+
+The encrypted HTTP integration test proves:
+
+```text
+/load/index
+ -> unit serial slots [1,2,0,0,0]
+
+POST /unit/edit
+ -> exact request unit_info_list/main_unit_id shape
+ -> membership serial slots [3,0,1,0,0]
+ -> exact common success with data={}
+ -> SQLite domain mutation
+
+/load/index
+ -> same stable client unit_id
+ -> serial slots [3,0,1,0,0]
+
+reopen SQLite
+ -> Unit.members remains [(0,card:3),(2,card:1)]
+```
+
+This closes the server-side **unit membership** write loop. It does not yet claim
+that `main_unit_id` or dress/costume selection persistence is closed, and it does
+not prove target-client runtime/UI acceptance.
 
 ## Generic dynamic HTTP application extension
 
@@ -338,7 +459,7 @@ server/application_http.py
 server/bootstrap_core.py::process_application_request
 ```
 
-It is endpoint-agnostic:
+It remains endpoint-agnostic:
 
 ```text
 encrypted CGSS request
@@ -349,83 +470,35 @@ encrypted CGSS request
  -> common CGSS encryption
 ```
 
-Unregistered routes delegate to the existing HTTP handler unchanged. Business logic
-is not embedded into the bootstrap server.
+Business logic is not embedded into the bootstrap HTTP server.
 
-## FIRST COMPLETE SERVER-SIDE WRITE LOOP — CLOSED
+## Immediate continuation — UnitEdit residual state
 
-Integration test:
+Do not redo the A:19 route/request/response work. The next targeted questions are:
 
-```text
-tests/test_domain_application_member_protect_http.py
-```
-
-Successful workflow:
-
-```text
-33947000143  Test preservation domain core  success
-```
-
-The test uses real project CGSS body/header codecs and real HTTP sockets:
-
-```text
-/load/index
- -> serial_id=1, protect=0
-
-POST /member/protect_card
- request data: serial_ids=[1]
- -> domain SQLite mutation
- -> response data.protect_card_list=[1]
-
-/load/index
- -> same serial_id=1, protect=1
-
-POST /member/protect_card again
- -> response data.protect_card_list=[]
-
-/load/index
- -> same serial_id=1, protect=0
-```
-
-This proves the server-side chain:
-
-```text
-CGSS encrypted request
- -> exact request adapter
- -> persistent identity resolution
- -> domain command
- -> SQLite mutation
- -> exact response adapter
- -> CGSS encrypted response
- -> subsequent domain-backed load/index reflects mutation
-```
-
-It does **not** prove untouched/patched target-client acceptance yet.
-
-## Immediate continuation
-
-1. expose the domain-backed load/index + A:29 application handlers through a direct
-   local preservation-server runner/config;
-2. run the same A:29 exchange against the patched/final client when device runtime is
-   ready;
-3. keep the static starter-template path as differential fallback;
-4. start the next write-state slice, preferably UpdateUnit, using the same pattern:
-
-```text
-exact request
- -> domain command
- -> exact/minimal response
- -> next load/index state persistence
-```
-
-5. then recover favorite-card state, Story/Commu, Live and other domains.
+1. `main_unit_id` exact identity semantics.
+   - caller gets `WorkUnitData.GetMainUnit()`;
+   - an internal value is converted to an int and passed to
+     `MemberUnitEditTask.SetParameter(mainUnit, ...)`;
+   - determine whether this is client `unit_id`, unit slot, or another value before
+     persisting it.
+2. dress/costume arrays:
+   - `dress_types[]`
+   - `dress_2d_types[]`
+   - `dress_storage_ids[]`
+   They are exact request-side compatibility state, but their durable server/domain
+   persistence boundary remains unresolved.
+3. Prefer a separate compatibility-state store for pure wire/client persistence if
+   evidence does not justify promoting these fields into semantic Unit/UnitMember.
+4. After these residuals, start the next write-state slice: favorite-card or a
+   Story/Commu state transition.
 
 ## Broader remaining gaps
 
 - master.mdb semantic mappings for card/idol/item/story/music/mission/etc.;
 - more durable `user_info` fields vs compatibility policy;
 - startup snapshot vs shared response delta conventions;
-- Unit/deck mutation semantics;
+- Unit main-selection/costume persistence;
 - Story/Commu state transitions;
 - Live start/end/reward transitions;
 - patched-client runtime acceptance;
@@ -436,9 +509,13 @@ exact request
 1. Fetch `analysis/server-contracts-11.6.3`; confirm HEAD before writing.
 2. Do not redo C0-C9/bootstrap protocol archaeology.
 3. Treat card step/love/protect durable semantics as closed final-client evidence.
-4. Treat A:29 request and `protect_card_list` response as exact.
-5. Treat A:29 toggle algorithm as `PROVEN_STATIC / INFERRED`, not exact.
-6. Preserve domain / client-ID / wire DTO / transport / master-data layer separation.
-7. Reuse `server/application_http.py` for new dynamic endpoints.
-8. Update this file with commit SHA + CI run after every coherent tranche.
-9. Never report static/CI success as real-device or UI success.
+4. Treat A:29 request and `protect_card_list` response as exact; toggle algorithm
+   remains inferred.
+5. Treat A:19 route/request DTO and `Parse -> BaseTask.Parse` response behavior as
+   exact final 11.6.3 evidence.
+6. Treat A:19 unit membership persistence as closed server-side; do not claim
+   `main_unit_id` or costume persistence is closed yet.
+7. Preserve domain / client-ID / wire DTO / transport / master-data layer separation.
+8. Reuse `server/application_http.py` for new dynamic endpoints.
+9. Update this file with commit SHA + CI run after every coherent tranche.
+10. Never report static/CI success as real-device or UI success.
