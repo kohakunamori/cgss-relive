@@ -131,6 +131,63 @@ class DomainServiceTests(unittest.TestCase):
         self.service.set_card_protection("player:archive", "card:1", False)
         self.assertFalse(self.service.get_home_snapshot("player:archive").cards[0].is_protected)
 
+    def test_member_protect_toggle_is_atomic_and_marked_inferred(self) -> None:
+        self.service.bootstrap_profile(
+            BootstrapPolicy(
+                name="Protect",
+                starter_cards=(
+                    StarterCardGrant(1001, is_protected=False),
+                    StarterCardGrant(1001, is_protected=True),
+                ),
+            ),
+            player_id="player:archive",
+        )
+
+        changes = self.service.toggle_card_protection(
+            "player:archive",
+            ("card:1", "card:2"),
+        )
+        self.assertEqual(len(changes.entities), 2)
+        self.assertEqual(
+            [change.values["is_protected"] for change in changes.entities],
+            [True, False],
+        )
+        self.assertTrue(
+            all(
+                change.evidence is not None
+                and change.evidence.status is EvidenceStatus.PROVEN_STATIC
+                and change.evidence.kind is EvidenceKind.INFERRED
+                for change in changes.entities
+            )
+        )
+        self.assertEqual(
+            changes.metadata["command_semantics"],
+            "member-protect-toggle-inferred",
+        )
+        cards = self.service.get_home_snapshot("player:archive").cards
+        self.assertEqual([card.is_protected for card in cards], [True, False])
+
+        self.service.toggle_card_protection("player:archive", ("card:1", "card:2"))
+        cards = self.service.get_home_snapshot("player:archive").cards
+        self.assertEqual([card.is_protected for card in cards], [False, True])
+
+    def test_member_protect_toggle_rejects_ambiguous_or_unknown_batch_without_mutation(self) -> None:
+        self.service.bootstrap_profile(
+            BootstrapPolicy(name="Protect", starter_cards=(StarterCardGrant(1001),)),
+            player_id="player:archive",
+        )
+        with self.assertRaises(ValueError):
+            self.service.toggle_card_protection(
+                "player:archive",
+                ("card:1", "card:1"),
+            )
+        with self.assertRaises(KeyError):
+            self.service.toggle_card_protection(
+                "player:archive",
+                ("card:1", "missing"),
+            )
+        self.assertFalse(self.service.get_home_snapshot("player:archive").cards[0].is_protected)
+
     def test_card_protection_rejects_unknown_owned_card(self) -> None:
         self.service.bootstrap_profile(
             BootstrapPolicy(name="Protect", starter_cards=(StarterCardGrant(1001),)),
