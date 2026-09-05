@@ -11,8 +11,8 @@ exports only sanitized evidence for three managed methods:
 For each method it records referenced managed string literals and selected direct
 managed calls with small instruction contexts. For exceptionally small methods
 (up to eight instructions) it also records the complete sanitized instruction
-listing so trivial constant-return parsers can be closed without exporting a bulk
-disassembly. It never emits raw bytes or bulk disassembly.
+listing, resolving both direct calls and unconditional tail branches to managed
+method names when possible. It never emits raw bytes or bulk disassembly.
 """
 from __future__ import annotations
 
@@ -26,7 +26,14 @@ from pathlib import Path
 from typing import Any
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from capstone.arm64 import ARM64_INS_ADRP, ARM64_INS_BL, ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
+from capstone.arm64 import (
+    ARM64_INS_ADRP,
+    ARM64_INS_B,
+    ARM64_INS_BL,
+    ARM64_OP_IMM,
+    ARM64_OP_MEM,
+    ARM64_OP_REG,
+)
 from elftools.elf.elffile import ELFFile
 
 TARGET_SUFFIXES = (
@@ -177,17 +184,24 @@ def adrp_page(word: int, pc: int) -> int | None:
     return (pc & ~0xFFF) + (imm << 12)
 
 
-def direct_call(ins: Any, by_rva: dict[int, list[Method]]) -> tuple[int, list[str]] | None:
-    if ins.id != ARM64_INS_BL or not ins.operands or ins.operands[0].type != ARM64_OP_IMM:
+def direct_branch(
+    ins: Any,
+    by_rva: dict[int, list[Method]],
+    *,
+    include_tail_branch: bool = False,
+) -> tuple[int, list[str]] | None:
+    allowed = (ARM64_INS_BL, ARM64_INS_B) if include_tail_branch else (ARM64_INS_BL,)
+    if ins.id not in allowed or not ins.operands or ins.operands[0].type != ARM64_OP_IMM:
         return None
     target = int(ins.operands[0].imm)
     return target, [row.name for row in by_rva.get(target, ())]
 
 
 def sanitize_instruction(ins: Any, by_rva: dict[int, list[Method]]) -> str:
-    call = direct_call(ins, by_rva)
-    if call is not None and call[1]:
-        return f"0x{ins.address:X}: bl {' | '.join(call[1])}"
+    branch = direct_branch(ins, by_rva, include_tail_branch=True)
+    if branch is not None and branch[1]:
+        mnemonic = "bl" if ins.id == ARM64_INS_BL else "b"
+        return f"0x{ins.address:X}: {mnemonic} {' | '.join(branch[1])}"
     return f"0x{ins.address:X}: {ins.mnemonic} {ins.op_str}"
 
 
@@ -254,7 +268,7 @@ def analyze_method(
     calls: list[dict[str, Any]] = []
     named_direct_call_count = 0
     for index, ins in enumerate(insns):
-        call = direct_call(ins, by_rva)
+        call = direct_branch(ins, by_rva)
         if call is None or not call[1]:
             continue
         named_direct_call_count += 1
@@ -327,6 +341,7 @@ def main() -> int:
             "bounded_methods_only": True,
             "tiny_complete_listing_max_instructions": MAX_TINY_FULL_INSTRUCTIONS,
             "direct_calls_only": True,
+            "tail_branch_names_resolved": True,
             "indirect_dispatch_recovered": False,
             "runtime_acceptance": False,
             "ui_visible_success": False,
