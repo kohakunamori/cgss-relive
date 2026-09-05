@@ -1,6 +1,6 @@
 """CGSS 11.6.3 ``/load/index`` projection from preservation-domain state.
 
-This module is intentionally outside ``server.domain``.  It owns client-specific
+This module is intentionally outside ``server.domain``. It owns client-specific
 field names, numeric compatibility identifiers and parser-safe synthetic defaults.
 The projection is based on the reduced final-client parser documented in
 ``docs/load-index-11.6.3.md``.
@@ -10,8 +10,8 @@ Important boundary:
 * domain IDs such as ``user_card_id='card:1'`` are not assumed to be CGSS numeric
   serial IDs;
 * adapter bindings explicitly map domain entities to client-facing numeric IDs;
-* still-unrecovered card values such as ``step``/``love``/``protect`` remain adapter
-  compatibility bindings rather than guessed domain semantics.
+* final-11.6.3 proven card semantics (star lesson step, love, protect) come directly
+  from ``CardOwnership`` and are no longer adapter-only compatibility values.
 """
 
 from __future__ import annotations
@@ -45,18 +45,13 @@ def _default_resource_kind_map() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class CardLoadIndexBinding:
-    """Client-facing values not yet represented by proven domain semantics."""
+    """Stable numeric CGSS serial identity for one domain-owned card."""
 
     serial_id: int
-    step: int = 0
-    love: int = 0
-    protect: int = 0
 
     def __post_init__(self) -> None:
         if self.serial_id <= 0:
             raise ValueError("card serial_id must be positive")
-        if self.step < 0 or self.love < 0 or self.protect < 0:
-            raise ValueError("card load-index compatibility values must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -191,10 +186,10 @@ def project_home_snapshot_to_load_index_data(
                 "serial_id": binding.serial_id,
                 "card_id": card.master_card_id,
                 "exp": card.experience,
-                "step": binding.step,
-                "love": binding.love,
+                "step": card.star_lesson_step,
+                "love": card.love,
                 "skill_level": card.skill_level,
-                "protect": binding.protect,
+                "protect": int(card.is_protected),
             }
         )
 
