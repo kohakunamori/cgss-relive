@@ -1,13 +1,8 @@
 """Application/controller for domain-backed final-client ``/load/index`` data.
 
-This layer composes three independent concerns:
-
-* preservation-domain profile/Home state;
-* persistent client-facing numeric identity bindings;
-* the final 11.6.3 response projection.
-
-It intentionally does not perform HTTP/body encryption. ``server.http_server`` can
-consume one of the Mapping facades below as ordinary ``load_index_data``.
+This layer composes preservation-domain Home state, persistent client-facing
+identity/compatibility state, and the final 11.6.3 response projection. It does
+not perform HTTP/body encryption.
 """
 
 from __future__ import annotations
@@ -23,6 +18,7 @@ from server.adapters.identity_store import SQLiteCompatibilityIdentityStore
 from server.adapters.load_index import (
     CardLoadIndexBinding,
     LoadIndexProjectionPolicy,
+    UnitCosmeticLoadIndexSlot,
     UnitLoadIndexBinding,
     project_home_snapshot_to_load_index_data,
 )
@@ -46,12 +42,7 @@ _DEFAULT_RESOURCE_KIND_MAP = {
 
 @dataclass(frozen=True)
 class DomainLoadIndexConfig:
-    """Explicit compatibility policy for one archival player.
-
-    Fields that are not yet proven domain semantics remain here at the application /
-    adapter boundary. They can later migrate into the domain only when evidence
-    shows they represent durable game meaning.
-    """
+    """Explicit compatibility policy for one archival player."""
 
     player_id: str
     viewer_id: int
@@ -124,12 +115,25 @@ class DomainLoadIndexController:
             )
             for unit in snapshot.units
         }
+        unit_cosmetics = {
+            unit.unit_id: tuple(
+                UnitCosmeticLoadIndexSlot(
+                    position=slot.position,
+                    dress_type=slot.dress_type,
+                    dress_2d_type=slot.dress_2d_type,
+                    dress_storage_id=slot.dress_storage_id,
+                )
+                for slot in self._identities.get_unit_compatibility_slots(player_id, unit.unit_id)
+            )
+            for unit in snapshot.units
+        }
 
         projection = LoadIndexProjectionPolicy(
             viewer_id=self._config.viewer_id,
             now=int(self._clock.now().timestamp()),
             card_bindings=card_bindings,
             unit_bindings=unit_bindings,
+            unit_cosmetics=unit_cosmetics,
             leader_user_card_id=self._config.leader_user_card_id,
             resource_kind_map=self._config.resource_kind_map,
             comment=self._config.comment,
@@ -176,12 +180,7 @@ class _RefreshingMapping(MappingABC[str, object]):
 
 
 class DynamicLoadIndexData(_RefreshingMapping):
-    """Dynamic facade for a controller whose repositories are thread-safe.
-
-    This is useful in tests or single-threaded hosts. Do not pass a controller that
-    owns default thread-bound SQLite connections to ``ThreadingHTTPServer``; use
-    ``SQLiteDomainLoadIndexData`` below instead.
-    """
+    """Dynamic facade for a controller whose repositories are thread-safe."""
 
     def __init__(self, controller: DomainLoadIndexController) -> None:
         super().__init__()
@@ -192,13 +191,7 @@ class DynamicLoadIndexData(_RefreshingMapping):
 
 
 class SQLiteDomainLoadIndexData(_RefreshingMapping):
-    """Thread-safe mapping backed by short-lived SQLite repository connections.
-
-    Each response projection opens its own mutable-state and compatibility-identity
-    connections in the worker thread, builds the current snapshot, then closes both.
-    This preserves SQLite's default thread-safety contract instead of disabling
-    ``check_same_thread`` on long-lived shared connections.
-    """
+    """Thread-safe mapping backed by short-lived SQLite repository connections."""
 
     def __init__(
         self,
