@@ -11,6 +11,7 @@ on:
       - server/application/**
       - server/application_http.py
       - server/bootstrap_core.py
+      - server/domain_server.py
       - server/requirements.txt
       - tests/test_domain_*.py
       - .github/workflows/test-domain-core.yml
