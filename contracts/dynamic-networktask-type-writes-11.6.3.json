@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "specimen": "final-11.6.3-arm64",
+  "bindings": [
+    {
+      "task": "Cute.LoginTask",
+      "ctor_rva": 84668440,
+      "ctor_signature": "void Cute_LoginTask___ctor (Cute_LoginTask_o* __this, bool isForMigration, const MethodInfo* method);",
+      "field_offset": 80,
+      "cases": [
+        {
+          "condition": "isForMigration == false",
+          "key": 2
+        },
+        {
+          "condition": "isForMigration == true",
+          "key": 3
+        }
+      ],
+      "algorithm": "mov w8,#2; cinc w8,w8,ne after tst isForMigration,#1; str w8,[this,#0x50]"
+    },
+    {
+      "task": "Stage.MemberEvolutionTask",
+      "ctor_rva": 76071952,
+      "field_offset": 80,
+      "key": 25,
+      "constant_va": 23319880,
+      "constant_u64": 25,
+      "next_field_dword": 0,
+      "algorithm": "ldr d0,[0x163d548]; str d0,[this,#0x50]"
+    },
+    {
+      "task": "Stage.RoomSettingUpdateTask",
+      "ctor_rva": 76603140,
+      "field_offset": 80,
+      "key": 98,
+      "constant_va": 23320592,
+      "constant_u64": 8589934690,
+      "next_field_dword": 2,
+      "algorithm": "ldr d0,[0x163d810]; str d0,[this,#0x50]"
+    }
+  ],
+  "evidence": {
+    "writer_analysis": "scripts/analyze-dynamic-networktask-writers.py",
+    "constant_pool_resolution": "scripts/resolve-dynamic-networktask-constants.py",
+    "targeted_run": 33787122687,
+    "artifact_id": 9905882399,
+    "artifact_digest": "sha256:4aefda8a9bf5588644c6ef25ecd6fe93c1fb50a1fe7f566ff41c77e6ca930e98"
+  }
+}

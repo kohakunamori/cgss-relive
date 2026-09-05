@@ -1,0 +1,108 @@
+name: Classify final endpoint contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/classify-endpoint-contracts.yml'
+      - 'scripts/build-endpoint-contracts.py'
+      - 'scripts/materialize-api-map.py'
+      - 'scripts/validate-api-map.py'
+      - 'contracts/api-map-11.6.3.json.gz.b64'
+      - 'contracts/dynamic-networktask-type-writes-11.6.3.json'
+      - 'contracts/arcade-garden-conversion-11.6.3.json'
+      - 'contracts/common-apitype-legacy-surface-11.6.3.json'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASELINE_ARTIFACT_ID: '9920654705'
+      INVENTORY_SHA256: 'c5c4106e4c4abacec4b6336433340f9e3dfa4a0d91820282c5a723f3c0abc543'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch validated sanitized exact-specimen evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline work reports
+          curl --fail --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -o baseline.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
+          unzip -q baseline.zip -d baseline
+          echo "${INVENTORY_SHA256}  baseline/server-contract-inventory.json" | sha256sum -c -
+          python - <<'PY'
+          import json
+          f=json.load(open('baseline/networktask-api-field.json'))
+          a=json.load(open('baseline/arcade-convert-type.json'))
+          s=json.load(open('baseline/task-set-type-callsites.json'))
+          assert f['network_task']['typed_api_field'] is True
+          assert a['schema']==3 and a['target_rva']==0x4769CC0 and len(a['constructors'])==9
+          assert s['schema']==2 and s['exact_bl_xref_count']==0
+          print(json.dumps({
+            'typed_api_field':f['network_task']['field_at_offset'][0],
+            'arcade_inputs':[r['convert_input_key'] for r in a['constructors']],
+            'set_type_direct_bl_xrefs':s['exact_bl_xref_count'],
+          },indent=2))
+          PY
+          python scripts/materialize-api-map.py contracts/api-map-11.6.3.json.gz.b64 work/api-map.json
+
+      - name: Build schema5 endpoint contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-endpoint-contracts.py \
+            --api-map work/api-map.json \
+            --field-report baseline/networktask-api-field.json \
+            --dynamic-writer-proof contracts/dynamic-networktask-type-writes-11.6.3.json \
+            --arcade-report baseline/arcade-convert-type.json \
+            --arcade-garden-report contracts/arcade-garden-conversion-11.6.3.json \
+            --set-type-report baseline/task-set-type-callsites.json \
+            --legacy-surface-proof contracts/common-apitype-legacy-surface-11.6.3.json \
+            --output reports/endpoint-contracts-schema5.json \
+            --markdown-output reports/endpoint-contracts-schema5.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/endpoint-contracts-schema5.json'))
+          assert d['schema']==5
+          assert d['summary']['A']['proven_static']==486
+          assert d['summary']['A']['unresolved']==30
+          assert d['summary']['B']['orphaned_legacy_static']==22
+          assert d['summary']['B']['proven_static']==0
+          assert d['summary']['B']['candidate_name']==0
+          assert d['summary']['B']['unresolved']==0
+          assert all(
+            r['server_generation_default']=='exclude'
+            for r in d['endpoints'] if r['group']=='B'
+          )
+          print(json.dumps(d['summary'],indent=2))
+          PY
+
+      - name: Enforce sanitized boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf baseline baseline.zip work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped endpoint-classification boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload schema5 endpoint contracts
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-endpoint-contracts-schema5
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7

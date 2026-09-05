@@ -1,0 +1,144 @@
+name: Validate C23 runtime blocker enrichment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - server/low_complexity_evidence.py
+      - scripts/enrich-runtime-contract-blocker.py
+      - tests/test_low_complexity_evidence_index.py
+      - tests/test_runtime_contract_blocker_enrichment.py
+      - .github/workflows/validate-runtime-contract-blocker-enrichment-c23.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      C14_RUN_ID: '33847577801'
+      C14_SHA256: 'de42e8340458c96a66dcf798bd47965638efcb082c5bbb1b37c149520a7e18b8'
+      C22_RUN_ID: '33857701155'
+      C22_SHA256: '4238ef2cb0cb45a93262a1abd8ac44607edf6b993d1e06f4264843ea352d6ab4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run enrichment unit tests
+        run: |
+          python -m unittest discover -s tests -p 'test_low_complexity_evidence_index.py' -v
+          python -m unittest discover -s tests -p 'test_runtime_contract_blocker_enrichment.py' -v
+
+      - name: Download frozen C14
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C14_RUN_ID }}
+          name: final-client-c14-effective-runtime-contract-catalog
+          path: inputs/c14
+
+      - name: Download frozen C22
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C22_RUN_ID }}
+          name: final-client-c22-low-complexity-response-evidence
+          path: inputs/c22
+
+      - name: Verify frozen inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          C14=$(find inputs/c14 -type f -name 'final-client-c14-effective-runtime-contract-catalog.json' -print -quit)
+          C22=$(find inputs/c22 -type f -name 'c22-low-complexity-response-evidence.json' -print -quit)
+          test -n "$C14"; test -n "$C22"
+          echo "${C14_SHA256}  $C14" | sha256sum -c -
+          echo "${C22_SHA256}  $C22" | sha256sum -c -
+          echo "C14=$C14" >> "$GITHUB_ENV"
+          echo "C22=$C22" >> "$GITHUB_ENV"
+
+      - name: Build synthetic schema-5 blockers
+        shell: bash
+        run: |
+          mkdir -p work reports
+          cat > work/runtime.json <<'JSON'
+          {
+            "schema": 5,
+            "runs": {
+              "low_complexity_blocker": {
+                "semantic_contract_blocker": {
+                  "route": "/bus/index",
+                  "status": 501,
+                  "candidate_endpoint_ids": [309]
+                }
+              },
+              "outside_c22_scope": {
+                "semantic_contract_blocker": {
+                  "route": "/load/index",
+                  "status": 501,
+                  "candidate_endpoint_ids": [12]
+                }
+              }
+            }
+          }
+          JSON
+
+      - name: Enrich blockers with C14 and C22
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/enrich-runtime-contract-blocker.py \
+            --runtime-analysis work/runtime.json \
+            --effective-runtime-catalog "$C14" \
+            --low-complexity-evidence "$C22" \
+            --output reports/c23-runtime-contract-blocker-enrichment.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('reports/c23-runtime-contract-blocker-enrichment.json').read_text())
+          assert d['schema']==1
+          assert d['catalog_endpoint_count']==538
+          assert d['catalog_unique_route_count']==526
+          assert d['low_complexity_route_count']==76
+          low=d['runs']['low_complexity_blocker']['semantic_contract_blocker']
+          ev=low['low_complexity_response_evidence']
+          assert ev['endpoint_id']==309
+          assert ev['effective_shape']=='proven-object'
+          assert ev['empty_value_status']=='not-proven'
+          assert ev['effective_shape_source']=='C21-helper-json-operations'
+          assert low['next_action']=='observe_runtime_or_prove_empty_value_before_template'
+          assert 'c17_fields' not in ev
+          outside=d['runs']['outside_c22_scope']['semantic_contract_blocker']
+          assert 'low_complexity_response_evidence' not in outside
+          assert outside['next_action']=='reconstruct_concrete_plus_effective_base_response_model'
+          print(json.dumps({
+            'bus_index':ev,
+            'outside_c22_next_action':outside['next_action'],
+          },indent=2,sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf inputs work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name '*.sqlite' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw or broad contract artifact escaped C23 report boundary' >&2
+            exit 1
+          fi
+          sha256sum reports/c23-runtime-contract-blocker-enrichment.json > reports/SHA256SUMS
+
+      - name: Upload C23 diagnostic proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c23-runtime-contract-blocker-enrichment
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

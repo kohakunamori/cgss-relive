@@ -41,6 +41,20 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
             value["error"] = error
         return value
 
+    def contract_candidate(self, endpoint_id: int, *, required: int = 1, unknown: int = 2):
+        return {
+            "endpoint_id": endpoint_id,
+            "group": "A",
+            "key": 47,
+            "enum": "StoryStart",
+            "status": "proven-static",
+            "request_field_count": 0,
+            "response_field_count": 3,
+            "required_response_field_count": required,
+            "unknown_response_field_count": unknown,
+            "exact_state_mutation_count": 3,
+        }
+
     def test_analyze_resource_negotiation_and_post_index_endpoint(self) -> None:
         events = [
             self.event(
@@ -73,6 +87,79 @@ class RuntimeEventAnalysisTests(unittest.TestCase):
         self.assertTrue(negotiation["observed_followup_request_after_10133800_success"])
         self.assertEqual(report["after_load_index"]["route"], "/bn_consent/get_state")
         self.assertEqual(report["first_failure"]["api_candidates"][0]["key"], 14)
+        self.assertIsNone(report["semantic_contract_blocker"])
+
+    def test_semantic_contract_blocker_is_explicit_and_not_success(self) -> None:
+        events = [
+            self.event(
+                "/load/check",
+                res_ver="10133000",
+                result=214,
+                required_res_ver="10133800",
+                timestamp=1.0,
+            ),
+            self.event("@resource/manifest", result=None, timestamp=2.0),
+            self.event("/load/index", timestamp=3.0),
+            self.event(
+                "/story/start",
+                status=501,
+                result=None,
+                error=module.CONTRACT_BLOCKER_ERROR,
+                timestamp=4.0,
+            ),
+        ]
+        events[-1]["contract_candidates"] = [self.contract_candidate(48)]
+        report = module.analyze_events(events)
+        self.assertEqual(report["phase"], "semantic_contract_blocker_observed")
+        blocker = report["semantic_contract_blocker"]
+        self.assertEqual(blocker["route"], "/story/start")
+        self.assertEqual(blocker["status"], 501)
+        self.assertEqual(blocker["candidate_endpoint_ids"], [48])
+        self.assertFalse(blocker["route_identity_ambiguous"])
+        self.assertEqual(
+            blocker["next_action"],
+            "reconstruct_required_response_shape_then_supply_explicit_template",
+        )
+        self.assertEqual(blocker["contract_candidates"][0]["required_response_field_count"], 1)
+        self.assertEqual(blocker["contract_candidates"][0]["unknown_response_field_count"], 2)
+        self.assertEqual(report["first_failure"]["contract_candidates"][0]["endpoint_id"], 48)
+        self.assertEqual(report["after_load_index"]["contract_candidates"][0]["endpoint_id"], 48)
+
+    def test_ambiguous_semantic_route_requires_identity_resolution(self) -> None:
+        event = self.event(
+            "/tool/signup_migration",
+            status=501,
+            result=None,
+            error=module.CONTRACT_BLOCKER_ERROR,
+        )
+        first = self.contract_candidate(4)
+        second = self.contract_candidate(519, required=0, unknown=0)
+        second.update({"group": "B", "key": 2, "enum": "SignUpMigration", "status": "unresolved"})
+        second["response_field_count"] = 0
+        event["contract_candidates"] = [first, second]
+        report = module.analyze_events([event])
+        blocker = report["semantic_contract_blocker"]
+        self.assertTrue(blocker["route_identity_ambiguous"])
+        self.assertEqual(blocker["candidate_endpoint_ids"], [4, 519])
+        self.assertEqual(blocker["next_action"], "resolve_endpoint_identity_before_template")
+        self.assertEqual(report["phase"], "semantic_contract_blocker_observed")
+
+    def test_contract_candidate_schema_is_strict(self) -> None:
+        valid = self.event("/story/start", status=501, result=None, error=module.CONTRACT_BLOCKER_ERROR)
+        valid["contract_candidates"] = [self.contract_candidate(48)]
+        module.validate_event(valid, line_number=1)
+
+        leaking = dict(valid)
+        leaking["contract_candidates"] = [dict(self.contract_candidate(48), response_body="secret")]
+        with self.assertRaises(module.UnsafeEventLog):
+            module.validate_event(leaking, line_number=1)
+
+        invalid_counts = dict(valid)
+        bad = self.contract_candidate(48)
+        bad["required_response_field_count"] = 4
+        invalid_counts["contract_candidates"] = [bad]
+        with self.assertRaises(module.UnsafeEventLog):
+            module.validate_event(invalid_counts, line_number=1)
 
     def test_214_alone_does_not_claim_retry_or_acceptance(self) -> None:
         report = module.analyze_events(

@@ -60,7 +60,7 @@ class RuntimeDeviceDiagnosticsCLITests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
-            self.assertEqual(report["schema"], 4)
+            self.assertEqual(report["schema"], 5)
             run = report["runs"]["starter"]
             self.assertEqual(run["phase"], "resource_version_214_responded")
             self.assertEqual(len(run["sequence"]), 1)

@@ -3,7 +3,7 @@
 The event format intentionally excludes UDID, SID, USER-ID, PARAM, request body
 values and decoded viewer/account identifiers.  It records only route/status,
 version headers, object key shapes, response result codes, and optional public
-ApiType endpoint identities needed to continue clean-room reconstruction.
+ApiType/semantic endpoint identities needed to continue clean-room reconstruction.
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ def build_event(
     response: Any = None,
     error: str | None = None,
     api_candidates: Sequence[Mapping[str, Any]] | None = None,
+    contract_candidates: Sequence[Mapping[str, Any]] | None = None,
     timestamp: float | None = None,
 ) -> dict[str, Any]:
     headers = headers or {}
@@ -64,6 +65,25 @@ def build_event(
             }
             for candidate in api_candidates
         ]
+    if contract_candidates:
+        safe_contracts: list[dict[str, Any]] = []
+        for candidate in contract_candidates:
+            item: dict[str, Any] = {
+                "endpoint_id": int(candidate["endpoint_id"]),
+                "request_field_count": int(candidate["request_field_count"]),
+                "response_field_count": int(candidate["response_field_count"]),
+                "required_response_field_count": int(candidate["required_response_field_count"]),
+                "unknown_response_field_count": int(candidate["unknown_response_field_count"]),
+                "exact_state_mutation_count": int(candidate["exact_state_mutation_count"]),
+            }
+            for source, target in (("group", "group"), ("enum", "enum"), ("status", "status")):
+                value = candidate.get(source)
+                if value is not None:
+                    item[target] = str(value)
+            if candidate.get("key") is not None:
+                item["key"] = int(candidate["key"])
+            safe_contracts.append(item)
+        event["contract_candidates"] = safe_contracts
     request_keys = object_keys(request)
     if request_keys is not None:
         event["request_keys"] = request_keys

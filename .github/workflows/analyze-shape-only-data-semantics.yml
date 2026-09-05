@@ -1,0 +1,166 @@
+name: Analyze C17 shape-only data semantics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/analyze-shape-only-data-semantics.py
+      - tests/test_shape_only_data_semantics.py
+      - .github/workflows/analyze-shape-only-data-semantics.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      C0_ARTIFACT_ID: '9920654705'
+      C0_INVENTORY_SHA256: 'c5c4106e4c4abacec4b6336433340f9e3dfa4a0d91820282c5a723f3c0abc543'
+      C14_RUN_ID: '33847577801'
+      C14_SHA256: 'de42e8340458c96a66dcf798bd47965638efcb082c5bbb1b37c149520a7e18b8'
+      XAPK_SHA256: '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d'
+      LIB_SHA256: '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+      META_SHA256: '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Run C17 unit tests
+        run: python -m unittest discover -s tests -p 'test_shape_only_data_semantics.py' -v
+
+      - name: Download fixed C14 effective runtime catalog
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C14_RUN_ID }}
+          name: final-client-c14-effective-runtime-contract-catalog
+          path: inputs/c14
+
+      - name: Fetch validated sanitized C0 inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p inputs/c0 work/xapk work/dumper work/dump reports
+          curl --fail --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -o inputs/c0.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C0_ARTIFACT_ID}/zip"
+          unzip -q inputs/c0.zip -d inputs/c0
+          echo "${C0_INVENTORY_SHA256}  inputs/c0/server-contract-inventory.json" | sha256sum -c -
+          C14=$(find inputs/c14 -type f -name '*effective-runtime-contract-catalog.json' -print -quit)
+          test -n "$C14"
+          echo "${C14_SHA256}  $C14" | sha256sum -c -
+          echo "C14=$C14" >> "$GITHUB_ENV"
+
+      - name: Prepare exact final native maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo "${XAPK_SHA256}  work/final.xapk" | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo "${LIB_SHA256}  work/libil2cpp.so" | sha256sum -c -
+          echo "${META_SHA256}  work/global-metadata.dat" | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('work/dumper/config.json')
+          data = json.loads(path.read_text())
+          data['RequireAnyKey'] = False
+          data['GenerateScript'] = True
+          data['GenerateDummyDll'] = False
+          path.write_text(json.dumps(data, indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
+          test -n "$DLL"
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
+
+      - name: Rebuild exact C3 field-access evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-response-field-accesses.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --inventory inputs/c0/server-contract-inventory.json \
+            --output reports/c3-response-field-accesses.json
+
+      - name: Refine C16 low-complexity data shapes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-shape-only-data-semantics.py \
+            --effective-runtime-catalog "$C14" \
+            --c3-response-field-accesses reports/c3-response-field-accesses.json \
+            --output reports/c17-shape-only-data-semantics.json \
+            | tee reports/c17-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('reports/c17-shape-only-data-semantics.json').read_text())
+          assert data['schema'] == 1
+          assert data['source_c14_endpoint_count'] == 538
+          assert data['source_c14_unique_route_count'] == 526
+          assert data['shape_only_route_count'] == 76, data['shape_only_route_count']
+          assert all(row['empty_value_promotion'] == 'not-proven-by-c17' for row in data['routes'])
+          print(json.dumps({
+              'shape_only_route_count': data['shape_only_route_count'],
+              'refined_field_shape_counts': data['refined_field_shape_counts'],
+              'route_class_counts': data['route_class_counts'],
+          }, indent=2, sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work inputs
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C17 report boundary' >&2
+            exit 1
+          fi
+          sha256sum reports/* | tee reports/SHA256SUMS
+
+      - name: Upload C17 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c17-shape-only-data-semantics
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

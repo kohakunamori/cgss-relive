@@ -1,0 +1,96 @@
+name: Generate conservative empty-data response templates
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/generate-conservative-empty-response-templates.py
+      - tests/test_conservative_empty_templates.py
+      - .github/workflows/generate-conservative-empty-response-templates.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Download fixed C14 runtime contract catalog
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33847577801
+          name: final-client-c14-effective-runtime-contract-catalog
+          path: artifacts/c14
+
+      - name: Download fixed C9 semantic DB
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33838319342
+          name: final-client-c9-client-semantic-db-tail-aware
+          path: artifacts/c9
+
+      - name: Locate and verify pinned inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          C14=$(find artifacts/c14 -type f -name '*effective-runtime-contract-catalog.json' -print -quit)
+          C9=$(find artifacts/c9 -type f -name '*.sqlite' -print -quit)
+          test -n "$C14"
+          test -n "$C9"
+          echo "de42e8340458c96a66dcf798bd47965638efcb082c5bbb1b37c149520a7e18b8  $C14" | sha256sum -c -
+          echo "a85922db2c106de3412cac511c8183ea34559eed8f844ef5186467f76dcdd8fd  $C9" | sha256sum -c -
+          echo "C14=$C14" >> "$GITHUB_ENV"
+          echo "C9=$C9" >> "$GITHUB_ENV"
+
+      - name: Run C15 policy tests
+        run: python -m pytest -q tests/test_conservative_empty_templates.py
+
+      - name: Generate C15 templates and classification report
+        run: |
+          python scripts/generate-conservative-empty-response-templates.py \
+            --effective-runtime-catalog "$C14" \
+            --templates-output out/c15-conservative-empty-response-templates.json \
+            --report-output out/c15-conservative-empty-response-report.json
+
+      - name: Validate generated templates against real C9 identity rules
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from server.response_templates import ResponseTemplateStore
+          from server.semantic_contracts import SemanticContractIndex
+
+          semantic = SemanticContractIndex(Path(os.environ['C9']))
+          store = ResponseTemplateStore.load(
+              Path('out/c15-conservative-empty-response-templates.json'),
+              semantic_index=semantic,
+          )
+          print({'validated_template_routes': len(store.routes)})
+          PY
+
+      - name: Hash outputs
+        run: sha256sum out/* | tee out/SHA256SUMS
+
+      - name: Upload C15 candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c15-conservative-empty-response-templates
+          path: out/
+          if-no-files-found: error
+          retention-days: 30

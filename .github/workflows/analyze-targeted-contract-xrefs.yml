@@ -1,0 +1,151 @@
+name: Analyze targeted final-client contract xrefs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-targeted-contract-xrefs.yml'
+      - 'scripts/analyze-common-apilist-xrefs.py'
+      - 'scripts/analyze-common-apitype-native.py'
+      - 'scripts/analyze-arcade-convert-map.py'
+      - 'scripts/resolve-arcade-convert-prefix.py'
+      - 'scripts/analyze-dynamic-networktask-writers.py'
+      - 'scripts/resolve-dynamic-networktask-constants.py'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Prepare exact final IL2CPP specimen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk work/dumper work/dump reports
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll | head -1)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/dump.cs
+          test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
+          python -m pip install --disable-pip-version-check capstone pyelftools
+
+      - name: Trace Common.ApiType static surface and ApiList consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-common-apitype-native.py \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --output reports/common-apitype-native.json
+          python scripts/analyze-common-apilist-xrefs.py \
+            --lib work/libil2cpp.so --script-json work/dump/script.json \
+            --output reports/common-apilist-xrefs.json
+          python - <<'PY'
+          import json
+          a=json.load(open('reports/common-apitype-native.json'))
+          x=json.load(open('reports/common-apilist-xrefs.json'))
+          assert a['schema']==2
+          assert x['schema']==1 and x['typeinfo_got']==0x82657D0
+          print(json.dumps({
+            'common_apitype_method_xrefs': a['exact_bl_xref_count'],
+            'apilist_exact_refs': x['exact_reference_count'],
+            'apilist_consumers': [
+              {'name':c['name'],'rva':hex(c['rva']),'signature':c['signature'],'calls':c['calls'],'small_immediates':c['small_immediates']}
+              for c in x['consumers']
+            ],
+            'unmapped': x['unmapped_references'],
+          },indent=2))
+          PY
+
+      - name: Inspect Arcade conversion algorithm and prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-arcade-convert-map.py \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --output reports/arcade-convert-map.json
+          python scripts/resolve-arcade-convert-prefix.py \
+            --lib work/libil2cpp.so --stringliteral-json work/dump/stringliteral.json \
+            --output reports/arcade-convert-prefix.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/arcade-convert-map.json'))
+          p=json.load(open('reports/arcade-convert-prefix.json'))
+          assert d['schema']==1 and p['schema']==1
+          assert p['exact_literal_matches']==[{'literal_index':7314,'value':'Garden','address':0x85933C0}]
+          print(json.dumps({'prefix_resolution':p,'convert_call_names':[c['target_name'] for m in d['methods'] if m['name'].endswith('$$ConvertType') for c in m['calls']]},indent=2))
+          PY
+
+      - name: Inspect remaining dynamic NetworkTask type writers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-dynamic-networktask-writers.py \
+            --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json \
+            --output reports/dynamic-networktask-writers.json
+          python scripts/resolve-dynamic-networktask-constants.py \
+            --lib work/libil2cpp.so --output reports/dynamic-networktask-constants.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/dynamic-networktask-writers.json'))
+          c=json.load(open('reports/dynamic-networktask-constants.json'))
+          assert d['schema']==1 and c['schema']==1
+          assert c['targets']['Stage.MemberEvolutionTask']['type_key_dword']==25
+          assert c['targets']['Stage.RoomSettingUpdateTask']['type_key_dword']==98
+          print(json.dumps({
+            'constructor_signatures':{k:v['signature'] for k,v in d['constructors'].items()},
+            'caller_counts':{k:len(v) for k,v in d['callers'].items()},
+            'constant_pool':c,
+          },indent=2))
+          PY
+
+      - name: Enforce sanitized boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped report boundary' >&2; exit 1
+          fi
+
+      - name: Upload targeted derived reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: targeted-final-client-contract-xrefs
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7

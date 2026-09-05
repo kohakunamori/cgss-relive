@@ -1,0 +1,226 @@
+name: Analyze final 11.6.3 server contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-server-contracts.yml'
+      - 'scripts/analyze-server-contracts.py'
+      - 'scripts/analyze-api-type-enums.py'
+      - 'scripts/analyze-task-api-keys.py'
+      - 'scripts/analyze-networktask-api-field.py'
+      - 'scripts/analyze-task-set-type-callsites.py'
+      - 'scripts/analyze-arcade-convert-type.py'
+      - 'scripts/analyze-common-apitype-native.py'
+      - 'scripts/discover-networktask-roots.py'
+      - 'scripts/discover-common-apitype-consumers.py'
+      - 'scripts/materialize-api-map.py'
+      - 'scripts/build-endpoint-contracts.py'
+      - 'scripts/validate-api-map.py'
+      - 'contracts/api-map-11.6.3.json.gz.b64'
+      - 'contracts/arcade-garden-conversion-11.6.3.json'
+      - 'contracts/dynamic-networktask-type-writes-11.6.3.json'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Materialize authoritative endpoint map
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work reports
+          python scripts/materialize-api-map.py contracts/api-map-11.6.3.json.gz.b64 work/api-map-11.6.3.json
+          python scripts/validate-api-map.py work/api-map-11.6.3.json -o reports/api-map-validation.json
+
+      - name: Install .NET 6 for Il2CppDumper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Download and verify exact final XAPK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk
+          curl --fail --location --retry 4 --retry-all-errors --output work/final.xapk 'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+
+      - name: Extract and verify exact IL2CPP inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+
+      - name: Run Il2CppDumper v6.7.46
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip 'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          mkdir -p work/dumper work/dump
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
+          PY
+          DLL=$(find work/dumper -maxdepth 2 -type f -name 'Il2CppDumper.dll' | head -1)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/dump.cs; test -s work/dump/script.json; test -s work/dump/stringliteral.json
+
+      - name: Discover ApiType and NetworkTask roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-api-type-enums.py --dump-cs work/dump/dump.cs --script-json work/dump/script.json --stringliteral-json work/dump/stringliteral.json --output reports/api-type-enums.json
+          python scripts/discover-networktask-roots.py --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/networktask-roots.json
+          python - <<'PY'
+          import json
+          a=json.load(open('reports/api-type-enums.json'))
+          assert a['schema']==2 and len(a['a_candidates'])==1
+          assert a['a_cctor']['rva']==0x4271C3C and a['b_cctor']['rva']==0x4DC8490
+          r=json.load(open('reports/networktask-roots.json'))
+          print(json.dumps({'root_candidates':r['candidates'][:12]},indent=2))
+          PY
+
+      - name: Discover Common.ApiType consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/discover-common-apitype-consumers.py --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/common-apitype-consumers.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/common-apitype-consumers.json'))
+          assert d['schema']==1
+          print(json.dumps({'consumer_type_count':d['consumer_type_count'],'consumers':d['consumers'][:20]},indent=2))
+          PY
+
+      - name: Inspect native Common.ApiType surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python scripts/analyze-common-apitype-native.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/common-apitype-native.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/common-apitype-native.json'))
+          assert d['schema']==2
+          print(json.dumps({'type_block':d['type_block'],'methods':d['methods'],'exact_bl_xref_count':d['exact_bl_xref_count'],'direct_callers':d['direct_callers'][:80],'unmapped_bl_xrefs':d['unmapped_bl_xrefs']},indent=2))
+          PY
+
+      - name: Build normal NetworkTask inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-server-contracts.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --stringliteral-json work/dump/stringliteral.json --output reports/server-contract-inventory.json --markdown-output reports/server-contract-inventory.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/server-contract-inventory.json'))
+          assert d['network_task_type_count']==502
+          print(json.dumps({k:d[k] for k in ['network_task_type_count','network_task_method_count','request_role_method_count','response_role_method_count','tasks_with_contract_literals']},indent=2))
+          PY
+
+      - name: Prove NetworkTask API-key field semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-networktask-api-field.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json --output reports/networktask-api-field.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/networktask-api-field.json'))
+          assert d['network_task']['typed_api_field'] is True
+          print(json.dumps({'field':d['network_task']['field_at_offset'][0],'anchor_count':d['anchor_count'],'expected_seen':d['anchored_expected_value_seen'],'expected_missing':d['anchored_expected_value_missing']},indent=2))
+          PY
+
+      - name: Recover caller-assigned NetworkTask keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-task-set-type-callsites.py --lib work/libil2cpp.so --script-json work/dump/script.json --inventory reports/server-contract-inventory.json --output reports/task-set-type-callsites.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/task-set-type-callsites.json'))
+          assert d['schema']==2
+          print(json.dumps({'setter':d['setter'],'setter_rva':hex(d['setter_rva']),'exact_bl_xref_count':d['exact_bl_xref_count'],'mapped_caller_method_count':d['mapped_caller_method_count'],'unmapped_bl_xrefs':d['unmapped_bl_xrefs'],'observation_count':d['observation_count'],'key_count':d['key_count'],'observations':d['observations'][:80]},indent=2))
+          PY
+
+      - name: Close Arcade ConvertType bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-arcade-convert-type.py --lib work/libil2cpp.so --dump-cs work/dump/dump.cs --script-json work/dump/script.json --output reports/arcade-convert-type.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/arcade-convert-type.json'))
+          assert d['schema']==3 and d['target_rva']==0x4769CC0
+          assert len(d['constructors'])==9
+          assert {r['convert_input_key'] for r in d['constructors']}==set(range(352,361))
+          assert all(r['convert_input_key']==r['expected_api_key'] for r in d['constructors'])
+          print(json.dumps({'convert_type':d['dump_signature'],'constructors':d['constructors']},indent=2))
+          PY
+
+      - name: Build evidence-graded endpoint contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-endpoint-contracts.py \
+            --api-map work/api-map-11.6.3.json \
+            --field-report reports/networktask-api-field.json \
+            --dynamic-writer-proof contracts/dynamic-networktask-type-writes-11.6.3.json \
+            --arcade-report reports/arcade-convert-type.json \
+            --arcade-garden-report contracts/arcade-garden-conversion-11.6.3.json \
+            --set-type-report reports/task-set-type-callsites.json \
+            --output reports/endpoint-contracts.json \
+            --markdown-output reports/endpoint-contracts.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/endpoint-contracts.json'))
+          assert d['schema']==4
+          assert d['summary']['A']['proven_static'] >= 486
+          print(json.dumps(d['summary'],indent=2))
+          PY
+
+      - name: Keep legacy constructor-pattern diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-task-api-keys.py --lib work/libil2cpp.so --script-json work/dump/script.json --inventory reports/server-contract-inventory.json --api-type-enums reports/api-type-enums.json --output reports/task-api-key-analysis.json
+
+      - name: Enforce clean-room artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          find reports -maxdepth 1 -type f -print
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'global-metadata.dat' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' \) | grep -q .; then
+            echo 'proprietary/bulk reverse-engineering output escaped report boundary' >&2; exit 1
+          fi
+
+      - name: Upload sanitized contract reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-server-contract-inventory
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7

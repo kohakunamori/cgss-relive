@@ -1,0 +1,129 @@
+name: Analyze WorkCardData field semantics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/analyze-work-card-field-semantics.py
+      - .github/workflows/analyze-work-card-field-semantics.yml
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 6 for Il2CppDumper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Download and verify exact final XAPK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk reports
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+
+      - name: Extract and verify ARM64 IL2CPP specimen
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARM_APK=''
+          META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"
+          test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+
+      - name: Build exact Il2CppDumper metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 \
+            -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          mkdir -p work/dumper work/dump
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json')
+          d=json.loads(p.read_text())
+          d['RequireAnyKey']=False
+          d['GenerateScript']=True
+          d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d, indent=2))
+          PY
+          DLL=$(find work/dumper -maxdepth 2 -type f -name 'Il2CppDumper.dll' | head -1)
+          test -n "$DLL"
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+          test -s work/dump/dump.cs
+
+      - name: Analyze WorkCardData target fields and direct consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python scripts/analyze-work-card-field-semantics.py \
+            --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json \
+            --lib work/libil2cpp.so \
+            --output reports/work-card-field-semantics-11.6.3.json \
+            | tee reports/work-card-field-semantics-summary.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/work-card-field-semantics-11.6.3.json'))
+          assert d['schema']==1
+          assert d['target_owner']=='Stage.WorkCardData.CardData'
+          names=' '.join(row['name'].lower() for row in d['target_fields'])
+          for wanted in ('step','love','protect'):
+              assert wanted in names, (wanted, names)
+          assert d['add_card_data_methods'], 'AddCardData method not found'
+          assert d['target_methods'], 'no target accessor/mutator methods found'
+          assert d['evidence_policy']['business_semantics_inferred'] is False
+          print(json.dumps({
+              'target_fields': d['target_fields'],
+              'target_methods': d['target_methods'],
+              'direct_xref_count': len(d['direct_xrefs']),
+              'direct_consumer_targets': len(d['direct_consumers']),
+          }, indent=2))
+          PY
+
+      - name: Enforce sanitized report boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped targeted WorkCard report boundary' >&2
+            exit 1
+          fi
+          find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+
+      - name: Upload sanitized WorkCard semantic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-work-card-field-semantics
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

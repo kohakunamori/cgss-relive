@@ -1,0 +1,116 @@
+name: Build C9 client semantic DB
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/build-client-semantic-db.yml'
+      - 'scripts/build-client-semantic-db.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      C6_ARTIFACT_ID: '9922931548'
+      C6_ARTIFACT_SHA256: 'adb6770d84a45e791e5cd397ae419360ea6c40025cd1220466b874112988dad0'
+      C6_SQLITE_SHA256: '1bb2cd9e3e7980233a7fed3ce49166f312161c074dc832f2c0718b8964606df1'
+      C7A_ARTIFACT_ID: '9922977839'
+      C7A_ARTIFACT_SHA256: 'ecc46ffd54a36d3a25518a46c37f483d61e71c4f44eba927ccd8c0bd2ce8e4c6'
+      C7A_JSON_SHA256: '2e38ea036ce4b326271753aa680f903159030e734a3e7834373bd397a8ac243a'
+      C7B_ARTIFACT_ID: '9923752401'
+      C7B_ARTIFACT_SHA256: 'f2ca8d10106aeff0a0c5fdff1bfe0e45116e96826d047af57dce9bd3be5aba79'
+      C7B_JSON_SHA256: '1d34656cf2b8d76e59b68a41454650eefa97b364878c09e7236349cb057728d5'
+      C8_ARTIFACT_ID: '9923813313'
+      C8_ARTIFACT_SHA256: '777be6c293d364f43e1077f8dbd46bf46d9d0c5433b53e73ee3b37c1bcde9d6e'
+      C8_JSON_SHA256: '65cda85797fef329c6a721af2c4fd9f9f3ac1a04ad8ebb793287a5c4a133e522'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch fixed sanitized semantic inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/c6 work/c7a work/c7b work/c8 reports
+          fetch_artifact() {
+            local id="$1" expected="$2" out="$3"
+            curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              -o "$out" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip"
+            echo "${expected}  ${out}" | sha256sum -c -
+          }
+          fetch_artifact "$C6_ARTIFACT_ID" "$C6_ARTIFACT_SHA256" work/c6.zip
+          fetch_artifact "$C7A_ARTIFACT_ID" "$C7A_ARTIFACT_SHA256" work/c7a.zip
+          fetch_artifact "$C7B_ARTIFACT_ID" "$C7B_ARTIFACT_SHA256" work/c7b.zip
+          fetch_artifact "$C8_ARTIFACT_ID" "$C8_ARTIFACT_SHA256" work/c8.zip
+          unzip -q work/c6.zip -d work/c6
+          unzip -q work/c7a.zip -d work/c7a
+          unzip -q work/c7b.zip -d work/c7b
+          unzip -q work/c8.zip -d work/c8
+          echo "$C6_SQLITE_SHA256  work/c6/contracts-11.6.3.sqlite" | sha256sum -c -
+          echo "$C7A_JSON_SHA256  work/c7a/response-state-mutations-11.6.3.json" | sha256sum -c -
+          echo "$C7B_JSON_SHA256  work/c7b/state-consumers-11.6.3.json" | sha256sum -c -
+          echo "$C8_JSON_SHA256  work/c8/state-consumer-subsystems-11.6.3.json" | sha256sum -c -
+
+      - name: Build semantic DB
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-client-semantic-db.py \
+            --c6-sqlite work/c6/contracts-11.6.3.sqlite \
+            --c7a work/c7a/response-state-mutations-11.6.3.json \
+            --c7b work/c7b/state-consumers-11.6.3.json \
+            --c8 work/c8/state-consumer-subsystems-11.6.3.json \
+            --sqlite-output reports/contracts-semantic-11.6.3.sqlite \
+            --json-output reports/client-semantic-db-11.6.3.json \
+            --markdown-output reports/client-semantic-db-11.6.3.md
+          python - <<'PY'
+          import json, sqlite3
+          d=json.load(open('reports/client-semantic-db-11.6.3.json'))
+          assert d['schema']==2
+          assert d['quick_check']=='ok'
+          assert d['endpoint_count']==538
+          assert d['state_mutation_count']==1358
+          assert d['state_reader_count']==2235
+          assert d['state_consumer_count']==7522
+          assert d['c8_classified_relation_count']==6135
+          assert d['endpoint_state_mutation_link_count']==1476
+          assert d['endpoint_state_consumer_relation_bridge_count']==105072
+          assert d['endpoint_state_consumer_method_bridge_count']==72249
+          assert d['endpoint_subsystem_link_count']==2336
+          assert d['c7a_unmatched_endpoint_candidate_count']==0
+          db=sqlite3.connect('reports/contracts-semantic-11.6.3.sqlite')
+          assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+          assert db.execute("SELECT COUNT(*) FROM endpoints WHERE route='/tool/signup_migration' AND enum='SignUpMigration'").fetchone()[0]==2
+          assert db.execute("SELECT COUNT(*) FROM endpoint_semantics WHERE route='/tool/signup_migration' AND enum='SignUpMigration'").fetchone()[0]==2
+          live=db.execute("SELECT exact_state_mutation_count,inferred_state_consumer_method_count FROM endpoint_semantics WHERE route='/live/end'").fetchone()
+          assert live and live[0]>0 and live[1]>0
+          db.close()
+          print(json.dumps(d, indent=2))
+          PY
+
+      - name: Enforce semantic-only artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C9 semantic DB boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload client semantic DB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c9-client-semantic-db
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14

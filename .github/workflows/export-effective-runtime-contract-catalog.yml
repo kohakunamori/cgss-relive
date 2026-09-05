@@ -1,0 +1,118 @@
+name: Export final 11.6.3 effective runtime contract catalog
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - server/parser_overlays.py
+      - scripts/export-effective-runtime-contract-catalog.py
+      - tests/test_parser_overlays.py
+      - .github/workflows/export-effective-runtime-contract-catalog.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Download fixed C9 semantic DB artifact
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33838319342
+          name: final-client-c9-client-semantic-db-tail-aware
+          path: artifacts/c9
+
+      - name: Download fixed C13 effective parser overlay artifact
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33840564582
+          name: final-client-c13-effective-parser-overlays
+          path: artifacts/c13
+
+      - name: Locate and verify pinned inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          C9=$(find artifacts/c9 -type f -name '*.sqlite' -print -quit)
+          C13=$(find artifacts/c13 -type f -name '*.json' -print -quit)
+          test -n "$C9"
+          test -n "$C13"
+          echo "a85922db2c106de3412cac511c8183ea34559eed8f844ef5186467f76dcdd8fd  $C9" | sha256sum -c -
+          echo "bb70895ecb83015e609c722b33c98763f3126013ae4a966d6081b35f12d6e331  $C13" | sha256sum -c -
+          echo "C9=$C9" >> "$GITHUB_ENV"
+          echo "C13=$C13" >> "$GITHUB_ENV"
+
+      - name: Run parser overlay unit tests
+        run: python -m pytest -q tests/test_parser_overlays.py
+
+      - name: Export C14 runtime contract catalog
+        run: |
+          python scripts/export-effective-runtime-contract-catalog.py \
+            --semantic-db "$C9" \
+            --parser-overlays "$C13" \
+            --output out/final-client-c14-effective-runtime-contract-catalog.json \
+            --markdown-output out/final-client-c14-effective-runtime-contract-catalog.md
+
+      - name: Verify expected final counts
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path('out/final-client-c14-effective-runtime-contract-catalog.json')
+          doc = json.loads(p.read_text(encoding='utf-8'))
+          expected = {
+              'endpoint_count': 538,
+              'unique_route_count': 526,
+              'duplicate_route_count': 9,
+              'endpoint_with_effective_base_parser_count': 389,
+              'effective_base_parser_relation_count': 438,
+              'effective_base_parser_field_link_count': 1871,
+              'concrete_bound_response_field_count': 1916,
+              'residual_unmapped_base_method_count': 1,
+          }
+          actual = {key: doc.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f'C14 count mismatch: {actual!r}')
+          assert any(
+              row['route'] == '/load/index'
+              and row['candidate_endpoint_ids'] == [12]
+              and row['endpoints'][0]['request_field_count'] == 15
+              for row in doc['routes']
+          )
+          assert any(
+              row['route'] == '/tool/signup_migration'
+              and row['ambiguous_path_identity']
+              and row['candidate_endpoint_ids'] == [4, 519]
+              for row in doc['routes']
+          )
+          print(actual)
+          PY
+
+      - name: Hash outputs
+        run: sha256sum out/* | tee out/SHA256SUMS
+
+      - name: Upload C14 catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c14-effective-runtime-contract-catalog
+          path: out/
+          if-no-files-found: error
+          retention-days: 30

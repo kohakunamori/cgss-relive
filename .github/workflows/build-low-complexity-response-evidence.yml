@@ -1,0 +1,142 @@
+name: Build C22 low complexity response evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/build-low-complexity-response-evidence.py
+      - tests/test_low_complexity_response_evidence.py
+      - .github/workflows/build-low-complexity-response-evidence.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      C17_RUN_ID: '33852041871'
+      C17_SHA256: '1901b2bb1a9e34e9dd958b72848ba7b6c854437baf6746f37a4461789c0b8b40'
+      C19B_RUN_ID: '33853784982'
+      C19B_SHA256: 'd3ed10cb56ec7c55f00af52d4685026c584d696d24676efbe06df548f077ffda'
+      C19C_RUN_ID: '33853965577'
+      C19C_SHA256: '8d231efe3d52ecc459b0bf062ce1a60d6cd2962e7d56fba22b443e0a7cf298b3'
+      C20_RUN_ID: '33857062146'
+      C20_SHA256: '3805ce14eecb08f613649ca5e95c896611413e2820bfd867db23ceb7434dd554'
+      C21_RUN_ID: '33857300721'
+      C21_SHA256: 'fd80482134a2b5d017eba23a506ec26c01d8ca2038bd1cf3c499aa9b3944f32d'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run C22 unit tests
+        run: python -m unittest discover -s tests -p 'test_low_complexity_response_evidence.py' -v
+
+      - name: Download C17
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C17_RUN_ID }}
+          name: final-client-c17-shape-only-data-semantics
+          path: inputs/c17
+      - name: Download C19b
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C19B_RUN_ID }}
+          name: final-client-c19b-empty-object-zero-iteration
+          path: inputs/c19b
+      - name: Download C19c
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C19C_RUN_ID }}
+          name: final-client-c19c-countable-container-zero-path
+          path: inputs/c19c
+      - name: Download C20
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C20_RUN_ID }}
+          name: final-client-c20-opaque-data-first-consumers
+          path: inputs/c20
+      - name: Download C21
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C21_RUN_ID }}
+          name: final-client-c21-opaque-data-helper-semantics
+          path: inputs/c21
+
+      - name: Resolve and verify evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          C17=$(find inputs/c17 -type f -name 'c17-shape-only-data-semantics.json' -print -quit)
+          C19B=$(find inputs/c19b -type f -name 'c19b-empty-object-zero-iteration.json' -print -quit)
+          C19C=$(find inputs/c19c -type f -name 'c19c-countable-container-zero-path.json' -print -quit)
+          C20=$(find inputs/c20 -type f -name 'c20-opaque-data-first-consumers.json' -print -quit)
+          C21=$(find inputs/c21 -type f -name 'c21-opaque-data-helper-semantics.json' -print -quit)
+          test -n "$C17"; test -n "$C19B"; test -n "$C19C"; test -n "$C20"; test -n "$C21"
+          echo "${C17_SHA256}  $C17" | sha256sum -c -
+          echo "${C19B_SHA256}  $C19B" | sha256sum -c -
+          echo "${C19C_SHA256}  $C19C" | sha256sum -c -
+          echo "${C20_SHA256}  $C20" | sha256sum -c -
+          echo "${C21_SHA256}  $C21" | sha256sum -c -
+          echo "C17=$C17" >> "$GITHUB_ENV"
+          echo "C19B=$C19B" >> "$GITHUB_ENV"
+          echo "C19C=$C19C" >> "$GITHUB_ENV"
+          echo "C20=$C20" >> "$GITHUB_ENV"
+          echo "C21=$C21" >> "$GITHUB_ENV"
+
+      - name: Build C22 catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          python scripts/build-low-complexity-response-evidence.py \
+            --c17 "$C17" --c19b "$C19B" --c19c "$C19C" --c20 "$C20" --c21 "$C21" \
+            --output reports/c22-low-complexity-response-evidence.json \
+            | tee reports/c22-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('reports/c22-low-complexity-response-evidence.json').read_text())
+          assert d['schema']==1
+          assert d['route_count']==76, d['route_count']
+          assert d['parser_local_empty_value_proven_route_count']==0, d['parser_local_empty_value_proven_route_count']
+          assert d['untouched_client_accepted_route_count']==0
+          assert d['effective_shape_source_counts'].get('C21-helper-json-operations')==5
+          assert d['effective_shape_source_counts'].get('C19c-string-key-get_Item-signature')==3
+          print(json.dumps({
+            'route_count':d['route_count'],
+            'effective_shape_counts':d['effective_shape_counts'],
+            'effective_shape_source_counts':d['effective_shape_source_counts'],
+            'empty_value_status_counts':d['empty_value_status_counts'],
+          },indent=2,sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf inputs
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C22 report boundary' >&2
+            exit 1
+          fi
+          find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+
+      - name: Upload C22 catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c22-low-complexity-response-evidence
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

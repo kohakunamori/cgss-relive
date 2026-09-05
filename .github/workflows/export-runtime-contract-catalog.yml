@@ -1,0 +1,99 @@
+name: Export C9 runtime contract catalog
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/export-runtime-contract-catalog.yml'
+      - 'server/semantic_contracts.py'
+      - 'scripts/export-runtime-contract-catalog.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      C9_ARTIFACT_ID: '9924031141'
+      C9_ARTIFACT_SHA256: '7fd383f3e0337d37c6c849dba78b1ae9d4818dd694fe1c20038e4fd83ce09980'
+      C9_SQLITE_SHA256: 'a85922db2c106de3412cac511c8183ea34559eed8f844ef5186467f76dcdd8fd'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch fixed tail-aware C9 artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/c9 reports
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o work/c9.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${C9_ARTIFACT_ID}/zip"
+          echo "$C9_ARTIFACT_SHA256  work/c9.zip" | sha256sum -c -
+          unzip -q work/c9.zip -d work/c9
+          echo "$C9_SQLITE_SHA256  work/c9/contracts-semantic-11.6.3.sqlite" | sha256sum -c -
+
+      - name: Validate runtime index and export deterministic catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/export-runtime-contract-catalog.py \
+            --semantic-db work/c9/contracts-semantic-11.6.3.sqlite \
+            --output reports/runtime-contract-catalog-11.6.3.json \
+            --markdown-output reports/runtime-contract-catalog-11.6.3.md
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from server.semantic_contracts import SemanticContractIndex
+
+          db=Path('work/c9/contracts-semantic-11.6.3.sqlite')
+          index=SemanticContractIndex(db)
+          assert index.endpoint_count == 538
+          assert index.unique_route_count == 526
+          assert len(index.duplicate_routes) == 9
+          assert {x.endpoint_id for x in index.route_candidates('/tool/signup_migration')} == {4,519}
+          assert [x.endpoint_id for x in index.route_candidates('/load/index')] == [12]
+          load=index.endpoint(12)
+          assert load.route == '/load/index'
+          assert load.request_field_count == 15
+          assert load.response_field_count == 53
+          assert load.exact_state_mutation_count == 162
+
+          data=json.load(open('reports/runtime-contract-catalog-11.6.3.json'))
+          assert data['schema'] == 1
+          assert data['endpoint_count'] == 538
+          assert data['unique_route_count'] == 526
+          assert data['duplicate_route_count'] == 9
+          assert len(data['routes']) == 526
+          assert all('data' not in endpoint for route in data['routes'] for endpoint in route['endpoints'])
+          print(json.dumps({
+            'endpoint_count': index.endpoint_count,
+            'unique_route_count': index.unique_route_count,
+            'duplicate_route_count': len(index.duplicate_routes),
+            'signup_migration_endpoint_ids': sorted(x.endpoint_id for x in index.route_candidates('/tool/signup_migration')),
+          }, indent=2))
+          PY
+
+      - name: Enforce semantic-only output boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' -o -name '*.sqlite' \) | grep -q .; then
+            echo 'raw/intermediate specimen escaped runtime catalog boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload sanitized runtime catalog
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c10-runtime-contract-catalog
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "specimen": "final-11.6.3-arm64",
+  "convert_method": {
+    "name": "Stage.ArcadePhaseBaseTask$$ConvertType",
+    "rva": 74882240,
+    "condition": "Stage.LabRoomData$$IsGardenRoom",
+    "algorithm": [
+      "System.Enum$$GetName",
+      "System.String$$Concat",
+      "StageMinigame.ArcadeUtil$$ConvertEnumFromName<Int32Enum>"
+    ]
+  },
+  "prefix": {
+    "got": 136599000,
+    "relocation_section": ".rela.dyn",
+    "relocation_type": 1027,
+    "relocation_addend": 140063680,
+    "stringliteral_index": 7314,
+    "stringliteral_address": 140063680,
+    "value": "Garden"
+  },
+  "mappings": [
+    {"input_key": 352, "input_enum": "ArcadeRoundStartPhase", "output_key": 362, "output_enum": "GardenArcadeRoundStartPhase"},
+    {"input_key": 353, "input_enum": "ArcadeCharaTradePhase", "output_key": 363, "output_enum": "GardenArcadeCharaTradePhase"},
+    {"input_key": 354, "input_enum": "ArcadeCharaDeployPhase", "output_key": 364, "output_enum": "GardenArcadeCharaDeployPhase"},
+    {"input_key": 355, "input_enum": "ArcadeSkillAtBuyingPhase", "output_key": 365, "output_enum": "GardenArcadeSkillAtBuyingPhase"},
+    {"input_key": 356, "input_enum": "ArcadeTradableCharaReloadPhase", "output_key": 366, "output_enum": "GardenArcadeTradableCharaReloadPhase"},
+    {"input_key": 357, "input_enum": "ArcadeLoadDeckPhase", "output_key": 367, "output_enum": "GardenArcadeLoadDeckPhase"},
+    {"input_key": 358, "input_enum": "ArcadeSaveDeckPhase", "output_key": 368, "output_enum": "GardenArcadeSaveDeckPhase"},
+    {"input_key": 359, "input_enum": "ArcadeDiscardResumePhase", "output_key": 369, "output_enum": "GardenArcadeDiscardResumePhase"},
+    {"input_key": 360, "input_enum": "ArcadePreResumePhase", "output_key": 370, "output_enum": "GardenArcadePreResumePhase"}
+  ],
+  "evidence": {
+    "constructor_inputs": "scripts/analyze-arcade-convert-type.py schema 3",
+    "conversion_algorithm": "scripts/analyze-arcade-convert-map.py",
+    "prefix_literal": "scripts/resolve-arcade-convert-prefix.py",
+    "targeted_run": 33786359289,
+    "artifact_id": 9905598960,
+    "artifact_digest": "sha256:0c8f702b8df2cac84c65bdeb3086ebfc84d1345a42d885c23939708514859ae3"
+  }
+}

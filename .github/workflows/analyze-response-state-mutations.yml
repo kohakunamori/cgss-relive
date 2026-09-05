@@ -1,0 +1,85 @@
+name: Analyze C7a response state mutations
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-response-state-mutations.yml'
+      - 'scripts/analyze-response-state-mutations.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASELINE_ARTIFACT_ID: '9920654705'
+      CALL_GRAPH_ARTIFACT_ID: '9920990723'
+      ENDPOINTS_SHA256: '3173d45f54265bc491a166405713802bb8eccd52240446ab96856747a3ae6627'
+      RESPONSE_CALLS_SHA256: 'b4c8be6da6cdd9227beef33974edbf67c9444e26c231656c02cc4d4d3e686604'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch validated sanitized semantic inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline calls reports
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o baseline.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
+          curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -o calls.zip "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CALL_GRAPH_ARTIFACT_ID}/zip"
+          unzip -q baseline.zip -d baseline
+          unzip -q calls.zip -d calls
+          echo "${ENDPOINTS_SHA256}  baseline/endpoint-contracts.json" | sha256sum -c -
+          echo "${RESPONSE_CALLS_SHA256}  calls/response-call-targets.json" | sha256sum -c -
+
+      - name: Build response parser to state mutation graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-response-state-mutations.py \
+            --response-call-targets calls/response-call-targets.json \
+            --endpoint-contracts baseline/endpoint-contracts.json \
+            --output reports/response-state-mutations-11.6.3.json \
+            --markdown-output reports/response-state-mutations-11.6.3.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/response-state-mutations-11.6.3.json'))
+          assert d['schema']==1
+          assert d['response_parser_count']==513, d['response_parser_count']
+          assert d['mutation_call_site_count']>=1500, d['mutation_call_site_count']
+          assert d['mutation_relation_count']>=1300, d['mutation_relation_count']
+          assert d['task_with_mutation_count']>=260, d['task_with_mutation_count']
+          assert d['state_type_count']>=160, d['state_type_count']
+          assert d['bound_relation_count']>=1250, d['bound_relation_count']
+          for route in ('/load/index','/live/start','/live/end','/gacha/exec'):
+              assert any(any(ep['route']==route for ep in r['endpoint_candidates']) for r in d['relations']), route
+          print(json.dumps({k:d[k] for k in ('response_parser_count','mutation_call_site_count','mutation_relation_count','task_with_mutation_count','state_type_count','bound_relation_count','unbound_relation_count','state_category_counts','mutation_kind_counts')},indent=2))
+          PY
+
+      - name: Enforce sanitized semantic-only boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf baseline calls baseline.zip calls.zip
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C7a mutation graph boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload response state mutation graph
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c7a-response-state-mutations
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14

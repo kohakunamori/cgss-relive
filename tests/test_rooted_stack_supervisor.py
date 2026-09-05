@@ -17,7 +17,6 @@ SCRIPT = ROOT / "scripts" / "run-rooted-local-stack.py"
 SPEC = importlib.util.spec_from_file_location("run_rooted_local_stack", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 stack = importlib.util.module_from_spec(SPEC)
-# dataclasses resolves postponed annotations through sys.modules on Python 3.12.
 sys.modules[SPEC.name] = stack
 SPEC.loader.exec_module(stack)
 
@@ -47,7 +46,14 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 
 class RootedStackSupervisorTests(unittest.TestCase):
-    def commands(self, *, diagnostic: bool = False, api_map: Path | None = Path("map.json")):
+    def commands(
+        self,
+        *,
+        diagnostic: bool = False,
+        api_map: Path | None = Path("map.json"),
+        semantic_db: Path | None = None,
+        response_templates: Path | None = None,
+    ):
         return stack.build_stack_commands(
             python="python-test",
             repo_root=Path("repo"),
@@ -59,6 +65,8 @@ class RootedStackSupervisorTests(unittest.TestCase):
             control_log=Path("control.jsonl"),
             resource_log=Path("resource.jsonl"),
             api_map=api_map,
+            semantic_db=semantic_db,
+            response_templates=response_templates,
             viewer_id=7,
             producer_name="Test Producer",
             api_port=18080,
@@ -85,6 +93,8 @@ class RootedStackSupervisorTests(unittest.TestCase):
         self.assertIn("control.jsonl", commands.api)
         self.assertIn("map.json", commands.api)
         self.assertNotIn("--accept-old-resource-version", commands.api)
+        self.assertNotIn("--semantic-db", commands.api)
+        self.assertNotIn("--response-templates", commands.api)
 
         self.assertEqual(
             commands.resource[:3],
@@ -111,6 +121,16 @@ class RootedStackSupervisorTests(unittest.TestCase):
         commands = self.commands(api_map=None)
         self.assertNotIn("--api-map", commands.api)
         self.assertNotIn("map.json", commands.api)
+
+    def test_semantic_db_and_templates_are_explicit_runtime_inputs(self) -> None:
+        commands = self.commands(
+            semantic_db=Path("contracts-semantic.sqlite"),
+            response_templates=Path("templates.json"),
+        )
+        self.assertIn("--semantic-db", commands.api)
+        self.assertIn("contracts-semantic.sqlite", commands.api)
+        self.assertIn("--response-templates", commands.api)
+        self.assertIn("templates.json", commands.api)
 
     def test_port_parser_rejects_out_of_range_values(self) -> None:
         self.assertEqual(stack.positive_port("443"), 443)

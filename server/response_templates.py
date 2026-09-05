@@ -1,0 +1,124 @@
+"""Local response-template injection for reconstructed non-bootstrap endpoints.
+
+Templates stay data-only.  The server supplies the common success envelope and
+CGSS encryption.  Final 11.6.3 endpoints do not universally use an object-shaped
+``data`` value, so templates preserve any JSON value decoded from their schema-1
+document (object, array, scalar or null).
+
+A template cannot target an ambiguous HTTP path.  Template stores can be
+composed so a conservative static baseline can be overlaid by stronger explicit
+reconstructions while preserving exact endpoint identity.
+"""
+from __future__ import annotations
+
+import copy
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from .semantic_contracts import SemanticContractIndex
+
+SCHEMA = 1
+
+
+@dataclass(frozen=True)
+class ResponseTemplate:
+    route: str
+    endpoint_id: int
+    data: Any
+    evidence: str | None = None
+
+
+class ResponseTemplateStore:
+    def __init__(self, templates: Mapping[str, ResponseTemplate]):
+        self._templates = dict(templates)
+
+    @staticmethod
+    def _normalize_route(route: str) -> str:
+        return "/" + str(route).split("?", 1)[0].lstrip("/")
+
+    @classmethod
+    def load(cls, path: Path, *, semantic_index: SemanticContractIndex) -> "ResponseTemplateStore":
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+            raise ValueError(f"response template root must contain schema={SCHEMA}")
+        routes = raw.get("routes")
+        if not isinstance(routes, dict):
+            raise ValueError("response template root must contain a routes object")
+
+        parsed: dict[str, ResponseTemplate] = {}
+        for route_key, value in routes.items():
+            if not isinstance(route_key, str) or not route_key:
+                raise ValueError("response template route keys must be non-empty strings")
+            route = cls._normalize_route(route_key)
+            if route in parsed:
+                raise ValueError(f"duplicate normalized response template route: {route}")
+            if not isinstance(value, dict):
+                raise ValueError(f"response template {route} must be an object")
+            allowed = {"endpoint_id", "data", "evidence"}
+            extra = set(value) - allowed
+            if extra:
+                raise ValueError(f"response template {route} has unsupported keys: {sorted(extra)}")
+            if "endpoint_id" not in value:
+                raise ValueError(f"response template {route} must declare endpoint_id")
+            endpoint_id = value["endpoint_id"]
+            if not isinstance(endpoint_id, int):
+                raise ValueError(f"response template {route} endpoint_id must be an integer")
+            if "data" not in value:
+                raise ValueError(f"response template {route} must declare data")
+            data = copy.deepcopy(value["data"])
+            evidence = value.get("evidence")
+            if evidence is not None and not isinstance(evidence, str):
+                raise ValueError(f"response template {route} evidence must be a string")
+
+            candidates = semantic_index.route_candidates(route)
+            if not candidates:
+                raise ValueError(f"response template route is absent from C9 semantics: {route}")
+            if len(candidates) != 1:
+                ids = [candidate.endpoint_id for candidate in candidates]
+                raise ValueError(
+                    f"response template route {route} is ambiguous in C9 (endpoint_ids={ids}); "
+                    "path-only template dispatch is forbidden"
+                )
+            if candidates[0].endpoint_id != endpoint_id:
+                raise ValueError(
+                    f"response template {route} endpoint_id mismatch: "
+                    f"{endpoint_id} != {candidates[0].endpoint_id}"
+                )
+            parsed[route] = ResponseTemplate(
+                route=route,
+                endpoint_id=endpoint_id,
+                data=data,
+                evidence=evidence,
+            )
+        return cls(parsed)
+
+    @property
+    def routes(self) -> tuple[str, ...]:
+        return tuple(sorted(self._templates))
+
+    @property
+    def count(self) -> int:
+        return len(self._templates)
+
+    def get(self, route: str) -> ResponseTemplate | None:
+        return self._templates.get(self._normalize_route(route))
+
+    def merged(self, override: "ResponseTemplateStore") -> "ResponseTemplateStore":
+        """Return a store where ``override`` wins for identical endpoint identities."""
+        combined = dict(self._templates)
+        for route in override.routes:
+            incoming = override.get(route)
+            assert incoming is not None
+            existing = combined.get(route)
+            if existing is not None and existing.endpoint_id != incoming.endpoint_id:
+                raise ValueError(
+                    f"response template merge identity mismatch for {route}: "
+                    f"{existing.endpoint_id} != {incoming.endpoint_id}"
+                )
+            combined[route] = incoming
+        return ResponseTemplateStore(combined)
+
+    def __contains__(self, route: str) -> bool:
+        return self.get(route) is not None

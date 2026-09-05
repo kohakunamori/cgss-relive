@@ -1,0 +1,126 @@
+name: Analyze C2/C3 request response contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-request-response-contracts.yml'
+      - 'scripts/build-request-contract-inventory.py'
+      - 'scripts/build-request-signature-schema.py'
+      - 'scripts/build-response-contract-inventory.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASELINE_ARTIFACT_ID: '9920654705'
+      INVENTORY_SHA256: 'c5c4106e4c4abacec4b6336433340f9e3dfa4a0d91820282c5a723f3c0abc543'
+      ENDPOINTS_SHA256: '3173d45f54265bc491a166405713802bb8eccd52240446ab96856747a3ae6627'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch validated sanitized C0/C1 baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline reports
+          curl --fail --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -o baseline.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${BASELINE_ARTIFACT_ID}/zip"
+          unzip -q baseline.zip -d baseline
+          test -s baseline/server-contract-inventory.json
+          test -s baseline/endpoint-contracts.json
+          echo "${INVENTORY_SHA256}  baseline/server-contract-inventory.json" | sha256sum -c -
+          echo "${ENDPOINTS_SHA256}  baseline/endpoint-contracts.json" | sha256sum -c -
+          python - <<'PY'
+          import json
+          i=json.load(open('baseline/server-contract-inventory.json'))
+          e=json.load(open('baseline/endpoint-contracts.json'))
+          assert i['network_task_type_count']==502
+          assert i['request_role_method_count']==402
+          assert i['response_role_method_count']==513
+          assert e['schema']==4
+          assert e['summary']['A']['proven_static']==486
+          print(json.dumps({'inventory':{k:i[k] for k in ['network_task_type_count','request_role_method_count','response_role_method_count']},'endpoint_summary':e['summary']},indent=2))
+          PY
+
+      - name: Build C2 request inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-request-contract-inventory.py \
+            --inventory baseline/server-contract-inventory.json \
+            --endpoint-contracts baseline/endpoint-contracts.json \
+            --output reports/request-contract-inventory.json \
+            --markdown-output reports/request-contract-inventory.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/request-contract-inventory.json'))
+          assert d['schema']==1
+          assert d['request_method_count']==402
+          print(json.dumps({k:d[k] for k in ['request_task_count','request_method_count','request_tasks_bound_to_proven_endpoints','proven_endpoint_count','proven_endpoints_with_request_surface','unique_field_key_candidate_count']},indent=2))
+          PY
+
+      - name: Derive C2 request signature schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-request-signature-schema.py \
+            --request-inventory reports/request-contract-inventory.json \
+            --output reports/request-signature-schema.json \
+            --markdown-output reports/request-signature-schema.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/request-signature-schema.json'))
+          assert d['schema']==1 and d['method_count']==402
+          assert d['methods_with_explicit_parameters'] > 0
+          print(json.dumps({k:d[k] for k in [
+            'method_count','methods_with_explicit_parameters','methods_without_explicit_parameters',
+            'semantic_parameter_count','parameter_kind_counts','opaque_object_type_count'
+          ]},indent=2))
+          PY
+
+      - name: Build C3 response inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build-response-contract-inventory.py \
+            --inventory baseline/server-contract-inventory.json \
+            --endpoint-contracts baseline/endpoint-contracts.json \
+            --output reports/response-contract-inventory.json \
+            --markdown-output reports/response-contract-inventory.md
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/response-contract-inventory.json'))
+          assert d['schema']==1
+          assert d['response_method_count']==513
+          print(json.dumps({k:d[k] for k in ['response_task_count','response_method_count','response_tasks_bound_to_proven_endpoints','proven_endpoint_count','proven_endpoints_with_response_surface','unique_field_key_candidate_count']},indent=2))
+          PY
+
+      - name: Enforce sanitized boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf baseline baseline.zip
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C2/C3 boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload C2/C3 derived inventories
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-request-response-contract-inventories
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,119 @@
+name: Analyze member favorite flag encoding
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/server-contracts-11.6.3]
+    paths:
+      - '.github/workflows/analyze-member-favorite-flag-encoding.yml'
+      - 'scripts/analyze-member-favorite-flag-encoding.py'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 6 for Il2CppDumper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Download and verify exact final XAPK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk reports
+          curl --fail --location --retry 4 --retry-all-errors \
+            --output work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d  work/final.xapk' | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+
+      - name: Extract and verify exact IL2CPP specimen
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARM_APK=''
+          META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"
+          test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5  work/libil2cpp.so' | sha256sum -c -
+          echo '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586  work/global-metadata.dat' | sha256sum -c -
+
+      - name: Build exact Il2CppDumper metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 \
+            -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          mkdir -p work/dumper work/dump
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json')
+          d=json.loads(p.read_text())
+          d['RequireAnyKey']=False
+          d['GenerateScript']=True
+          d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d, indent=2))
+          PY
+          DLL=$(find work/dumper -maxdepth 2 -type f -name 'Il2CppDumper.dll' | head -1)
+          test -n "$DLL"
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+
+      - name: Install native analysis dependencies
+        run: python -m pip install --disable-pip-version-check capstone pyelftools
+
+      - name: Prove A22 bool to int-array encoding
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-member-favorite-flag-encoding.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --output reports/member-favorite-flag-encoding-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/member-favorite-flag-encoding-11.6.3.json'))
+          assert d['schema'] == 1
+          assert d['target'].startswith('A:22')
+          assert any('ObscuredBool$$op_Implicit' in row for row in d['slice'])
+          assert ': str w' in d['first_32bit_store_after_conversion']
+          assert d['limits']['runtime_acceptance'] is False
+          assert d['limits']['ui_visible_success'] is False
+          print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Enforce sanitized report boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped favorite flag analysis boundary' >&2
+            exit 1
+          fi
+
+      - name: Upload sanitized proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-member-favorite-flag-encoding
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

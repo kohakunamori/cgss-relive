@@ -1,0 +1,155 @@
+name: Analyze C24 recursive opaque helper semantics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/analyze-opaque-data-recursive-helper-semantics.py
+      - scripts/analyze-opaque-data-helper-semantics.py
+      - scripts/analyze-empty-object-zero-iteration.py
+      - tests/test_opaque_data_recursive_helper_semantics.py
+      - .github/workflows/analyze-opaque-data-recursive-helper-semantics.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      C20_RUN_ID: '33857062146'
+      C20_SHA256: '3805ce14eecb08f613649ca5e95c896611413e2820bfd867db23ceb7434dd554'
+      C21_RUN_ID: '33857300721'
+      C21_SHA256: 'fd80482134a2b5d017eba23a506ec26c01d8ca2038bd1cf3c499aa9b3944f32d'
+      XAPK_SHA256: '609868c5a4cf5ce78ed653be448717e426410b4df03ca9e0356a046afc0d465d'
+      LIB_SHA256: '2d950f3bab72c73adef62a3e312c64e4e42ae0287cb2454cdec008eb9ed699c5'
+      META_SHA256: '2d31901dd94b4b774c1fda7c3a5f409dc8a1cae16078314bd42f832b33c69586'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Install dependencies and run unit tests
+        run: |
+          python -m pip install --disable-pip-version-check capstone pyelftools
+          python -m unittest discover -s tests -p 'test_opaque_data_recursive_helper_semantics.py' -v
+
+      - name: Download frozen C20
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C20_RUN_ID }}
+          name: final-client-c20-opaque-data-first-consumers
+          path: inputs/c20
+      - name: Download frozen C21
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C21_RUN_ID }}
+          name: final-client-c21-opaque-data-helper-semantics
+          path: inputs/c21
+
+      - name: Verify frozen C20 C21
+        shell: bash
+        run: |
+          set -euo pipefail
+          C20=$(find inputs/c20 -type f -name 'c20-opaque-data-first-consumers.json' -print -quit)
+          C21=$(find inputs/c21 -type f -name 'c21-opaque-data-helper-semantics.json' -print -quit)
+          test -n "$C20"; test -n "$C21"
+          echo "${C20_SHA256}  $C20" | sha256sum -c -
+          echo "${C21_SHA256}  $C21" | sha256sum -c -
+          echo "C20=$C20" >> "$GITHUB_ENV"
+          echo "C21=$C21" >> "$GITHUB_ENV"
+
+      - name: Prepare exact final native maps
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xapk work/dumper work/dump reports
+          curl --fail --location --retry 4 --retry-all-errors -o work/final.xapk \
+            'https://d.apkpure.net/b/XAPK/jp.co.bandainamcoent.BNEI0242?version=latest'
+          echo "${XAPK_SHA256}  work/final.xapk" | sha256sum -c -
+          unzip -q work/final.xapk -d work/xapk
+          ARM_APK=''; META_APK=''
+          while IFS= read -r -d '' apk; do
+            if unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libil2cpp.so'; then ARM_APK="$apk"; fi
+            if unzip -Z1 "$apk" | grep -qx 'assets/bin/Data/Managed/Metadata/global-metadata.dat'; then META_APK="$apk"; fi
+          done < <(find work/xapk -type f -name '*.apk' -print0)
+          test -n "$ARM_APK"; test -n "$META_APK"
+          unzip -p "$ARM_APK" lib/arm64-v8a/libil2cpp.so > work/libil2cpp.so
+          unzip -p "$META_APK" assets/bin/Data/Managed/Metadata/global-metadata.dat > work/global-metadata.dat
+          echo "${LIB_SHA256}  work/libil2cpp.so" | sha256sum -c -
+          echo "${META_SHA256}  work/global-metadata.dat" | sha256sum -c -
+          curl --fail --location --retry 4 -o work/il2cppdumper.zip \
+            'https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip'
+          unzip -q work/il2cppdumper.zip -d work/dumper
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('work/dumper/config.json'); d=json.loads(p.read_text())
+          d['RequireAnyKey']=False; d['GenerateScript']=True; d['GenerateDummyDll']=False
+          p.write_text(json.dumps(d,indent=2))
+          PY
+          DLL=$(find work/dumper -type f -name Il2CppDumper.dll -print -quit)
+          dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
+          test -s work/dump/script.json
+
+      - name: Trace recursive helper semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-opaque-data-recursive-helper-semantics.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --c20 "$C20" --c21 "$C21" \
+            --output reports/c24-opaque-data-recursive-helper-semantics.json \
+            | tee reports/c24-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('reports/c24-opaque-data-recursive-helper-semantics.json').read_text())
+          assert d['schema']==1
+          assert d['target_route_count']==6, d['target_route_count']
+          assert d['max_depth']==3
+          assert all(row['empty_value_promotion']=='not-proven-by-c24' for row in d['routes'])
+          assert all(row['untouched_client_acceptance'] is False for row in d['routes'])
+          assert all(row['analysis_truncated'] is False for row in d['routes'])
+          print(json.dumps({
+            'target_route_count':d['target_route_count'],
+            'shape_refinement_counts':d['shape_refinement_counts'],
+            'refined_routes':[
+              {'route':r['route'],'shape':r['recursive_shape_refinement']}
+              for r in d['routes'] if r['recursive_shape_refinement']!='helper-unresolved'
+            ],
+          },indent=2,sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work inputs
+          mkdir -p reports
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw specimen escaped C24 report boundary' >&2
+            exit 1
+          fi
+          find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+
+      - name: Upload C24 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c24-opaque-data-recursive-helper-semantics
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

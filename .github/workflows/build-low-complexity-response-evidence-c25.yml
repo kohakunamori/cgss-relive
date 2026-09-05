@@ -1,0 +1,129 @@
+name: Build C25 low complexity response evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - analysis/server-contracts-11.6.3
+    paths:
+      - scripts/build-low-complexity-response-evidence-c25.py
+      - tests/test_low_complexity_response_evidence_c25.py
+      - .github/workflows/build-low-complexity-response-evidence-c25.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      C22_RUN_ID: '33857701155'
+      C22_SHA256: '4238ef2cb0cb45a93262a1abd8ac44607edf6b993d1e06f4264843ea352d6ab4'
+      C24_RUN_ID: '33858205668'
+      C24_SHA256: '9edfa818d219c22bf38f941e3c68eef006ef95cf0b2811b0bac70e7752ec5fb1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run C25 unit tests
+        run: python -m unittest discover -s tests -p 'test_low_complexity_response_evidence_c25.py' -v
+
+      - name: Download frozen C22
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C22_RUN_ID }}
+          name: final-client-c22-low-complexity-response-evidence
+          path: inputs/c22
+
+      - name: Download frozen C24
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.C24_RUN_ID }}
+          name: final-client-c24-opaque-data-recursive-helper-semantics
+          path: inputs/c24
+
+      - name: Resolve and verify frozen inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          C22=$(find inputs/c22 -type f -name 'c22-low-complexity-response-evidence.json' -print -quit)
+          C24=$(find inputs/c24 -type f -name 'c24-opaque-data-recursive-helper-semantics.json' -print -quit)
+          test -n "$C22"; test -n "$C24"
+          echo "${C22_SHA256}  $C22" | sha256sum -c -
+          echo "${C24_SHA256}  $C24" | sha256sum -c -
+          echo "C22=$C22" >> "$GITHUB_ENV"
+          echo "C24=$C24" >> "$GITHUB_ENV"
+
+      - name: Build C25 catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          python scripts/build-low-complexity-response-evidence-c25.py \
+            --c22 "$C22" --c24 "$C24" \
+            --output reports/c25-low-complexity-response-evidence.json \
+            | tee reports/c25-summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('reports/c25-low-complexity-response-evidence.json').read_text())
+          assert d['schema']==1
+          assert d['generation']=='C25'
+          assert d['route_count']==76
+          assert d['source_c24_route_count']==6
+          assert d['c24_shape_overlay_route_count']==5
+          assert d['effective_shape_counts']=={
+            'countable-collection-ambiguous':2,
+            'multi-field':19,
+            'opaque:json':5,
+            'proven-object':49,
+            'proven-scalar:int':1,
+          }, d['effective_shape_counts']
+          assert d['effective_shape_source_counts']=={
+            'C17-direct-parser-shape':61,
+            'C19c-count-only':2,
+            'C19c-string-key-get_Item-signature':3,
+            'C21-helper-json-operations':5,
+            'C24-recursive-helper-json-operations':5,
+          }, d['effective_shape_source_counts']
+          assert d['empty_value_status_counts']=={'not-proven':76}
+          assert d['parser_local_empty_value_proven_route_count']==0
+          assert d['untouched_client_accepted_route_count']==0
+          assert d['c24_shape_overlay_routes']==[
+            '/film/mv_load',
+            '/film/published_mv_load',
+            '/garden/skill_at_buying_phase',
+            '/lab/skill_at_buying_phase',
+            '/paper/get_exchanged_list',
+          ]
+          print(json.dumps({
+            'effective_shape_counts':d['effective_shape_counts'],
+            'effective_shape_source_counts':d['effective_shape_source_counts'],
+            'c24_shape_overlay_routes':d['c24_shape_overlay_routes'],
+          },indent=2,sort_keys=True))
+          PY
+
+      - name: Enforce sanitized artifact boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf inputs
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name '*.sqlite' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+            echo 'raw or broad contract artifact escaped C25 report boundary' >&2
+            exit 1
+          fi
+          find reports -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS
+
+      - name: Upload C25 catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-client-c25-low-complexity-response-evidence
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
