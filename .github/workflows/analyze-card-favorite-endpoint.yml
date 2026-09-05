@@ -8,6 +8,7 @@ on:
       - '.github/workflows/analyze-card-favorite-endpoint.yml'
       - 'scripts/analyze-card-favorite-endpoint.py'
       - 'scripts/analyze-member-favorite-semantics.py'
+      - 'scripts/analyze-work-favorite-state.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
 
@@ -132,7 +133,27 @@ jobs:
           assert d['schema'] == 1
           names=[row['name'] for row in d['methods']]
           assert any(name.endswith('MemberFavoriteEditTask$$SetParameter') for name in names)
-          assert any(name.endswith('MemberFavoriteEditTask$$Parse') for name in names)
+          parse=next(row for row in d['methods'] if row['name'].endswith('MemberFavoriteEditTask$$Parse'))
+          assert parse['tiny_full_instruction_listing'][-1].endswith('Stage.BaseTask$$Parse')
+          print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Trace WorkFavoriteData change-flag state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-work-favorite-state.py \
+            --dump-cs work/dump/dump.cs \
+            --script-json work/dump/script.json \
+            --lib work/libil2cpp.so \
+            --output reports/work-favorite-data-state-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/work-favorite-data-state-11.6.3.json'))
+          assert d['schema'] == 1
+          names=[row['name'] for row in d['native_methods']]
+          assert any(name.endswith('FavoriteData$$GetUnitChangeFlag') for name in names)
+          assert any(name.endswith('FavoriteData$$GetUnitSerial') for name in names)
           print(json.dumps(d, indent=2, ensure_ascii=False))
           PY
 
