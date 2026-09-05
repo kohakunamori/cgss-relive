@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/analyze-card-favorite-endpoint.yml'
       - 'scripts/analyze-card-favorite-endpoint.py'
+      - 'scripts/analyze-member-favorite-semantics.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
 
@@ -77,7 +78,7 @@ jobs:
           p=Path('work/dumper/config.json')
           d=json.loads(p.read_text())
           d['RequireAnyKey']=False
-          d['GenerateScript']=False
+          d['GenerateScript']=True
           d['GenerateDummyDll']=False
           p.write_text(json.dumps(d, indent=2))
           PY
@@ -85,6 +86,8 @@ jobs:
           test -n "$DLL"
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
+          test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
 
       - name: Discover exact favorite candidates and task metadata
         shell: bash
@@ -98,7 +101,38 @@ jobs:
           import json
           d=json.load(open('reports/card-favorite-endpoint-11.6.3.json'))
           assert d['schema'] == 1
-          assert d['endpoint_count'] > 0 or d['candidate_type_count'] > 0
+          assert any(row['group'] == 'A' and row['key'] == 22 and row['name'] == 'MemberFavoriteEdit' and row['path'] == 'favorite/edit' for row in d['endpoints'])
+          task=next(row for row in d['types'] if row['type'] == 'MemberFavoriteEditTask')
+          param=next(row for row in d['types'] if row['type'] == 'MemberFavoriteEditTaskParam')
+          assert any('SetParameter()' in method['signature'] for method in task['methods'])
+          assert any('serial_ids' in field for field in param['selected_fields'])
+          assert any('change_flags' in field for field in param['selected_fields'])
+          print(json.dumps({
+              'endpoint': next(row for row in d['endpoints'] if row['key'] == 22),
+              'task': task,
+              'param': param,
+          }, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Install native analysis dependencies
+        run: python -m pip install --disable-pip-version-check capstone pyelftools
+
+      - name: Trace exact MemberFavoriteEdit semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-member-favorite-semantics.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --output reports/member-favorite-semantics-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/member-favorite-semantics-11.6.3.json'))
+          assert d['schema'] == 1
+          names=[row['name'] for row in d['methods']]
+          assert any(name.endswith('MemberFavoriteEditTask$$SetParameter') for name in names)
+          assert any(name.endswith('MemberFavoriteEditTask$$Parse') for name in names)
           print(json.dumps(d, indent=2, ensure_ascii=False))
           PY
 
