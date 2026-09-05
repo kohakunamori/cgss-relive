@@ -1,24 +1,46 @@
-"""Persistent client-facing numeric identities for compatibility adapters.
+"""Persistent client-facing identities and compatibility-only mutable unit state.
 
 The preservation domain deliberately uses opaque semantic IDs (for example
-``card:1``). Final CGSS DTOs, however, expose positive numeric owned-card serials
-and unit IDs. This store keeps that mapping stable across server restarts without
-claiming that the client numeric identity is the domain primary-key semantics.
+``card:1``). Final CGSS DTOs expose positive numeric owned-card serials and unit
+IDs, plus client-facing unit costume/selection state that is useful for round-trip
+compatibility but is not yet part of the semantic domain model.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
-from typing import Iterator
+from typing import Iterator, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class UnitCompatibilitySlot:
+    """One final-client unit slot's three costume compatibility identifiers."""
+
+    position: int
+    dress_type: int
+    dress_2d_type: int
+    dress_storage_id: int
+
+    def __post_init__(self) -> None:
+        if self.position < 0:
+            raise ValueError("unit compatibility slot position must be non-negative")
+        for name, value in (
+            ("dress_type", self.dress_type),
+            ("dress_2d_type", self.dress_2d_type),
+            ("dress_storage_id", self.dress_storage_id),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
 
 
 class SQLiteCompatibilityIdentityStore:
-    """Stable per-player mappings from domain IDs to CGSS numeric identifiers."""
+    """Stable mappings plus client-only UnitEdit round-trip state."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
@@ -40,7 +62,9 @@ class SQLiteCompatibilityIdentityStore:
         self.close()
 
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
+    def transaction(self) -> Iterator[None]:
+        """Group compatibility-store writes into one SQLite transaction."""
+
         if self._conn.in_transaction:
             yield
             return
@@ -60,7 +84,7 @@ class SQLiteCompatibilityIdentityStore:
                 f"compatibility identity schema {version} is newer than supported {SCHEMA_VERSION}"
             )
         if version == 0:
-            with self._transaction():
+            with self.transaction():
                 self._conn.execute(
                     """
                     CREATE TABLE card_identity_bindings (
@@ -84,6 +108,31 @@ class SQLiteCompatibilityIdentityStore:
                     """
                 )
                 self._conn.execute("PRAGMA user_version = 1")
+            version = 1
+        if version == 1:
+            with self.transaction():
+                self._conn.execute(
+                    """
+                    CREATE TABLE unit_compatibility_slots (
+                        player_id TEXT NOT NULL,
+                        domain_unit_id TEXT NOT NULL,
+                        position INTEGER NOT NULL CHECK (position >= 0),
+                        dress_type INTEGER NOT NULL CHECK (dress_type >= 0),
+                        dress_2d_type INTEGER NOT NULL CHECK (dress_2d_type >= 0),
+                        dress_storage_id INTEGER NOT NULL CHECK (dress_storage_id >= 0),
+                        PRIMARY KEY (player_id, domain_unit_id, position)
+                    )
+                    """
+                )
+                self._conn.execute(
+                    """
+                    CREATE TABLE player_unit_preferences (
+                        player_id TEXT PRIMARY KEY,
+                        main_domain_unit_id TEXT
+                    )
+                    """
+                )
+                self._conn.execute("PRAGMA user_version = 2")
 
     @staticmethod
     def _require_identity(player_id: str, domain_id: str) -> None:
@@ -109,7 +158,7 @@ class SQLiteCompatibilityIdentityStore:
         domain_id: str,
     ) -> int:
         self._require_identity(player_id, domain_id)
-        with self._transaction():
+        with self.transaction():
             row = self._conn.execute(
                 f"SELECT {numeric_column} FROM {table} WHERE player_id = ? AND {domain_column} = ?",
                 (player_id, domain_id),
@@ -156,8 +205,6 @@ class SQLiteCompatibilityIdentityStore:
         return None if row is None else int(row["serial_id"])
 
     def get_user_card_id(self, player_id: str, serial_id: int) -> str | None:
-        """Resolve a client-facing owned-card serial back to the domain identity."""
-
         self._require_numeric_identity(player_id, serial_id)
         row = self._conn.execute(
             "SELECT user_card_id FROM card_identity_bindings WHERE player_id = ? AND serial_id = ?",
@@ -174,11 +221,98 @@ class SQLiteCompatibilityIdentityStore:
         return None if row is None else int(row["client_unit_id"])
 
     def get_domain_unit_id(self, player_id: str, client_unit_id: int) -> str | None:
-        """Resolve a client-facing numeric unit ID back to the domain identity."""
-
         self._require_numeric_identity(player_id, client_unit_id)
         row = self._conn.execute(
             "SELECT domain_unit_id FROM unit_identity_bindings WHERE player_id = ? AND client_unit_id = ?",
             (player_id, client_unit_id),
         ).fetchone()
         return None if row is None else str(row["domain_unit_id"])
+
+    def replace_unit_compatibility_slots(
+        self,
+        player_id: str,
+        domain_unit_id: str,
+        slots: Sequence[UnitCompatibilitySlot],
+    ) -> None:
+        """Replace all saved costume compatibility slots for one domain unit."""
+
+        self._require_identity(player_id, domain_unit_id)
+        materialized = tuple(slots)
+        positions = [slot.position for slot in materialized]
+        if len(set(positions)) != len(positions):
+            raise ValueError("duplicate unit compatibility slot position")
+        with self.transaction():
+            self._conn.execute(
+                "DELETE FROM unit_compatibility_slots WHERE player_id = ? AND domain_unit_id = ?",
+                (player_id, domain_unit_id),
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO unit_compatibility_slots(
+                    player_id, domain_unit_id, position,
+                    dress_type, dress_2d_type, dress_storage_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        player_id,
+                        domain_unit_id,
+                        slot.position,
+                        slot.dress_type,
+                        slot.dress_2d_type,
+                        slot.dress_storage_id,
+                    )
+                    for slot in materialized
+                ],
+            )
+
+    def get_unit_compatibility_slots(
+        self,
+        player_id: str,
+        domain_unit_id: str,
+    ) -> tuple[UnitCompatibilitySlot, ...]:
+        self._require_identity(player_id, domain_unit_id)
+        rows = self._conn.execute(
+            """
+            SELECT position, dress_type, dress_2d_type, dress_storage_id
+            FROM unit_compatibility_slots
+            WHERE player_id = ? AND domain_unit_id = ?
+            ORDER BY position
+            """,
+            (player_id, domain_unit_id),
+        ).fetchall()
+        return tuple(
+            UnitCompatibilitySlot(
+                int(row["position"]),
+                int(row["dress_type"]),
+                int(row["dress_2d_type"]),
+                int(row["dress_storage_id"]),
+            )
+            for row in rows
+        )
+
+    def set_main_unit(self, player_id: str, domain_unit_id: str | None) -> None:
+        if not player_id:
+            raise ValueError("player_id must be non-empty")
+        if domain_unit_id is not None and not domain_unit_id:
+            raise ValueError("main domain unit identity must be non-empty when present")
+        with self.transaction():
+            self._conn.execute(
+                """
+                INSERT INTO player_unit_preferences(player_id, main_domain_unit_id)
+                VALUES (?, ?)
+                ON CONFLICT(player_id) DO UPDATE SET main_domain_unit_id = excluded.main_domain_unit_id
+                """,
+                (player_id, domain_unit_id),
+            )
+
+    def get_main_unit(self, player_id: str) -> str | None:
+        if not player_id:
+            raise ValueError("player_id must be non-empty")
+        row = self._conn.execute(
+            "SELECT main_domain_unit_id FROM player_unit_preferences WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+        if row is None or row["main_domain_unit_id"] is None:
+            return None
+        return str(row["main_domain_unit_id"])
