@@ -85,7 +85,6 @@ jobs:
           test -n "$DLL"
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
-          test -s work/dump/script.json
 
       - name: Discover exact UnitEdit endpoint and task metadata
         shell: bash
@@ -94,14 +93,14 @@ jobs:
           python scripts/analyze-unit-edit-endpoint.py \
             --api-map work/final-map.json \
             --dump-cs work/dump/dump.cs \
-            --script-json work/dump/script.json \
             --output reports/unit-edit-endpoint-11.6.3.json
           python - <<'PY'
           import json
           d=json.load(open('reports/unit-edit-endpoint-11.6.3.json'))
-          assert d['schema'] == 2
+          assert d['schema'] == 3
           assert d['endpoint_count'] >= 1
-          assert d['type_count'] >= 1
+          assert d['candidate_type_count'] >= 1
+          assert d['detailed_type_count'] >= 1
           print(json.dumps(d, indent=2, ensure_ascii=False))
           PY
 
