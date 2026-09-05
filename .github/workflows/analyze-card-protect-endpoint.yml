@@ -8,6 +8,7 @@ on:
       - '.github/workflows/analyze-card-protect-endpoint.yml'
       - 'scripts/analyze-card-protect-endpoint.py'
       - 'scripts/analyze-member-protect-flow.py'
+      - 'scripts/analyze-member-protect-response-semantics.py'
       - 'contracts/api-map-11.6.3.json.gz.b64'
       - 'scripts/materialize-api-map.py'
       - 'scripts/validate-api-map.py'
@@ -88,6 +89,10 @@ jobs:
           dotnet "$DLL" "$(pwd)/work/libil2cpp.so" "$(pwd)/work/global-metadata.dat" "$(pwd)/work/dump"
           test -s work/dump/dump.cs
           test -s work/dump/script.json
+          test -s work/dump/stringliteral.json
+
+      - name: Install native analysis dependencies
+        run: python -m pip install --disable-pip-version-check capstone pyelftools
 
       - name: Discover protection endpoint and task metadata
         shell: bash
@@ -109,7 +114,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check pyelftools
           python scripts/analyze-member-protect-flow.py \
             --script-json work/dump/script.json \
             --lib work/libil2cpp.so \
@@ -127,13 +131,34 @@ jobs:
           }, indent=2, ensure_ascii=False))
           PY
 
+      - name: Recover MemberProtect response semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/analyze-member-protect-response-semantics.py \
+            --lib work/libil2cpp.so \
+            --script-json work/dump/script.json \
+            --stringliteral-json work/dump/stringliteral.json \
+            --output reports/member-protect-response-semantics-11.6.3.json
+          python - <<'PY'
+          import json
+          d=json.load(open('reports/member-protect-response-semantics-11.6.3.json'))
+          assert d['schema'] == 1
+          assert d['target_method'] == 'Stage.MemberProtectCardTask$$Parse'
+          print(json.dumps({
+              'target_method': d['target_method'],
+              'referenced_string_literals': d['referenced_string_literals'],
+              'important_call_contexts': d['important_call_contexts'],
+          }, indent=2, ensure_ascii=False))
+          PY
+
       - name: Enforce sanitized report boundary
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           rm -rf work
-          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'global-metadata.dat' \) | grep -q .; then
+          if find reports -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.so' -o -name 'dump.cs' -o -name 'script.json' -o -name 'stringliteral.json' -o -name 'global-metadata.dat' \) | grep -q .; then
             echo 'raw specimen escaped card-protect analysis boundary' >&2
             exit 1
           fi
