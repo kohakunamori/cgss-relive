@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import json
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from server.resource_server import (
     RangeNotSatisfiable,
     create_server,
+    fetch_verified_missing_object,
     object_path,
     parse_single_range,
     resolve_resource_request,
@@ -195,6 +198,76 @@ class ResourcePathTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(RangeNotSatisfiable):
                     parse_single_range(value, 10)
+
+
+class ResourceFetchThroughTests(unittest.TestCase):
+    def test_fetch_verified_missing_object_writes_only_exact_md5(self) -> None:
+        payload = b"verified-resource-body"
+        digest = hashlib.md5(payload).hexdigest()
+        route = f"/dl/resources/AssetBundles/{digest[:2]}/{digest}"
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "objects" / digest[:2] / digest
+            response = io.BytesIO(payload)
+            response.status = 200
+            with mock.patch("server.resource_server.urllib.request.urlopen", return_value=response) as urlopen:
+                self.assertTrue(fetch_verified_missing_object(destination, digest, route))
+            self.assertEqual(destination.read_bytes(), payload)
+            request = urlopen.call_args.args[0]
+            self.assertEqual(
+                request.full_url,
+                f"https://asset-starlight-stage.akamaized.net/dl/resources/AssetBundles/{digest[:2]}/{digest}",
+            )
+
+    def test_fetch_verified_missing_object_rejects_hash_mismatch(self) -> None:
+        payload = b"wrong-resource-body"
+        digest = hashlib.md5(b"expected-resource-body").hexdigest()
+        route = f"/dl/resources/Generic/{digest[:2]}/{digest}"
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "objects" / digest[:2] / digest
+            response = io.BytesIO(payload)
+            response.status = 200
+            with mock.patch("server.resource_server.urllib.request.urlopen", return_value=response):
+                self.assertFalse(fetch_verified_missing_object(destination, digest, route))
+            self.assertFalse(destination.exists())
+
+    def test_missing_fetcher_can_materialize_then_serve_object(self) -> None:
+        payload = b"fetch-through-payload"
+        digest = hashlib.md5(payload).hexdigest()
+        route = f"/dl/resources/Generic/{digest[:2]}/{digest}"
+        calls: list[tuple[Path, str, str]] = []
+
+        def fetcher(destination: Path, requested_digest: str, request_path: str) -> bool:
+            calls.append((destination, requested_digest, request_path))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = create_server(
+                "127.0.0.1",
+                0,
+                root=root,
+                missing_fetcher=fetcher,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host, port = server.server_address[:2]
+            try:
+                conn = http.client.HTTPConnection(host, port, timeout=5)
+                conn.request("GET", route)
+                response = conn.getresponse()
+                body = response.read()
+                conn.close()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(body, payload)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1:], (digest, route))
+                self.assertEqual(calls[0][0], object_path(root, digest))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
 
 class ResourceHTTPServerTests(unittest.TestCase):

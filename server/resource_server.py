@@ -28,12 +28,17 @@ issue/debug transcript.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import re
 import sqlite3
 import ssl
+import tempfile
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterable, Mapping, Type
+from typing import Callable, Iterable, Mapping, Type
 from urllib.parse import unquote, urlsplit
 
 from .safe_events import SafeEventLog, build_event
@@ -48,6 +53,10 @@ _RESOURCE_PATH_RE = re.compile(
     r"(?P<category>AssetBundles|Sound|Movie|Generic)/(?P<tail>.+)$"
 )
 _MANIFEST_PATH_RE = re.compile(r"^/dl/(?P<version>[0-9]+)/manifests/(?P<name>[^/]+)$")
+
+CDN_BASE = "https://asset-starlight-stage.akamaized.net"
+USER_AGENT = "UnityPlayer/2022.3.56f1 (UnityWebRequest/1.0, libcurl/8.10.1-DEV)"
+UNITY_VERSION = "2022.3.56f1"
 
 
 class RangeNotSatisfiable(ValueError):
@@ -183,6 +192,59 @@ def resolve_resource_request(
     return object_path(root, digest), digest
 
 
+def _canonical_cdn_url(request_path: str, digest: str) -> str | None:
+    match = _RESOURCE_PATH_RE.fullmatch(urlsplit(request_path).path)
+    if match is None or not _HEX32_RE.fullmatch(digest):
+        return None
+    category = match.group("category")
+    digest = digest.lower()
+    return f"{CDN_BASE}/dl/resources/{category}/{digest[:2]}/{digest}"
+
+
+def fetch_verified_missing_object(
+    destination: Path,
+    digest: str,
+    request_path: str,
+    *,
+    timeout: float = 60.0,
+) -> bool:
+    """Fetch one missing archive object and accept it only after exact MD5 verification."""
+    url = _canonical_cdn_url(request_path, digest)
+    if url is None:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "X-Unity-Version": UNITY_VERSION},
+        method="GET",
+    )
+    temp_path: Path | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=digest + ".", suffix=".part", dir=destination.parent)
+        os.close(fd)
+        temp_path = Path(temp_name)
+        actual = hashlib.md5()
+        with urllib.request.urlopen(request, timeout=timeout) as response, temp_path.open("wb") as output:
+            if getattr(response, "status", 200) != 200:
+                return False
+            while True:
+                chunk = response.read(_COPY_CHUNK_SIZE)
+                if not chunk:
+                    break
+                output.write(chunk)
+                actual.update(chunk)
+        if actual.hexdigest() != digest.lower():
+            return False
+        os.replace(temp_path, destination)
+        temp_path = None
+        return True
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+        return False
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
     """Parse a single RFC 7233-style ``bytes`` range."""
     if value is None:
@@ -221,11 +283,13 @@ def make_handler(
     version: str = "10133800",
     manifest_index: Mapping[str, str] | None = None,
     event_log: SafeEventLog | None = None,
+    missing_fetcher: Callable[[Path, str, str], bool] | None = None,
 ) -> Type[BaseHTTPRequestHandler]:
     archive_root = Path(root)
     frozen_version = str(version)
     name_index = dict(manifest_index or {})
     sanitized_event_log = event_log
+    fetch_missing = missing_fetcher
 
     class CGSSResourceHandler(BaseHTTPRequestHandler):
         server_version = "cgss-relive-resource/0.5"
@@ -270,6 +334,8 @@ def make_handler(
                 self._send_plain(404, b"not found\n")
                 return
             path, digest = resolved
+            if not path.is_file() and digest is not None and fetch_missing is not None:
+                fetch_missing(path, digest, self.path)
             if not path.is_file():
                 self._send_plain(404, b"not found\n")
                 return
@@ -344,6 +410,7 @@ def create_server(
     version: str = "10133800",
     manifest_index: Mapping[str, str] | None = None,
     event_log: SafeEventLog | None = None,
+    missing_fetcher: Callable[[Path, str, str], bool] | None = None,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
         (host, port),
@@ -352,6 +419,7 @@ def create_server(
             version=version,
             manifest_index=manifest_index,
             event_log=event_log,
+            missing_fetcher=missing_fetcher,
         ),
     )
     server.daemon_threads = True
@@ -363,6 +431,11 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8081)
     parser.add_argument("--version", default="10133800")
+    parser.add_argument(
+        "--fetch-missing",
+        action="store_true",
+        help="runtime bootstrap only: fetch missing manifest-resolved objects from the canonical CDN and MD5-verify before caching",
+    )
     parser.add_argument(
         "--root",
         type=Path,
@@ -400,6 +473,7 @@ def main() -> int:
         version=args.version,
         manifest_index=manifest_index,
         event_log=event_log,
+        missing_fetcher=fetch_verified_missing_object if args.fetch_missing else None,
     )
     scheme = "http"
     if args.cert and args.key:
@@ -416,6 +490,8 @@ def main() -> int:
         print(f"filename index: {args.manifest_db}")
     if args.event_log:
         print(f"sanitized event log: {args.event_log}")
+    if args.fetch_missing:
+        print("missing-object fetch-through: enabled (MD5 verified)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
